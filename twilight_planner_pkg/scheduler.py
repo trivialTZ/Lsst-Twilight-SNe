@@ -25,6 +25,30 @@ def plan_twilight_range_with_caps(
     cfg: PlannerConfig,
     verbose: bool = True,
 ):
+    """Generate a twilight observing plan over a date range with per-window time caps.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the CSV file listing supernovae.
+    outdir : str
+        Directory where output CSVs are written.
+    start_date : str
+        Inclusive start date in ``YYYY-MM-DD`` (UTC).
+    end_date : str
+        Inclusive end date in ``YYYY-MM-DD`` (UTC).
+    cfg : PlannerConfig
+        Configuration with site, filter, and timing parameters.
+    verbose : bool, optional
+        If ``True``, print progress messages.
+
+    Returns
+    -------
+    pernight_df : pandas.DataFrame
+        Planned observations for each supernova.
+    nights_df : pandas.DataFrame
+        Summary of time usage for each night and window.
+    """
     Path(outdir).mkdir(parents=True, exist_ok=True)
     raw = pd.read_csv(csv_path)
     df = standardize_columns(raw, cfg)
