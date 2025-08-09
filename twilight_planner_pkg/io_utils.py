@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Iterable
 import numpy as np
 import pandas as pd
 import astropy.units as u
@@ -9,7 +9,19 @@ from astropy.time import Time
 from .config import PlannerConfig
 
 def _normalize_col_names(names):
-    """Lower-case, alnum-only canonicalization to ease fuzzy matching."""
+    """Canonicalize column names for fuzzy matching.
+
+    Parameters
+    ----------
+    names : Iterable[str]
+        Raw column names from the input table.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        Sequence of (original, normalized) pairs where the normalized
+        string is lower-case and alphanumeric only.
+    """
     out = []
     for n in names:
         key = "".join(ch for ch in str(n).lower() if ch.isalnum())
@@ -31,6 +43,20 @@ _NAME_SYNONYMS = ["name", "objname", "objectname", "atlasname", "tnsname", "id",
 _TYPE_SYNONYMS = ["type", "sntype", "class", "tnsclass", "subtype"]
 
 def _fuzzy_pick(df: pd.DataFrame, synonyms: List[str]) -> Optional[str]:
+    """Select a column whose normalized name matches any synonym.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table to search.
+    synonyms : list[str]
+        Candidate names to match against.
+
+    Returns
+    -------
+    str or None
+        The first matching column name, or ``None`` if no match is found.
+    """
     canon = dict(_normalize_col_names(df.columns))
     for syn in synonyms:
         syn_key = "".join(ch for ch in syn.lower() if ch.isalnum())
@@ -39,8 +65,22 @@ def _fuzzy_pick(df: pd.DataFrame, synonyms: List[str]) -> Optional[str]:
                 return orig
     return None
 
-def resolve_columns(df: pd.DataFrame, cfg: PlannerConfig) -> Tuple[str,str,Optional[str],str,Optional[str]]:
-    """Return (ra_col, dec_col, disc_col, name_col, type_col). Auto-detect if None or missing."""
+def resolve_columns(df: pd.DataFrame, cfg: PlannerConfig) -> Tuple[str, str, Optional[str], str, Optional[str]]:
+    """Determine key column names in an input catalog.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Catalog of transients.
+    cfg : PlannerConfig
+        Configuration optionally providing explicit column names.
+
+    Returns
+    -------
+    tuple
+        ``(ra_col, dec_col, disc_col, name_col, type_col)``.  
+        Raises ``KeyError`` if required columns are missing.
+    """
     ra_col  = cfg.ra_col  if (cfg.ra_col  in df.columns) else _fuzzy_pick(df, _RA_SYNONYMS)
     dec_col = cfg.dec_col if (cfg.dec_col in df.columns) else _fuzzy_pick(df, _DEC_SYNONYMS)
     disc_col = cfg.disc_col if (cfg.disc_col in df.columns) else _fuzzy_pick(df, _DISC_DATE_SYNONYMS)
@@ -59,7 +99,18 @@ def resolve_columns(df: pd.DataFrame, cfg: PlannerConfig) -> Tuple[str,str,Optio
     return ra_col, dec_col, disc_col, name_col, type_col
 
 def _parse_ra_value(val) -> float:
-    """Convert a single RA value to degrees (supports deg, hours, rad, or sexagesimal string)."""
+    """Convert a single right ascension value to degrees.
+
+    Parameters
+    ----------
+    val : object
+        RA expressed as degrees, hours, radians, or a sexagesimal string.
+
+    Returns
+    -------
+    float
+        Right ascension in degrees, or ``numpy.nan`` if parsing fails.
+    """
     if pd.isna(val):
         return np.nan
     if isinstance(val, (float, int, np.floating, np.integer)):
@@ -78,7 +129,18 @@ def _parse_ra_value(val) -> float:
         return np.nan
 
 def _parse_dec_value(val) -> float:
-    """Convert a single Dec value to degrees (supports deg, rad, or sexagesimal string)."""
+    """Convert a single declination value to degrees.
+
+    Parameters
+    ----------
+    val : object
+        Declination expressed as degrees, radians, or a sexagesimal string.
+
+    Returns
+    -------
+    float
+        Declination in degrees, or ``numpy.nan`` if parsing fails.
+    """
     if pd.isna(val):
         return np.nan
     if isinstance(val, (float, int, np.floating, np.integer)):
@@ -93,12 +155,38 @@ def _parse_dec_value(val) -> float:
         return np.nan
 
 def quick_unit_report(df: pd.DataFrame, ra_col: str, dec_col: str) -> None:
+    """Print the numeric ranges of the RA and Dec columns.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Table containing coordinate columns.
+    ra_col : str
+        Name of the right ascension column.
+    dec_col : str
+        Name of the declination column.
+    """
     ra = pd.to_numeric(df[ra_col], errors="coerce")
     dec = pd.to_numeric(df[dec_col], errors="coerce")
     print(f"RA raw (numeric) range:  min={np.nanmin(ra):.6f}, max={np.nanmax(ra):.6f}")
     print(f"Dec raw (numeric) range: min={np.nanmin(dec):.6f}, max={np.nanmax(dec):.6f}")
 
 def _infer_units(ra_num: pd.Series, dec_num: pd.Series):
+    """Guess the units of raw RA and Dec columns.
+
+    Parameters
+    ----------
+    ra_num : pandas.Series
+        Numeric right ascension values.
+    dec_num : pandas.Series
+        Numeric declination values.
+
+    Returns
+    -------
+    tuple
+        ``(ra_unit, dec_unit, notes)`` where units are ``'deg'``, ``'hour'``,
+        ``'rad'``, or ``'unknown'`` and ``notes`` is a list of warnings.
+    """
     notes = []
     ra_unit = "unknown"
     if ra_num.notna().any():
@@ -134,6 +222,21 @@ def _infer_units(ra_num: pd.Series, dec_num: pd.Series):
     return ra_unit, dec_unit, notes
 
 def unit_report_from_df(df: pd.DataFrame, cfg: PlannerConfig) -> dict:
+    """Infer coordinate units and report column choices.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input catalog.
+    cfg : PlannerConfig
+        Configuration with optional column overrides.
+
+    Returns
+    -------
+    dict
+        Summary including chosen columns, min/max values,
+        inferred units, and notes.
+    """
     ra_col, dec_col, disc_col, name_col, type_col = resolve_columns(df, cfg)
     ra_num = pd.to_numeric(df[ra_col], errors="coerce")
     dec_num = pd.to_numeric(df[dec_col], errors="coerce")
@@ -158,6 +261,22 @@ def unit_report_from_df(df: pd.DataFrame, cfg: PlannerConfig) -> dict:
     }
 
 def normalize_ra_dec_to_degrees(df: pd.DataFrame, ra_col: str, dec_col: str) -> pd.DataFrame:
+    """Normalize RA/Dec columns to degrees.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table.
+    ra_col : str
+        Column containing right ascension.
+    dec_col : str
+        Column containing declination.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Copy of ``df`` with ``'RA_deg'`` and ``'Dec_deg'`` columns in degrees.
+    """
     out = df.copy()
     ra_num  = pd.to_numeric(out[ra_col], errors="coerce")
     dec_num = pd.to_numeric(out[dec_col], errors="coerce")
@@ -198,6 +317,18 @@ def normalize_ra_dec_to_degrees(df: pd.DataFrame, ra_col: str, dec_col: str) -> 
     return out
 
 def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
+    """Parse discovery date values into timezone-aware datetimes.
+
+    Parameters
+    ----------
+    series : pandas.Series
+        Raw discovery timestamps or MJDs.
+
+    Returns
+    -------
+    pandas.Series
+        Series of UTC datetimes (``datetime64[ns, UTC]``).
+    """
     numeric = pd.to_numeric(series, errors="coerce")
     if numeric.notna().any():
         mask_mjd = (numeric >= 30000) & (numeric <= 90000)
@@ -215,6 +346,21 @@ def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
     return dt
 
 def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
+    """Standardize column names and units for planning.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input supernova catalog.
+    cfg : PlannerConfig
+        Configuration describing expected columns and units.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Normalized table with RA/Dec in degrees and helper columns
+        (``'Name'``, ``'SN_type_raw'``, ``'discovery_datetime'``).
+    """
     ra_col, dec_col, disc_col, name_col, type_col = resolve_columns(df, cfg)
     try:
         quick_unit_report(df, ra_col, dec_col)

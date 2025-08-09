@@ -13,12 +13,12 @@ from .config import PlannerConfig
 from .scheduler import plan_twilight_range_with_caps
 
 def build_parser():
-    """Build the command-line argument parser.
+    """Construct the command-line argument parser.
 
     Returns
     -------
     argparse.ArgumentParser
-        The configured argument parser.
+        Parser configured with all planner options.
     """
     p = argparse.ArgumentParser(description="LSST Twilight Planner (modular)")
     p.add_argument("--csv", required=True, help="Path to input CSV with SN list")
@@ -42,17 +42,17 @@ def build_parser():
     return p
 
 def parse_exp_map(s: str):
-    """Parse a string into a filter-to-exposure time map.
+    """Convert a comma-separated exposure mapping into a dictionary.
 
     Parameters
     ----------
     s : str
-        A comma-separated string of key:value pairs, e.g., "g:5,r:10".
+        Comma-separated list of ``filter:time`` pairs (e.g., ``"g:5,r:10"``).
 
     Returns
     -------
     dict[str, float]
-        A dictionary mapping filter names to exposure times in seconds.
+        Mapping from filter name to exposure time in seconds.
     """
     m = {}
     if s.strip():
@@ -62,9 +62,10 @@ def parse_exp_map(s: str):
     return m
 
 def main():
-    """Main entry point for the command-line interface.
+    """Run the command-line planner.
 
-    Parses arguments, builds the configuration, and runs the planner.
+    Parses arguments, builds a :class:`PlannerConfig`, and writes
+    schedule files to the output directory.
     """
     args = build_parser().parse_args()
     exp_map = parse_exp_map(args.exp)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple
+from typing import List, Tuple, Sequence
 import numpy as np
 import astropy.units as u
 import warnings
@@ -29,7 +29,20 @@ warnings.filterwarnings("ignore",
 from .config import PlannerConfig
 
 def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple[datetime, datetime]]:
-    """Return list of (start_utc, end_utc) for periods when -18° < SunAlt < 0° around a given date."""
+    """Compute astronomical twilight windows for a given date and location.
+
+    Parameters
+    ----------
+    date_utc : datetime
+        Reference date in UTC.
+    loc : astropy.coordinates.EarthLocation
+        Observatory location.
+
+    Returns
+    -------
+    list[tuple[datetime, datetime]]
+        Sorted list of ``(start, end)`` UTC times where ``-18° <`` Sun altitude ``< 0°``.
+    """
     start = date_utc.replace(tzinfo=timezone.utc) - timedelta(hours=12)
     times = Time([start + timedelta(minutes=i) for i in range(48*60)])
     altaz = AltAz(obstime=times, location=loc)
@@ -56,12 +69,44 @@ def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple
     return windows
 
 def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
+    """Compute on-sky separation between two coordinates.
+
+    Parameters
+    ----------
+    ra1, dec1, ra2, dec2 : float
+        Coordinates in degrees.
+
+    Returns
+    -------
+    float
+        Great-circle separation in degrees.
+    """
     c1 = SkyCoord(ra1*u.deg, dec1*u.deg)
     c2 = SkyCoord(ra2*u.deg, dec2*u.deg)
     return c1.separation(c2).deg
 
 def slew_time_seconds(sep_deg: float, *, small_deg: float, small_time: float,
                       rate_deg_per_s: float, settle_s: float) -> float:
+    """Estimate telescope slew time including settle time.
+
+    Parameters
+    ----------
+    sep_deg : float
+        Angular distance between targets in degrees.
+    small_deg : float
+        Distance below which a fixed small slew time is used.
+    small_time : float
+        Time in seconds for slews ``<= small_deg``.
+    rate_deg_per_s : float
+        Slew rate for larger moves.
+    settle_s : float
+        Additional settling overhead in seconds.
+
+    Returns
+    -------
+    float
+        Total slew time in seconds.
+    """
     if sep_deg <= 0:
         return 0.0
     if sep_deg <= small_deg:
@@ -71,6 +116,22 @@ def slew_time_seconds(sep_deg: float, *, small_deg: float, small_time: float,
     return t + settle_s
 
 def per_sn_time_seconds(filters, sep_deg: float, cfg: PlannerConfig):
+    """Compute total time budget for observing one supernova.
+
+    Parameters
+    ----------
+    filters : Sequence[str]
+        Filters to use for the target.
+    sep_deg : float
+        Slew distance from the previous target in degrees.
+    cfg : PlannerConfig
+        Configuration with exposure and overhead settings.
+
+    Returns
+    -------
+    tuple
+        ``(total_s, slew_s, exposure_s, readout_s, filter_changes_s)`` in seconds.
+    """
     slew = slew_time_seconds(
         sep_deg,
         small_deg=cfg.slew_small_deg,
@@ -85,6 +146,25 @@ def per_sn_time_seconds(filters, sep_deg: float, cfg: PlannerConfig):
     return total, slew, exptime, readout, fchanges
 
 def choose_filters_with_cap(filters, sep_deg: float, cap_s: float, cfg: PlannerConfig):
+    """Select a subset of filters whose total time fits within a cap.
+
+    Parameters
+    ----------
+    filters : Sequence[str]
+        Candidate filters in priority order.
+    sep_deg : float
+        Slew distance from the previous target in degrees.
+    cap_s : float
+        Maximum allowed time in seconds.
+    cfg : PlannerConfig
+        Timing configuration.
+
+    Returns
+    -------
+    tuple
+        ``(used_filters, timing)`` where ``timing`` matches
+        :func:`per_sn_time_seconds` keys.
+    """
     used = []
     _slew = slew_time_seconds(
         sep_deg,
@@ -109,6 +189,20 @@ def choose_filters_with_cap(filters, sep_deg: float, cap_s: float, cfg: PlannerC
     return used, {"total_s": total, "slew_s": slew, "exposure_s": exptime, "readout_s": readout, "filter_changes_s": fchanges}
 
 def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
+    """Estimate the number of days a supernova remains observable.
+
+    Parameters
+    ----------
+    type_str : str
+        Text description of the SN type.
+    cfg : PlannerConfig
+        Configuration mapping types to typical lifetimes.
+
+    Returns
+    -------
+    int
+        Observation window in days, scaled by ``1.2`` for safety.
+    """
     import math
     if not isinstance(type_str, str) or not type_str.strip():
         return int(math.ceil(1.2 * cfg.default_typical_days))
@@ -119,6 +213,29 @@ def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
     return int(math.ceil(1.2 * cfg.default_typical_days))
 
 def _best_time_with_moon(sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg):
+    """Find the best time within a window that meets altitude and moon constraints.
+
+    Parameters
+    ----------
+    sc : astropy.coordinates.SkyCoord
+        Target coordinates.
+    window : tuple[datetime, datetime]
+        Candidate twilight window.
+    loc : astropy.coordinates.EarthLocation
+        Observatory location.
+    step_min : int
+        Sampling step size in minutes.
+    min_alt_deg : float
+        Minimum altitude requirement in degrees.
+    min_moon_sep_deg : float
+        Minimum separation from the Moon in degrees.
+
+    Returns
+    -------
+    tuple
+        ``(best_alt_deg, best_time_utc)`` where ``best_time_utc`` is a
+        ``datetime`` or ``None`` if no suitable time exists.
+    """
     t0, t1 = window
     if t1 <= t0:
         return -np.inf, None
