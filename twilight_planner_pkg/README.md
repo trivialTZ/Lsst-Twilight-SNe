@@ -127,16 +127,19 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 * **Night summary** – CSV and DataFrame with counts of candidates vs. planned
   targets and cumulative time per window.
 
-## Layout
+## Module overview
 
-* `config.py` — `PlannerConfig` dataclass for all knobs.
-* `io_utils.py` — CSV column detection, RA/Dec normalization, discovery date
-  parsing.
-* `astro_utils.py` — astronomy helpers (twilight windows, moon separation
-  checks, slews, etc.).
-* `scheduler.py` — core scheduler `plan_twilight_range_with_caps(...)`
-  orchestrating the plan.
-* `main.py` — lightweight CLI entry point.
+* `config.py` – `PlannerConfig` dataclass housing site parameters and
+  threshold settings.
+* `priority.py` – tracks per-SN detections, exposure time, filter coverage, and
+  escalates Type Ia objects to an LSST-only light-curve goal.
+* `scheduler.py` – core planner that queries visibility, applies priorities,
+  and produces nightly schedules.
+* `astro_utils.py` – astronomy helpers for twilight windows, moon separation,
+  and slew calculations.
+* `io_utils.py` – CSV column detection, RA/Dec normalization, and discovery
+  date parsing.
+* `main.py` – lightweight CLI entry point wrapping the scheduler.
 
 ## Documentation
 
