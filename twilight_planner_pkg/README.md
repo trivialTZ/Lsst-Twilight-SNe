@@ -42,21 +42,6 @@ The planner supports three observation philosophies:
 3. **LSST-only light curves** – pursue full light curves for every object via
    `--strategy lc`.
 
-### Priority workflow
-
-`PriorityTracker` keeps a running history for each supernova:
-
-1. **Record detections** – each planned visit supplies its filters and
-   exposure seconds, which are accumulated per SN.
-2. **Hybrid goal** – once an object reaches the Hybrid threshold
-   (defaults: ≥2 detections across ≥2 filters or ≥300 s total exposure), its
-   cached type is inspected.
-3. **Escalate or drop** – Type Ia SNe escalate to the LSST-only light-curve
-   goal (defaults: ≥5 detections or ≥300 s in ≥2 filters spanning −7 d to
-   +20 d).  Non‑Ia SNe drop to zero priority after the Hybrid goal.
-4. **LSST-only completion** – when the light-curve goal is satisfied the SN is
-   deprioritised, allowing new discoveries to take precedence.
-
 ### Notebook example
 
 ```python
