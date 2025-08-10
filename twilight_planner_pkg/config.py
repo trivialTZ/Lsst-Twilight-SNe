@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 @dataclass
 class PlannerConfig:
@@ -46,6 +46,18 @@ class PlannerConfig:
         Minimum Moon separation per filter in degrees.
     require_single_time_for_all_filters : bool, optional
         Require one time satisfying Moon separation for all filters.
+    priority_strategy : str, optional
+        Strategy for dynamic prioritization (``"hybrid"`` or ``"lc"``).
+    hybrid_detections : int, optional
+        Detections in ≥2 filters marking completion of the Hybrid goal.
+    hybrid_exposure_s : float, optional
+        Total exposure seconds marking completion of the Hybrid goal.
+    lc_detections : int, optional
+        Detections required for the LSST-only goal.
+    lc_exposure_s : float, optional
+        Total exposure seconds for the LSST-only goal.
+    lc_phase_range : tuple[float, float], optional
+        Phase range (days from discovery) for LSST-only coverage.
     ra_col, dec_col, disc_col, name_col, type_col : str or None, optional
         Overrides for catalog column names. ``None`` enables auto-detection.
     """
@@ -82,6 +94,14 @@ class PlannerConfig:
     # Moon
     min_moon_sep_by_filter: Dict[str, float] = field(default_factory=lambda: {"g":30.0, "r":25.0, "i":20.0, "z":15.0})
     require_single_time_for_all_filters: bool = True
+
+    # Priority
+    priority_strategy: str = "hybrid"
+    hybrid_detections: int = 2
+    hybrid_exposure_s: float = 300.0
+    lc_detections: int = 5
+    lc_exposure_s: float = 300.0
+    lc_phase_range: tuple[float, float] = (-7.0, 20.0)
 
     # CSV columns (Optional: set to None for auto-detect)
     ra_col: Optional[str] = None
