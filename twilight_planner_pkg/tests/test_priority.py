@@ -40,3 +40,27 @@ def test_ia_requires_lc_goal():
     t.record_detection("SN4", 50, ["g"])
     assert t.score("SN4", sn_type="Ia") == 0.0
 
+
+def test_update_aliases_record_detection():
+    assert PriorityTracker.update is PriorityTracker.record_detection
+
+
+def test_score_strategy_lc_escalates_without_detections():
+    t = tracker()
+    assert t.score("SN5", strategy="lc") == 1.0
+    assert t.history["SN5"].escalated is True
+
+
+def test_score_zero_after_lc_completion_regardless_type():
+    t = tracker()
+    for _ in range(5):
+        t.record_detection("SN6", 60, ["g"])
+    assert t.score("SN6", strategy="lc") == 0.0
+    for typ in (None, "Ia", "II"):
+        assert t.score("SN6", sn_type=typ) == 0.0
+
+
+def test_repeated_filter_usage_does_not_meet_hybrid():
+    t = tracker()
+    t.record_detection("SN7", 150, ["g", "g"])
+    assert t.score("SN7", sn_type="II") == 1.0
