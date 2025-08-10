@@ -16,8 +16,46 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --lat -30.2446 --lon -70.7494 --height 2663 \
     --filters g,r,i,z --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap 600 --morning_cap 600 \
-    --per_sn_cap 120 --max_sn 10
+    --per_sn_cap 120 --max_sn 10 --strategy hybrid \
+    --hybrid-detections 2 --hybrid-exposure 300
 ```
+
+Use `--strategy lc` to require the LSST-only light-curve goal for all SNe.
+Thresholds can be tuned with `--lc-detections` and `--lc-exposure`.
+Example forcing LSST-only coverage:
+
+```bash
+python -m twilight_planner_pkg.main --csv your.csv --out results \
+    --start 2024-01-01 --end 2024-01-07 \
+    --lat -30.2446 --lon -70.7494 --height 2663 \
+    --strategy lc --lc-detections 5 --lc-exposure 300
+```
+
+### Priority modes
+
+The planner supports three observation philosophies:
+
+1. **Discovery-optimized** – favour breadth with minimal repeat exposures
+   (e.g. low `--hybrid-exposure` limits).
+2. **Hybrid (default)** – gather a couple detections across colours and then
+   down-weight non-Ia SNe.
+3. **LSST-only light curves** – pursue full light curves for every object via
+   `--strategy lc`.
+
+### Priority workflow
+
+`PriorityTracker` keeps a running history for each supernova:
+
+1. **Record detections** – each planned visit supplies its filters and
+   exposure seconds, which are accumulated per SN.
+2. **Hybrid goal** – once an object reaches the Hybrid threshold
+   (defaults: ≥2 detections across ≥2 filters or ≥300 s total exposure), its
+   cached type is inspected.
+3. **Escalate or drop** – Type Ia SNe escalate to the LSST-only light-curve
+   goal (defaults: ≥5 detections or ≥300 s in ≥2 filters spanning −7 d to
+   +20 d).  Non‑Ia SNe drop to zero priority after the Hybrid goal.
+4. **LSST-only completion** – when the light-curve goal is satisfied the SN is
+   deprioritised, allowing new discoveries to take precedence.
 
 ### Notebook example
 
@@ -29,6 +67,18 @@ cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2663)
 plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
                               '2024-01-01', '2024-01-07', cfg)
 ```
+
+`PlannerConfig` includes dynamic-priority options:
+
+* `priority_strategy` – either `"hybrid"` (default) or `"lc"` to always pursue
+  a full light curve.
+* `hybrid_detections` / `hybrid_exposure_s` – thresholds for the Hybrid goal
+  (defaults: 2 detections across ≥2 filters or 300 s total).
+* `lc_detections` / `lc_exposure_s` – thresholds for the LSST-only light-curve
+  goal (defaults: 5 detections or 300 s spanning ≥2 filters).
+* Default workflow: once the Hybrid goal is met, the cached type from the CSV
+  is checked—Type Ia SNe escalate to the LSST-only goal, others drop to zero
+  priority.
 
 ## How It Works
 
@@ -92,16 +142,19 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 * **Night summary** – CSV and DataFrame with counts of candidates vs. planned
   targets and cumulative time per window.
 
-## Layout
+## Module overview
 
-* `config.py` — `PlannerConfig` dataclass for all knobs.
-* `io_utils.py` — CSV column detection, RA/Dec normalization, discovery date
-  parsing.
-* `astro_utils.py` — astronomy helpers (twilight windows, moon separation
-  checks, slews, etc.).
-* `scheduler.py` — core scheduler `plan_twilight_range_with_caps(...)`
-  orchestrating the plan.
-* `main.py` — lightweight CLI entry point.
+* `config.py` – `PlannerConfig` dataclass housing site parameters and
+  threshold settings.
+* `priority.py` – tracks per-SN detections, exposure time, filter coverage, and
+  escalates Type Ia objects to an LSST-only light-curve goal.
+* `scheduler.py` – core planner that queries visibility, applies priorities,
+  and produces nightly schedules.
+* `astro_utils.py` – astronomy helpers for twilight windows, moon separation,
+  and slew calculations.
+* `io_utils.py` – CSV column detection, RA/Dec normalization, and discovery
+  date parsing.
+* `main.py` – lightweight CLI entry point wrapping the scheduler.
 
 ## Documentation
 
