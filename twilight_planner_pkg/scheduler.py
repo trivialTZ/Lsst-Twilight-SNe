@@ -16,6 +16,7 @@ from .astro_utils import (
     twilight_windows_astro, great_circle_sep_deg, choose_filters_with_cap,
     per_sn_time_seconds, parse_sn_type_to_window_days, _best_time_with_moon
 )
+from .priority import PriorityTracker
 
 def plan_twilight_range_with_caps(
     csv_path: str,
@@ -71,6 +72,12 @@ def plan_twilight_range_with_caps(
     nights_rows: List[Dict] = []
     nights = pd.date_range(start, end, freq="D")
     nights_iter = tqdm(nights, desc="Nights", unit="night", leave=True)
+    tracker = PriorityTracker(
+        hybrid_detections=cfg.hybrid_detections,
+        hybrid_exposure_s=cfg.hybrid_exposure_s,
+        lc_detections=cfg.lc_detections,
+        lc_exposure_s=cfg.lc_exposure_s,
+    )
 
     for day in nights_iter:
         day_utc = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
@@ -112,7 +119,10 @@ def plan_twilight_range_with_caps(
                 print(f"{day.date().isoformat()}: 0 visible")
             continue
 
-        visible.sort_values("max_alt_deg", ascending=False, inplace=True)
+        visible["priority_score"] = visible.apply(
+            lambda r: tracker.score(r["Name"], r.get("SN_type_raw"), cfg.priority_strategy), axis=1
+        )
+        visible.sort_values(["priority_score", "max_alt_deg"], ascending=[False, False], inplace=True)
         top_global = visible.head(int(cfg.max_sn_per_night)).copy()
 
         for idx_w in sorted(set(top_global["best_window_index"].values)):
@@ -120,7 +130,7 @@ def plan_twilight_range_with_caps(
             if group.empty:
                 continue
 
-            targets = group[["Name","RA_deg","Dec_deg","best_time_utc","max_alt_deg"]].to_dict(orient="records")
+            targets = group[["Name","RA_deg","Dec_deg","best_time_utc","max_alt_deg","priority_score"]].to_dict(orient="records")
             ordered = [targets.pop(0)]
             while targets:
                 last = ordered[-1]
@@ -145,6 +155,7 @@ def plan_twilight_range_with_caps(
                     "Dec_deg": round(t["Dec_deg"], 6),
                     "best_twilight_time_utc": pd.Timestamp(t["best_time_utc"]).tz_convert("UTC").isoformat() if isinstance(t["best_time_utc"], pd.Timestamp) else str(t["best_time_utc"]),
                     "best_alt_deg": round(float(t["max_alt_deg"]), 2),
+                    "priority_score": round(float(t["priority_score"]), 2),
                     "filters": ",".join(filters_used),
                     "exposure_s": round(timing["exposure_s"], 1),
                     "readout_s": round(timing["readout_s"], 1),
@@ -153,6 +164,7 @@ def plan_twilight_range_with_caps(
                     "total_time_s": round(timing["total_s"], 1),
                 })
                 prev = t
+                tracker.record_detection(t["Name"], timing["exposure_s"], filters_used)
 
             nights_rows.append({
                 "date": day.date().isoformat(),

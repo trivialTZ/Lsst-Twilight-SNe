@@ -16,8 +16,31 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --lat -30.2446 --lon -70.7494 --height 2663 \
     --filters g,r,i,z --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap 600 --morning_cap 600 \
-    --per_sn_cap 120 --max_sn 10
+    --per_sn_cap 120 --max_sn 10 --strategy hybrid \
+    --hybrid-detections 2 --hybrid-exposure 300
 ```
+
+Use `--strategy lc` to require the LSST-only light-curve goal for all SNe.
+Thresholds can be tuned with `--lc-detections` and `--lc-exposure`.
+Example forcing LSST-only coverage:
+
+```bash
+python -m twilight_planner_pkg.main --csv your.csv --out results \
+    --start 2024-01-01 --end 2024-01-07 \
+    --lat -30.2446 --lon -70.7494 --height 2663 \
+    --strategy lc --lc-detections 5 --lc-exposure 300
+```
+
+### Priority modes
+
+The planner supports three observation philosophies:
+
+1. **Discovery-optimized** – favour breadth with minimal repeat exposures
+   (e.g. low `--hybrid-exposure` limits).
+2. **Hybrid (default)** – gather a couple detections across colours and then
+   down-weight non-Ia SNe.
+3. **LSST-only light curves** – pursue full light curves for every object via
+   `--strategy lc`.
 
 ### Notebook example
 
@@ -29,6 +52,18 @@ cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2663)
 plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
                               '2024-01-01', '2024-01-07', cfg)
 ```
+
+`PlannerConfig` includes dynamic-priority options:
+
+* `priority_strategy` – either `"hybrid"` (default) or `"lc"` to always pursue
+  a full light curve.
+* `hybrid_detections` / `hybrid_exposure_s` – thresholds for the Hybrid goal
+  (defaults: 2 detections across ≥2 filters or 300 s total).
+* `lc_detections` / `lc_exposure_s` – thresholds for the LSST-only light-curve
+  goal (defaults: 5 detections or 300 s spanning ≥2 filters).
+* Default workflow: once the Hybrid goal is met, the cached type from the CSV
+  is checked—Type Ia SNe escalate to the LSST-only goal, others drop to zero
+  priority.
 
 ## How It Works
 

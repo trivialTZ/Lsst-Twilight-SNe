@@ -5,7 +5,8 @@ Usage (example):
         --csv /mnt/data/ATLAS_2021_to25_cleaned.csv \
         --out /mnt/data/out \
         --start 2024-01-01 --end 2024-01-07 \
-        --lat -30.2446 --lon -70.7494 --height 2663
+        --lat -30.2446 --lon -70.7494 --height 2663 \
+        --strategy hybrid
 """
 import argparse
 from pathlib import Path
@@ -39,6 +40,16 @@ def build_parser():
     p.add_argument("--max_sn", type=int, default=10)
     p.add_argument("--twilight_step", type=int, default=2)
     p.add_argument("--require_single_time", action="store_true", help="Require one time satisfying moon sep for all filters")
+    p.add_argument("--strategy", choices=["hybrid","lc"], default="hybrid",
+                   help="Priority strategy: 'hybrid' drops after quick color, 'lc' pursues full light curves")
+    p.add_argument("--hybrid-detections", type=int, default=2,
+                   help="Detections across ≥2 filters before Hybrid goal is met")
+    p.add_argument("--hybrid-exposure", type=float, default=300.0,
+                   help="Total exposure seconds before Hybrid goal is met")
+    p.add_argument("--lc-detections", type=int, default=5,
+                   help="Detections required for LSST-only light-curve goal")
+    p.add_argument("--lc-exposure", type=float, default=300.0,
+                   help="Total exposure seconds for LSST-only goal")
     return p
 
 def parse_exp_map(s: str):
@@ -80,6 +91,11 @@ def main():
         per_sn_cap_s=args.per_sn_cap,
         max_sn_per_night=args.max_sn,
         require_single_time_for_all_filters=args.require_single_time,
+        priority_strategy=args.strategy,
+        hybrid_detections=args.hybrid_detections,
+        hybrid_exposure_s=args.hybrid_exposure,
+        lc_detections=args.lc_detections,
+        lc_exposure_s=args.lc_exposure,
     )
     Path(args.out).mkdir(parents=True, exist_ok=True)
     plan_twilight_range_with_caps(
