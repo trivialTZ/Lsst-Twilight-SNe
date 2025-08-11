@@ -130,6 +130,22 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 * **SIMLIB** – if ``--simlib-out`` is provided, a SNANA SIMLIB describing the
   simulated observations.
 
+  
+### Photometry, Saturation & SIMLIB
+
+* Exposure times are automatically capped to keep the brightest pixel below
+  `NPE_PIXEL_SATURATE` (default 1.2×10⁵ e⁻). A Gaussian PSF central-pixel
+  fraction plus the relation
+  `m_sat(t) = m_sat(15 s) + 2.5 log10(t/15)` shifts the r-band bright limit from
+  ≈15.8 mag at 15 s to ≈12.9 mag at 1 s, so short twilight snaps avoid
+  saturation while reducing overheads.
+* Zeropoints use 1‑s instrumental values from SMTN‑002 and apply extinction
+  `k_m (X − 1)`; sky noise comes from a twilight sky model or
+  `rubin_sim.skybrightness` when available.
+* When `--simlib-out` is supplied, the planner writes SNANA `S:` rows including
+  MJD, gain, read noise, sky sigma, PSF FWHM, `ZPTAVG`, and `MAG=-99` using the
+  above photometric scalars.
+
 ## Module overview
 
 * `config.py` – `PlannerConfig` dataclass housing site parameters and
