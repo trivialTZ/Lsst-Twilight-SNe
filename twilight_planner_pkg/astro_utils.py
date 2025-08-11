@@ -28,6 +28,25 @@ warnings.filterwarnings("ignore",
 
 from .config import PlannerConfig
 
+
+def airmass_from_alt_deg(alt_deg: float) -> float:
+    """Convert an altitude angle to airmass.
+
+    Parameters
+    ----------
+    alt_deg : float
+        Altitude above the horizon in degrees.
+
+    Returns
+    -------
+    float
+        Airmass estimated using a secant approximation.
+    """
+
+    import numpy as np, math
+    z = np.deg2rad(max(0.0, min(90.0, 90.0 - float(alt_deg))))
+    return 1.0 / max(1e-4, math.cos(z))
+
 def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple[datetime, datetime]]:
     """Compute astronomical twilight windows for a given date and location.
 
@@ -165,7 +184,13 @@ def choose_filters_with_cap(filters, sep_deg: float, cap_s: float, cfg: PlannerC
         ``(used_filters, timing)`` where ``timing`` matches
         :func:`per_sn_time_seconds` keys.
     """
-    used = []
+    from .photom_rubin import PhotomConfig, cap_exposure_for_saturation
+    from .sky_model import SkyModelConfig, sky_mag_arcsec2
+
+    used: list[str] = []
+
+    if not cfg.allow_filter_changes_in_twilight:
+        filters = list(filters)[:1]
     _slew = slew_time_seconds(
         sep_deg,
         small_deg=cfg.slew_small_deg,
@@ -173,20 +198,70 @@ def choose_filters_with_cap(filters, sep_deg: float, cap_s: float, cfg: PlannerC
         rate_deg_per_s=cfg.slew_rate_deg_per_s,
         settle_s=cfg.slew_settle_s,
     )
+
+    phot_cfg = PhotomConfig(
+        pixel_scale_arcsec=cfg.pixel_scale_arcsec,
+        zpt1s=cfg.zpt1s or None,
+        k_m=cfg.k_m or None,
+        fwhm_eff=cfg.fwhm_eff or None,
+        read_noise_e=cfg.read_noise_e,
+        gain_e_per_adu=cfg.gain_e_per_adu,
+        zpt_err_mag=cfg.zpt_err_mag,
+        npe_pixel_saturate=cfg.simlib_npe_pixel_saturate,
+    )
+    sky_cfg = SkyModelConfig(
+        dark_sky_mag=cfg.dark_sky_mag,
+        twilight_delta_mag=cfg.twilight_delta_mag,
+    )
+
+    def capped_exp(f: str) -> float:
+        base = cfg.exposure_by_filter.get(f, 0.0)
+        if cfg.current_mag_by_filter and f in cfg.current_mag_by_filter:
+            alt = cfg.current_alt_deg if cfg.current_alt_deg is not None else cfg.min_alt_deg
+            if cfg.sky_provider:
+                sky = cfg.sky_provider.sky_mag(None, None, None, f, airmass_from_alt_deg(alt))
+            else:
+                sky = sky_mag_arcsec2(f, sky_cfg)
+            base = cap_exposure_for_saturation(
+                f,
+                base,
+                alt,
+                cfg.current_mag_by_filter[f],
+                sky,
+                phot_cfg,
+                min_exp_s=1.0,
+            )
+        return base
+
     for f in filters:
         trial = used + [f]
-        exptime = sum(cfg.exposure_by_filter.get(x, 0.0) for x in trial)
+        exp_times = {x: capped_exp(x) for x in trial}
+        exptime = sum(exp_times.values())
         readout = cfg.readout_s * len(trial)
-        fchanges = cfg.filter_change_s * max(0, len(trial)-1)
+        fchanges = cfg.filter_change_s * max(0, len(trial) - 1)
         total = _slew + exptime + readout + fchanges
         if total <= cap_s:
             used = trial
         else:
             break
+
     if not used and filters:
         used = [filters[0]]
-    total, slew, exptime, readout, fchanges = per_sn_time_seconds(used, sep_deg, cfg)
-    return used, {"total_s": total, "slew_s": slew, "exposure_s": exptime, "readout_s": readout, "filter_changes_s": fchanges}
+
+    exp_times = {x: capped_exp(x) for x in used}
+    exptime = sum(exp_times.values())
+    readout = cfg.readout_s * len(used)
+    fchanges = cfg.filter_change_s * max(0, len(used) - 1)
+    total = _slew + exptime + readout + fchanges
+    timing = {
+        "total_s": total,
+        "slew_s": _slew,
+        "exposure_s": exptime,
+        "readout_s": readout,
+        "filter_changes_s": fchanges,
+        "exp_times": exp_times,
+    }
+    return used, timing
 
 def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
     """Estimate the number of days a supernova remains observable.

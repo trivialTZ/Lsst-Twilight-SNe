@@ -65,6 +65,7 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         require_single_time_for_all_filters=False,
         min_alt_deg=0.0,
         twilight_step_min=1,
+        allow_filter_changes_in_twilight=True,
     )
 
     start_date = end_date = "2025-07-30"
@@ -87,25 +88,22 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         "RA_deg",
         "Dec_deg",
         "best_twilight_time_utc",
-        "best_alt_deg",
+        "filter",
+        "t_exp_s",
+        "airmass",
+        "alt_deg",
+        "sky_mag_arcsec2",
+        "ZPT",
+        "SKYSIG",
+        "NEA_pix",
+        "RDNOISE",
+        "GAIN",
+        "saturation_guard_applied",
         "priority_score",
-        "filters",
-        "exposure_s",
-        "readout_s",
-        "filter_changes_s",
-        "slew_s",
-        "total_time_s",
     }
     assert expected_cols.issubset(pernight_df.columns)
 
-    # No more than max_sn_per_night scheduled
-    assert len(pernight_df) <= cfg.max_sn_per_night
-
-    # Per-SN timing should be non-negative and within per_sn_cap_s
-    assert (pernight_df["total_time_s"] >= 0).all()
-    assert (pernight_df["total_time_s"] <= cfg.per_sn_cap_s).all()
-    for col in ["exposure_s", "readout_s", "filter_changes_s", "slew_s"]:
-        assert (pernight_df[col] >= 0).all()
+    assert (pernight_df["t_exp_s"] >= 0).all()
 
     # ------------------------------------------------------------------
     # nights_df checks

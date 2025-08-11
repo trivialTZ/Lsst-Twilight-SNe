@@ -17,7 +17,8 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --filters g,r,i,z --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap 600 --morning_cap 600 \
     --per_sn_cap 120 --max_sn 10 --strategy hybrid \
-    --hybrid-detections 2 --hybrid-exposure 300
+    --hybrid-detections 2 --hybrid-exposure 300 \
+    --simlib-out results/night.SIMLIB --simlib-survey LSST_TWILIGHT
 ```
 
 Use `--strategy lc` to require the LSST-only light-curve goal for all SNe.
@@ -123,9 +124,11 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 ### Outputs
 
 * **Per-SN plan** – CSV and DataFrame listing date, window, chosen time,
-  altitude, filters, and detailed time budget components.
+  altitude, filters, exposure settings, and detailed time budget components.
 * **Night summary** – CSV and DataFrame with counts of candidates vs. planned
   targets and cumulative time per window.
+* **SIMLIB** – if ``--simlib-out`` is provided, a SNANA SIMLIB describing the
+  simulated observations.
 
 ## Module overview
 
@@ -139,6 +142,9 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
   and slew calculations.
 * `io_utils.py` – CSV column detection, RA/Dec normalization, and discovery
   date parsing.
+* `photom_rubin.py` – Rubin photometric kernel and saturation guard.
+* `simlib_writer.py` – minimal SNANA SIMLIB writer.
+* `sky_model.py` – simple and Rubin-based sky-brightness providers.
 * `main.py` – lightweight CLI entry point wrapping the scheduler.
 
 ## Documentation
