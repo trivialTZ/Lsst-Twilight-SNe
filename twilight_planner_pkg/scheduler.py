@@ -11,12 +11,20 @@ from astropy.coordinates import SkyCoord, EarthLocation
 from astropy.time import Time
 
 from .config import PlannerConfig
-from .io_utils import standardize_columns
+from .io_utils import standardize_columns, extract_current_mags
 from .astro_utils import (
     twilight_windows_astro, great_circle_sep_deg, choose_filters_with_cap,
-    per_sn_time_seconds, parse_sn_type_to_window_days, _best_time_with_moon
+    per_sn_time_seconds, parse_sn_type_to_window_days, _best_time_with_moon, airmass_from_alt_deg
 )
 from .priority import PriorityTracker
+from .simlib_writer import SimlibWriter, SimlibHeader
+from .photom_rubin import PhotomConfig, compute_epoch_photom
+from .sky_model import (
+    SkyModelConfig,
+    sky_mag_arcsec2,
+    RubinSkyProvider,
+    SimpleSkyProvider,
+)
 
 def plan_twilight_range_with_caps(
     csv_path: str,
@@ -53,6 +61,41 @@ def plan_twilight_range_with_caps(
     Path(outdir).mkdir(parents=True, exist_ok=True)
     raw = pd.read_csv(csv_path)
     df = standardize_columns(raw, cfg)
+    mag_lookup = extract_current_mags(df)
+
+    phot_cfg = PhotomConfig(
+        pixel_scale_arcsec=cfg.pixel_scale_arcsec,
+        zpt1s=cfg.zpt1s or None,
+        k_m=cfg.k_m or None,
+        fwhm_eff=cfg.fwhm_eff or None,
+        read_noise_e=cfg.read_noise_e,
+        gain_e_per_adu=cfg.gain_e_per_adu,
+        zpt_err_mag=cfg.zpt_err_mag,
+        npe_pixel_saturate=cfg.simlib_npe_pixel_saturate,
+    )
+    sky_cfg = SkyModelConfig(
+        dark_sky_mag=cfg.dark_sky_mag,
+        twilight_delta_mag=cfg.twilight_delta_mag,
+    )
+    try:
+        sky_provider = RubinSkyProvider()
+    except Exception:
+        sky_provider = SimpleSkyProvider(sky_cfg)
+    cfg.sky_provider = sky_provider
+
+    writer = None
+    if cfg.simlib_out:
+        hdr = SimlibHeader(
+            SURVEY=cfg.simlib_survey,
+            FILTERS=cfg.simlib_filters,
+            PIXSIZE=cfg.simlib_pixsize,
+            NPE_PIXEL_SATURATE=cfg.simlib_npe_pixel_saturate,
+            PHOTFLAG_SATURATE=cfg.simlib_photflag_saturate,
+            PSF_UNIT=cfg.simlib_psf_unit,
+        )
+        writer = SimlibWriter(open(cfg.simlib_out, "w"), hdr)
+        writer.write_header()
+    libid_counter = 1
 
     filters = cfg.filters or []
     if cfg.carousel_capacity and len(filters) > cfg.carousel_capacity:
@@ -143,26 +186,58 @@ def plan_twilight_range_with_caps(
             prev = None
             for t in ordered:
                 sep = 0.0 if prev is None else great_circle_sep_deg(prev["RA_deg"], prev["Dec_deg"], t["RA_deg"], t["Dec_deg"])
+                cfg.current_mag_by_filter = mag_lookup.get(t["Name"])
+                cfg.current_alt_deg = t["max_alt_deg"]
                 filters_used, timing = choose_filters_with_cap(cfg.filters, sep, cfg.per_sn_cap_s, cfg)
                 if window_sum + timing["total_s"] > cap_s:
                     continue
                 window_sum += timing["total_s"]
-                pernight_rows.append({
-                    "date": day.date().isoformat(),
-                    "twilight_window": window_labels.get(idx_w, f"W{idx_w}"),
-                    "SN": t["Name"],
-                    "RA_deg": round(t["RA_deg"], 6),
-                    "Dec_deg": round(t["Dec_deg"], 6),
-                    "best_twilight_time_utc": pd.Timestamp(t["best_time_utc"]).tz_convert("UTC").isoformat() if isinstance(t["best_time_utc"], pd.Timestamp) else str(t["best_time_utc"]),
-                    "best_alt_deg": round(float(t["max_alt_deg"]), 2),
-                    "priority_score": round(float(t["priority_score"]), 2),
-                    "filters": ",".join(filters_used),
-                    "exposure_s": round(timing["exposure_s"], 1),
-                    "readout_s": round(timing["readout_s"], 1),
-                    "filter_changes_s": round(timing["filter_changes_s"], 1),
-                    "slew_s": round(timing["slew_s"], 1),
-                    "total_time_s": round(timing["total_s"], 1),
-                })
+                if writer:
+                    writer.start_libid(libid_counter, t["RA_deg"], t["Dec_deg"], comment=t["Name"])
+                    libid_counter += 1
+                for f in filters_used:
+                    exp_s = timing.get("exp_times", {}).get(f, cfg.exposure_by_filter.get(f, 0.0))
+                    alt_deg = float(t["max_alt_deg"])
+                    mjd = Time(t["best_time_utc"]).mjd if isinstance(t["best_time_utc"], (datetime, pd.Timestamp)) else np.nan
+                    if sky_provider:
+                        sky_mag = sky_provider.sky_mag(mjd, t["RA_deg"], t["Dec_deg"], f, airmass_from_alt_deg(alt_deg))
+                    else:
+                        sky_mag = sky_mag_arcsec2(f, sky_cfg)
+                    eph = compute_epoch_photom(f, exp_s, alt_deg, sky_mag, phot_cfg)
+                    if writer:
+                        writer.add_epoch(
+                            mjd=mjd,
+                            band=f,
+                            gain=eph.GAIN,
+                            rdnoise=eph.RDNOISE,
+                            skysig=eph.SKYSIG,
+                            psf1=cfg.fwhm_eff.get(f, 0.83) if cfg.fwhm_eff else 0.83,
+                            psf2=0.0,
+                            psfrat=0.0,
+                            zpavg=eph.ZPTAVG,
+                            zperr=eph.ZPTERR,
+                            mag=-99.0,
+                        )
+                    pernight_rows.append({
+                        "date": day.date().isoformat(),
+                        "twilight_window": window_labels.get(idx_w, f"W{idx_w}"),
+                        "SN": t["Name"],
+                        "RA_deg": round(t["RA_deg"], 6),
+                        "Dec_deg": round(t["Dec_deg"], 6),
+                        "best_twilight_time_utc": pd.Timestamp(t["best_time_utc"]).tz_convert("UTC").isoformat() if isinstance(t["best_time_utc"], pd.Timestamp) else str(t["best_time_utc"]),
+                        "filter": f,
+                        "t_exp_s": round(exp_s, 1),
+                        "airmass": round(airmass_from_alt_deg(alt_deg), 3),
+                        "alt_deg": round(alt_deg, 2),
+                        "sky_mag_arcsec2": round(sky_mag, 2),
+                        "ZPT": round(eph.ZPTAVG, 3),
+                        "SKYSIG": round(eph.SKYSIG, 3),
+                        "NEA_pix": round(eph.NEA_pix, 2),
+                        "RDNOISE": round(eph.RDNOISE, 2),
+                        "GAIN": round(eph.GAIN, 2),
+                        "saturation_guard_applied": exp_s < cfg.exposure_by_filter.get(f, exp_s) - 1e-6,
+                        "priority_score": round(float(t["priority_score"]), 2),
+                    })
                 prev = t
                 tracker.record_detection(t["Name"], timing["exposure_s"], filters_used)
 
@@ -185,6 +260,8 @@ def plan_twilight_range_with_caps(
     nights_path   = Path(outdir) / f"lsst_twilight_summary_{start.isoformat()}_to_{end.isoformat()}.csv"
     pernight_df.to_csv(pernight_path, index=False)
     nights_df.to_csv(nights_path, index=False)
+    if writer:
+        writer.close()
     print(f"Wrote:\n  {pernight_path}\n  {nights_path}")
     print(f"Rows: per-SN={len(pernight_df)}, nights*windows={len(nights_df)}")
     return pernight_df, nights_df

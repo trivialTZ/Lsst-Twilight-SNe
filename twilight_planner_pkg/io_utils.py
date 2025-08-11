@@ -42,6 +42,13 @@ _DISC_DATE_SYNONYMS = [
 _NAME_SYNONYMS = ["name", "objname", "objectname", "atlasname", "tnsname", "id", "snname"]
 _TYPE_SYNONYMS = ["type", "sntype", "class", "tnsclass", "subtype"]
 
+_MAG_SYNONYMS = {
+    "g": ["gmag", "mag_g", "atlas_gmag", "last_mag_g", "gmaglast"],
+    "r": ["rmag", "mag_r", "atlas_rmag", "last_mag_r", "rmaglast"],
+    "i": ["imag", "mag_i", "atlas_imag", "last_mag_i", "imaglast"],
+    "z": ["zmag", "mag_z", "atlas_zmag", "last_mag_z", "zmaglast"],
+}
+
 def _fuzzy_pick(df: pd.DataFrame, synonyms: List[str]) -> Optional[str]:
     """Select a column whose normalized name matches any synonym.
 
@@ -375,3 +382,46 @@ def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
     df["Name"] = df[name_col].astype(str) if name_col in df.columns else [f"SN_{i:05d}" for i in range(len(df))]
     df["SN_type_raw"] = df[type_col].astype(str) if (type_col and type_col in df.columns) else np.nan
     return df
+
+
+def extract_current_mags(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """Extract per-target magnitudes if columns are present.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input table after :func:`standardize_columns`.
+
+    Returns
+    -------
+    dict
+        Mapping from SN name to ``{band: mag}`` for available bands.
+    """
+    import math
+
+    canon = dict(_normalize_col_names(df.columns))
+    band_cols: Dict[str, str] = {}
+    for band, syns in _MAG_SYNONYMS.items():
+        for syn in syns:
+            key = "".join(ch for ch in syn.lower() if ch.isalnum())
+            for orig, norm in canon.items():
+                if norm == key:
+                    band_cols[band] = orig
+                    break
+            if band_cols.get(band):
+                break
+
+    out: Dict[str, Dict[str, float]] = {}
+    for _, row in df.iterrows():
+        name = row.get("Name")
+        mags: Dict[str, float] = {}
+        for band, col in band_cols.items():
+            try:
+                val = float(row[col])
+                if not math.isnan(val):
+                    mags[band] = float(val)
+            except Exception:
+                continue
+        if mags:
+            out[str(name)] = mags
+    return out

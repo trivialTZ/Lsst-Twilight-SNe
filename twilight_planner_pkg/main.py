@@ -50,6 +50,16 @@ def build_parser():
                    help="Detections required for LSST-only light-curve goal")
     p.add_argument("--lc-exposure", type=float, default=300.0,
                    help="Total exposure seconds for LSST-only goal")
+    p.add_argument("--simlib-out", help="Path to write SNANA SIMLIB (optional)")
+    p.add_argument("--simlib-survey", default="LSST_TWILIGHT")
+    p.add_argument("--simlib-filters", default="ugrizY")
+    p.add_argument("--simlib-pixsize", type=float, default=0.200)
+    p.add_argument("--npe-pixel-saturate", type=int, default=120000)
+    p.add_argument("--photflag-saturate", type=int, default=2048)
+    p.add_argument("--psf-unit", default="NEA_PIXEL")
+    p.add_argument("--gain", type=float, default=1.6)
+    p.add_argument("--read-noise-e", type=float, default=9.0)
+    p.add_argument("--allow-filter-changes-in-twilight", action="store_true")
     return p
 
 def parse_exp_map(s: str):
@@ -96,6 +106,16 @@ def main():
         hybrid_exposure_s=args.hybrid_exposure,
         lc_detections=args.lc_detections,
         lc_exposure_s=args.lc_exposure,
+        simlib_out=args.simlib_out,
+        simlib_survey=args.simlib_survey,
+        simlib_filters=args.simlib_filters,
+        simlib_pixsize=args.simlib_pixsize,
+        simlib_npe_pixel_saturate=args.npe_pixel_saturate,
+        simlib_photflag_saturate=args.photflag_saturate,
+        simlib_psf_unit=args.psf_unit,
+        gain_e_per_adu=args.gain,
+        read_noise_e=args.read_noise_e,
+        allow_filter_changes_in_twilight=args.allow_filter_changes_in_twilight,
     )
     Path(args.out).mkdir(parents=True, exist_ok=True)
     plan_twilight_range_with_caps(

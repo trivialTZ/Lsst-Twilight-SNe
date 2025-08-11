@@ -109,3 +109,30 @@ class PlannerConfig:
     disc_col: Optional[str] = None
     name_col: Optional[str] = None
     type_col: Optional[str] = None
+
+    # --- Photometry & SIMLIB -------------------------------------------------
+    simlib_out: Optional[str] = None
+    simlib_survey: str = "LSST_TWILIGHT"
+    simlib_filters: str = "ugrizY"
+    simlib_pixsize: float = 0.200
+    simlib_npe_pixel_saturate: int = 120000
+    simlib_photflag_saturate: int = 2048
+    simlib_psf_unit: str = "NEA_PIXEL"
+
+    pixel_scale_arcsec: float = 0.2
+    zpt1s: Dict[str, float] | None = None
+    k_m: Dict[str, float] | None = None
+    fwhm_eff: Dict[str, float] | None = None
+    read_noise_e: float = 9.0
+    gain_e_per_adu: float = 1.6
+    zpt_err_mag: float = 0.005
+
+    dark_sky_mag: Dict[str, float] | None = None
+    twilight_delta_mag: float = 2.5
+
+    allow_filter_changes_in_twilight: bool = False
+
+    # Per-target hooks populated by the scheduler (not user-facing)
+    current_mag_by_filter: Optional[Dict[str, float]] = None
+    current_alt_deg: Optional[float] = None
+    sky_provider: Optional[object] = None

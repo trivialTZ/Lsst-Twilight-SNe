@@ -62,6 +62,7 @@ def test_per_sn_time_and_filter_cap():
         filter_change_s=5,
         exposure_by_filter={"g": 10, "r": 10},
         filters=["g", "r"],
+        allow_filter_changes_in_twilight=True,
     )
     total, slew, exptime, readout, fchanges = per_sn_time_seconds(["g", "r"], sep_deg=2, cfg=cfg)
     assert (total, slew, exptime, readout, fchanges) == pytest.approx((29, 2, 20, 2, 5))
