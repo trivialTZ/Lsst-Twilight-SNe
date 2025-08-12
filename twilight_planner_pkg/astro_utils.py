@@ -2,9 +2,10 @@
 
 Provides Kasten & Young (1989) airmass, Moon-aware timing helpers using
 ``astropy.coordinates.get_body`` in a shared AltAz frame, and functions for
-filter-aware visit timing.  Moon separation constraints are automatically
-waived when the Moon is below the horizon.  Slew, readout, and filter-change
-overheads reflect Rubin Observatory technical notes.
+filter-aware visit timing.  Moon separation requirements are graded by Moon
+altitude and phase rather than simply waived below the horizon.  Slew,
+readout, and filter-change overheads reflect Rubin Observatory technical
+notes.
 """
 
 from __future__ import annotations
@@ -36,6 +37,50 @@ warnings.filterwarnings("ignore",
                         module="astropy")
 
 from .config import PlannerConfig
+from .constraints import moon_separation_factor, effective_min_sep
+
+
+def validate_coords(ra_deg: float, dec_deg: float, eps: float = 1e-6) -> Tuple[float, float]:
+    """Normalize and validate equatorial coordinates.
+
+    Parameters
+    ----------
+    ra_deg, dec_deg : float
+        Right ascension and declination in degrees.
+    eps : float, optional
+        Tolerance for floating-point jitter at the ``\pm90`` declination bounds.
+
+    Returns
+    -------
+    tuple(float, float)
+        ``(ra_deg_normalized, dec_deg)`` where RA is in ``[0,360)`` and Dec is
+        clamped to ``\pm90`` only if within ``eps`` of the boundary.
+
+    Raises
+    ------
+    ValueError
+        If ``dec_deg`` lies outside ``[-90-eps, +90+eps]``.
+    """
+
+    ra_norm = (ra_deg % 360.0 + 360.0) % 360.0
+    if dec_deg < -90.0 - eps or dec_deg > 90.0 + eps:
+        raise ValueError(f"Invalid Dec={dec_deg} deg (must be within [-90, +90])")
+    if dec_deg > 90.0:
+        dec_deg = 90.0
+    if dec_deg < -90.0:
+        dec_deg = -90.0
+    return ra_norm, dec_deg
+
+
+def ra_delta_shortest_deg(ra1_deg: float, ra2_deg: float) -> float:
+    """Return the absolute shortest RA difference in degrees.
+
+    This properly wraps around the 0/360 boundary such that ``359°`` to
+    ``1°`` yields ``2°`` rather than ``-358°``.
+    """
+
+    d = ((ra2_deg - ra1_deg + 180.0) % 360.0) - 180.0
+    return abs(d)
 
 
 def airmass_from_alt_deg(alt_deg: float) -> float:
@@ -100,21 +145,15 @@ def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple
     return windows
 
 def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
-    """Compute on-sky separation between two coordinates.
+    """Compute on-sky separation between two coordinates."""
 
-    Parameters
-    ----------
-    ra1, dec1, ra2, dec2 : float
-        Coordinates in degrees.
-
-    Returns
-    -------
-    float
-        Great-circle separation in degrees.
-    """
-    c1 = SkyCoord(ra1*u.deg, dec1*u.deg)
-    c2 = SkyCoord(ra2*u.deg, dec2*u.deg)
-    return c1.separation(c2).deg
+    ra1_r, dec1_r, ra2_r, dec2_r = map(np.deg2rad, [ra1, dec1, ra2, dec2])
+    d_ra = np.deg2rad(ra_delta_shortest_deg(ra1, ra2))
+    d_dec = dec2_r - dec1_r
+    sin_ddec2 = np.sin(d_dec / 2.0)
+    sin_dra2 = np.sin(d_ra / 2.0)
+    a = sin_ddec2 ** 2 + np.cos(dec1_r) * np.cos(dec2_r) * sin_dra2 ** 2
+    return float(np.rad2deg(2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))))
 
 
 def allowed_filters_for_sun_alt(sun_alt_deg: float, cfg: PlannerConfig) -> List[str]:
@@ -406,32 +445,37 @@ def _best_time_with_moon(
     step_min: int,
     min_alt_deg: float,
     min_moon_sep_deg: float,
-) -> Tuple[float, datetime | None]:
+) -> Tuple[float, datetime | None, float, float, float]:
     """Sample a window and return the best observation time.
 
     Both the target and the Moon are transformed into the same topocentric
     :class:`~astropy.coordinates.AltAz` frame to evaluate the separation.  The
-    separation constraint is ignored if the Moon is below the horizon.  The
-    function is vectorised and avoids Astropy's angular-separation warnings by
-    construction.
+    separation requirement is scaled by :func:`~twilight_planner_pkg.constraints.moon_separation_factor`,
+    which gradually relaxes the minimum separation when the Moon is low or
+    below the horizon.  The function is vectorised and avoids Astropy's
+    angular-separation warnings by construction.
     """
     t0, t1 = window
     if t1 <= t0:
-        return -np.inf, None
+        return -np.inf, None, float("nan"), float("nan"), float("nan")
     n = 1 + int((t1 - t0).total_seconds() // (step_min * 60))
     ts = Time([t0 + timedelta(minutes=step_min * i) for i in range(n)])
     altaz = AltAz(obstime=ts, location=loc)
 
-    sc_altaz   = sc.transform_to(altaz)
-    alt        = sc_altaz.alt.to(u.deg).value
+    sc_altaz = sc.transform_to(altaz)
+    alt = sc_altaz.alt.to(u.deg).value
     moon_altaz = get_body("moon", ts).transform_to(altaz)
+    sun_altaz = get_sun(ts).transform_to(altaz)
 
     moon_alt = moon_altaz.alt.to(u.deg).value
     sep_deg = sc_altaz.separation(moon_altaz).deg
+    phase = 0.5 * (1 - np.cos(np.deg2rad(moon_altaz.separation(sun_altaz).deg)))
 
-    ok = (alt >= min_alt_deg) & ((moon_alt < 0.0) | (sep_deg >= min_moon_sep_deg))
+    factor = moon_separation_factor(moon_alt, phase)
+    eff = min_moon_sep_deg * factor
+    ok = (alt >= min_alt_deg) & (sep_deg >= eff)
     if not np.any(ok):
-        return -np.inf, None
+        return -np.inf, None, float("nan"), float("nan"), float("nan")
     alt_ok = np.where(ok, alt, -np.inf)
     j = int(np.argmax(alt_ok))
-    return float(alt_ok[j]), ts[j].to_datetime(timezone.utc)
+    return float(alt_ok[j]), ts[j].to_datetime(timezone.utc), float(moon_alt[j]), float(phase[j]), float(sep_deg[j])

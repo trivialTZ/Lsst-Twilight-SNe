@@ -52,12 +52,13 @@ from .astro_utils import (
     parse_sn_type_to_window_days,
     _best_time_with_moon,
     airmass_from_alt_deg,
-    allowed_filters_for_sun_alt,
     slew_time_seconds,
     pick_first_filter_for_target,
 )
 from .priority import PriorityTracker
 from .simlib_writer import SimlibWriter, SimlibHeader
+from .filter_policy import allowed_filters_for_window
+from .constraints import effective_min_sep
 from .photom_rubin import PhotomConfig, compute_epoch_photom
 from .sky_model import (
     SkyModelConfig,
@@ -147,11 +148,6 @@ def plan_twilight_range_with_caps(
         filters.remove(drop)
         cfg.filters = filters
 
-    req_sep = (
-        max(cfg.min_moon_sep_by_filter.get(f, 0.0) for f in filters)
-        if cfg.require_single_time_for_all_filters and cfg.min_moon_sep_by_filter
-        else max(cfg.min_moon_sep_by_filter.values()) if cfg.min_moon_sep_by_filter else 0.0
-    )
 
     site = EarthLocation(lat=cfg.lat_deg*u.deg, lon=cfg.lon_deg*u.deg, height=cfg.height_m*u.m)
     start = pd.to_datetime(start_date, utc=True).date()
@@ -173,6 +169,16 @@ def plan_twilight_range_with_caps(
         windows = twilight_windows_astro(day_utc, site)
         if not windows:
             continue
+        # Conservative baseline Moon separation used while sampling best times.
+        # Detailed per-filter checks with altitude/phase scaling are applied later via effective_min_sep.
+        vals: list[float] = []
+        if getattr(cfg, "min_moon_sep_by_filter", None) and getattr(cfg, "filters", None):
+            try:
+                vals = [cfg.min_moon_sep_by_filter.get(f, 0.0) for f in cfg.filters]
+            except Exception:
+                vals = []
+        req_sep = max(vals) if vals else 0.0
+
         current_filter_by_window = {0: cfg.start_filter, 1: cfg.start_filter}
         swap_count_by_window = {0: 0, 1: 0}
         window_caps = {0: cfg.morning_cap_s, 1: cfg.evening_cap_s}
@@ -195,13 +201,20 @@ def plan_twilight_range_with_caps(
         for _, row in subset.iterrows():
             sc = SkyCoord(row["RA_deg"]*u.deg, row["Dec_deg"]*u.deg, frame="icrs")
             max_alt, max_time, max_idx = -999.0, None, None
+            best_moon = (float("nan"), float("nan"), float("nan"))
             for idx_w, w in enumerate(windows):
-                alt_deg, t_utc = _best_time_with_moon(sc, w, site, cfg.twilight_step_min, cfg.min_alt_deg, req_sep)
+                alt_deg, t_utc, moon_alt_deg, moon_phase, moon_sep_deg = _best_time_with_moon(
+                    sc, w, site, cfg.twilight_step_min, cfg.min_alt_deg, req_sep
+                )
                 if alt_deg > max_alt:
                     max_alt, max_time, max_idx = alt_deg, t_utc, idx_w
+                    best_moon = (moon_alt_deg, moon_phase, moon_sep_deg)
             best_alts.append(max_alt)
             best_times.append(max_time if max_time is not None else pd.NaT)
             best_winidx.append(max_idx if max_time is not None else -1)
+            subset.loc[_, "_moon_alt"] = best_moon[0]
+            subset.loc[_, "_moon_phase"] = best_moon[1]
+            subset.loc[_, "_moon_sep"] = best_moon[2]
 
         subset["max_alt_deg"] = best_alts
         subset["best_time_utc"] = best_times
@@ -229,9 +242,24 @@ def plan_twilight_range_with_caps(
             sun_alt = (
                 get_sun(Time(mid)).transform_to(AltAz(location=site, obstime=Time(mid))).alt.to(u.deg).value
             )
-            allowed = allowed_filters_for_sun_alt(sun_alt, cfg)
             candidates = []
             for _, row in group.iterrows():
+                allowed = allowed_filters_for_window(
+                    mag_lookup.get(row["Name"], {}),
+                    sun_alt,
+                    row["_moon_alt"],
+                    row["_moon_phase"],
+                    row["_moon_sep"],
+                    airmass_from_alt_deg(row["max_alt_deg"]),
+                    cfg.fwhm_eff or 0.7,
+                )
+                allowed = [f for f in allowed if f in cfg.filters]
+                moon_sep_ok = {
+                    f: row["_moon_sep"] >= effective_min_sep(
+                        f, row["_moon_alt"], row["_moon_phase"], cfg.min_moon_sep_by_filter
+                    )
+                    for f in allowed
+                }
                 first = pick_first_filter_for_target(
                     row["Name"],
                     row.get("SN_type_raw"),
@@ -239,7 +267,7 @@ def plan_twilight_range_with_caps(
                     allowed,
                     cfg,
                     sun_alt_deg=sun_alt,
-                    moon_sep_ok=None,
+                    moon_sep_ok=moon_sep_ok,
                     current_mag=mag_lookup.get(row["Name"]),
                     current_filter=current_filter_by_window.get(idx_w),
                 )
@@ -254,12 +282,14 @@ def plan_twilight_range_with_caps(
                     "priority_score": row["priority_score"],
                     "first_filter": first,
                     "sn_type": row.get("SN_type_raw"),
+                    "allowed": allowed,
+                    "moon_sep_ok": moon_sep_ok,
                 }
                 candidates.append(cand)
             if not candidates:
                 continue
 
-            batch_order = [f for f in ["y", "z", "i", "r", "g", "u"] if any(c["first_filter"] == f for c in candidates) and f in allowed]
+            batch_order = [f for f in ["y", "z", "i", "r", "g", "u"] if any(c["first_filter"] == f for c in candidates)]
 
             cap_s = window_caps.get(idx_w, 0.0)
             window_sum = 0.0
@@ -282,10 +312,10 @@ def plan_twilight_range_with_caps(
                             t["Name"],
                             t.get("sn_type"),
                             tracker,
-                            allowed,
+                            t["allowed"],
                             cfg,
                             sun_alt_deg=sun_alt,
-                            moon_sep_ok=None,
+                            moon_sep_ok=t["moon_sep_ok"],
                             current_mag=mag_lookup.get(t["Name"]),
                             current_filter=state,
                         )
@@ -307,7 +337,7 @@ def plan_twilight_range_with_caps(
                     sep = 0.0 if prev is None else great_circle_sep_deg(prev["RA_deg"], prev["Dec_deg"], t["RA_deg"], t["Dec_deg"])
                     cfg.current_mag_by_filter = mag_lookup.get(t["Name"])
                     cfg.current_alt_deg = t["max_alt_deg"]
-                    filters_pref = [first] + [x for x in allowed if x != first]
+                    filters_pref = [first] + [x for x in t["allowed"] if x != first]
                     filters_used, timing = choose_filters_with_cap(
                         filters_pref,
                         sep,
@@ -417,7 +447,7 @@ def plan_twilight_range_with_caps(
                 "filter_change_s_total": round(window_filter_change_s, 1),
                 "mean_slew_s": float(np.mean(window_slew_times)) if window_slew_times else 0.0,
                 "median_airmass": float(np.median(window_airmasses)) if window_airmasses else 0.0,
-                "loaded_filters": ",".join(allowed),
+                "loaded_filters": ",".join(cfg.filters),
                 "filters_used_csv": used_filters_csv,
             })
 

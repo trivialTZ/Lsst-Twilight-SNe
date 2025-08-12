@@ -100,7 +100,7 @@ def test_best_time_with_moon():
         datetime(2024, 1, 15, 1, 0, tzinfo=timezone.utc),
     )
     target_far = SkyCoord(74.817 * u.deg, -9.76 * u.deg)
-    alt, t = _best_time_with_moon(
+    alt, t, *_ = _best_time_with_moon(
         target_far, window, LOC, step_min=30, min_alt_deg=30, min_moon_sep_deg=30
     )
     assert t is not None and window[0] <= t <= window[1]
@@ -113,7 +113,7 @@ def test_best_time_with_moon():
     assert sep >= 30
 
     target_near = SkyCoord(344.81747793145 * u.deg, -9.76040058827 * u.deg)
-    alt, t = _best_time_with_moon(
+    alt, t, *_ = _best_time_with_moon(
         target_near, window, LOC, step_min=30, min_alt_deg=20, min_moon_sep_deg=30
     )
     assert t is None

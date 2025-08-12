@@ -270,7 +270,12 @@ def unit_report_from_df(df: pd.DataFrame, cfg: PlannerConfig) -> dict:
         "notes": notes,
     }
 
-def normalize_ra_dec_to_degrees(df: pd.DataFrame, ra_col: str, dec_col: str) -> pd.DataFrame:
+from .astro_utils import validate_coords
+
+
+def normalize_ra_dec_to_degrees(
+    df: pd.DataFrame, ra_col: str, dec_col: str, name_col: str | None = None
+) -> pd.DataFrame:
     """Normalize RA/Dec columns to degrees.
 
     Parameters
@@ -314,16 +319,20 @@ def normalize_ra_dec_to_degrees(df: pd.DataFrame, ra_col: str, dec_col: str) -> 
     else:
         dec_deg = pd.Series([_parse_dec_value(v) for v in out[dec_col].values], index=out.index, dtype=float)
 
-    out["RA_deg"] = np.mod(ra_deg.astype(float), 360.0)
-    dec_vals = dec_deg.astype(float)
-    mask = (dec_vals < -90.0) | (dec_vals > 90.0)
-    if mask.any():
-        warnings.warn(
-            "Declination outside [-90, +90] deg; clamping values",
-            RuntimeWarning,
-        )
-        dec_vals = dec_vals.clip(-90.0, 90.0)
-    out["Dec_deg"] = dec_vals
+    ra_vals = ra_deg.astype(float).values
+    dec_vals = dec_deg.astype(float).values
+
+    def _val(idx: int, ra: float, dec: float) -> Tuple[float, float]:
+        snid = out[name_col].iloc[idx] if name_col and name_col in out.columns else idx
+        try:
+            return validate_coords(ra, dec)
+        except ValueError as e:
+            raise ValueError(f"SN {snid}: {e}")
+
+    validated = [_val(i, ra_vals[i], dec_vals[i]) for i in range(len(out))]
+    ra_norm, dec_clamped = zip(*validated)
+    out["RA_deg"] = ra_norm
+    out["Dec_deg"] = dec_clamped
     return out
 
 def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
@@ -380,7 +389,7 @@ def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
         quick_unit_report(df, ra_col, dec_col)
     except Exception:
         pass
-    df = normalize_ra_dec_to_degrees(df, ra_col, dec_col)
+    df = normalize_ra_dec_to_degrees(df, ra_col, dec_col, name_col)
     if disc_col and disc_col in df.columns:
         parsed = _parse_discovery_to_datetime(df[disc_col])
     else:

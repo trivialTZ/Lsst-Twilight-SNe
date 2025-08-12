@@ -27,7 +27,7 @@ def test_best_time_with_moon_no_warning():
     loc = EarthLocation(lat=0 * u.deg, lon=0 * u.deg, height=0 * u.m)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("error")
-        alt, t = _best_time_with_moon(sc, window, loc, 10, 0.0, 0.0)
+        alt, t, *_ = _best_time_with_moon(sc, window, loc, 10, 0.0, 0.0)
     assert w == []
     assert isinstance(alt, float)
 
