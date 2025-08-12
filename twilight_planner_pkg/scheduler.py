@@ -13,8 +13,13 @@ from astropy.time import Time
 from .config import PlannerConfig
 from .io_utils import standardize_columns, extract_current_mags
 from .astro_utils import (
-    twilight_windows_astro, great_circle_sep_deg, choose_filters_with_cap,
-    per_sn_time_seconds, parse_sn_type_to_window_days, _best_time_with_moon, airmass_from_alt_deg
+    twilight_windows_astro,
+    great_circle_sep_deg,
+    choose_filters_with_cap,
+    per_sn_time_seconds,
+    parse_sn_type_to_window_days,
+    _best_time_with_moon,
+    airmass_from_alt_deg,
 )
 from .priority import PriorityTracker
 from .simlib_writer import SimlibWriter, SimlibHeader
@@ -97,9 +102,15 @@ def plan_twilight_range_with_caps(
         writer.write_header()
     libid_counter = 1
 
-    filters = cfg.filters or []
+    filters = list(cfg.filters or [])
     if cfg.carousel_capacity and len(filters) > cfg.carousel_capacity:
-        print(f"WARNING: Requesting {len(filters)} filters but carousel holds only {cfg.carousel_capacity}. Proceeding for planning only.")
+        drop = "u" if "u" in filters else filters[-1]
+        if verbose:
+            print(
+                f"WARNING: requesting {len(filters)} filters but carousel holds only {cfg.carousel_capacity}; dropping {drop}."
+            )
+        filters.remove(drop)
+        cfg.filters = filters
 
     req_sep = (
         max(cfg.min_moon_sep_by_filter.get(f, 0.0) for f in filters)
@@ -184,11 +195,22 @@ def plan_twilight_range_with_caps(
             cap_s = window_caps.get(idx_w, 0.0)
             window_sum = 0.0
             prev = None
+            current_filter = None
+            cross_changes = 0
+            internal_changes = 0
+            window_slews: List[float] = []
             for t in ordered:
                 sep = 0.0 if prev is None else great_circle_sep_deg(prev["RA_deg"], prev["Dec_deg"], t["RA_deg"], t["Dec_deg"])
                 cfg.current_mag_by_filter = mag_lookup.get(t["Name"])
                 cfg.current_alt_deg = t["max_alt_deg"]
-                filters_used, timing = choose_filters_with_cap(cfg.filters, sep, cfg.per_sn_cap_s, cfg)
+                filters_used, timing = choose_filters_with_cap(
+                    filters,
+                    sep,
+                    cfg.per_sn_cap_s,
+                    cfg,
+                    current_filter=current_filter,
+                    max_filters_per_visit=cfg.max_filters_per_visit,
+                )
                 if window_sum + timing["total_s"] > cap_s:
                     continue
                 window_sum += timing["total_s"]
@@ -245,6 +267,12 @@ def plan_twilight_range_with_caps(
                             "GAIN": round(eph.GAIN, 2),
                             "saturation_guard_applied": exp_s < cfg.exposure_by_filter.get(f, exp_s) - 1e-6,
                             "priority_score": round(float(t["priority_score"]), 2),
+                            "slew_s": round(timing["slew_s"], 2),
+                            "cross_filter_change_s": round(timing.get("cross_filter_change_s", 0.0), 2),
+                            "filter_changes_s": round(timing.get("filter_changes_s", 0.0), 2),
+                            "readout_s": round(timing["readout_s"], 2),
+                            "exposure_s": round(timing["exposure_s"], 2),
+                            "total_time_s": round(timing["total_s"], 2),
                         }
                     )
 
@@ -256,7 +284,12 @@ def plan_twilight_range_with_caps(
                     for epoch in epochs:
                         writer.add_epoch(**epoch)
                     writer.end_libid()
+                if timing.get("cross_filter_change_s", 0) > 0:
+                    cross_changes += 1
+                internal_changes += max(0, len(filters_used) - 1)
+                window_slews.append(sep)
                 prev = t
+                current_filter = filters_used[-1] if filters_used else current_filter
                 tracker.record_detection(t["Name"], timing["exposure_s"], filters_used)
 
             nights_rows.append({
@@ -266,6 +299,9 @@ def plan_twilight_range_with_caps(
                 "n_planned": int(len([r for r in pernight_rows if (r['date']==day.date().isoformat() and r['twilight_window']==window_labels.get(idx_w, f'W{idx_w}'))])),
                 "sum_time_s": round(window_sum, 1),
                 "window_cap_s": int(cap_s),
+                "cross_filter_changes": int(cross_changes),
+                "internal_filter_changes": int(internal_changes),
+                "avg_slew_deg": float(np.mean(window_slews)) if window_slews else 0.0,
             })
 
         if verbose:

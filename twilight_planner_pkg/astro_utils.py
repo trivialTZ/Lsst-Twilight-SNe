@@ -1,6 +1,6 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Sequence
+from typing import Dict, List, Tuple, Sequence
 import numpy as np
 import astropy.units as u
 import warnings
@@ -30,22 +30,23 @@ from .config import PlannerConfig
 
 
 def airmass_from_alt_deg(alt_deg: float) -> float:
-    """Convert an altitude angle to airmass.
+    """Convert altitude to relative airmass.
 
-    Parameters
-    ----------
-    alt_deg : float
-        Altitude above the horizon in degrees.
-
-    Returns
-    -------
-    float
-        Airmass estimated using a secant approximation.
+    The function uses the Kasten & Young (1989) formula below 20° altitude and
+    a simple secant approximation at higher altitudes.  It never returns
+    infinite or zero values.
     """
 
-    import numpy as np, math
-    z = np.deg2rad(max(0.0, min(90.0, 90.0 - float(alt_deg))))
-    return 1.0 / max(1e-4, math.cos(z))
+    alt = float(alt_deg)
+    alt = max(min(alt, 90.0), -90.0)
+    if alt <= 0:
+        alt = 0.0
+    z = 90.0 - alt
+    secz = 1.0 / max(1e-4, np.cos(np.deg2rad(z)))
+    if alt < 20.0:
+        x = secz - 1.0
+        secz = secz - 0.0018167 * x - 0.002875 * x ** 2 - 0.0008083 * x ** 3
+    return float(secz)
 
 def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple[datetime, datetime]]:
     """Compute astronomical twilight windows for a given date and location.
@@ -104,6 +105,50 @@ def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
     c2 = SkyCoord(ra2*u.deg, dec2*u.deg)
     return c1.separation(c2).deg
 
+
+def pick_first_filter_for_target(
+    name: str,
+    sn_type: str | None,
+    tracker: "PriorityTracker",
+    allowed_filters: List[str],
+    cfg: PlannerConfig,
+    sun_alt_deg: float | None = None,
+    moon_sep_ok: Dict[str, bool] | None = None,
+    current_mag: Dict[str, float] | None = None,
+    current_filter: str | None = None,
+) -> str | None:
+    """Decide which filter to use first for the SN ``name``.
+
+    Parameters are intentionally lightweight; the caller supplies the set of
+    ``allowed_filters`` for the current window and an optional map of
+    ``moon_sep_ok`` booleans keyed by filter.  The :class:`PriorityTracker`
+    decides whether the target is still in the Hybrid stage (seeking detections
+    in two filters) or has been escalated to the light‑curve stage.
+
+    The function prefers filters that have not yet been used on the target when
+    in the Hybrid stage.  Once escalated, it chooses the reddest available
+    filter that passes the Moon constraint and, if possible, matches the
+    current carousel filter to avoid a costly swap.
+    """
+
+    try:
+        hist = tracker.history.get(name, None)  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - tracker not supplied
+        hist = None
+
+    candidates = [f for f in allowed_filters if (moon_sep_ok or {}).get(f, True)]
+    if not candidates:
+        return None
+
+    if hist and not getattr(hist, "escalated", False):
+        for f in candidates:
+            if f not in getattr(hist, "filters", set()):
+                return f
+
+    twilight_pref = ["y", "z", "i", "r", "g", "u"]
+    ordered = [f for f in twilight_pref if f in candidates]
+    return ordered[0] if ordered else candidates[0]
+
 def slew_time_seconds(sep_deg: float, *, small_deg: float, small_time: float,
                       rate_deg_per_s: float, settle_s: float) -> float:
     """Estimate telescope slew time including settle time.
@@ -134,23 +179,9 @@ def slew_time_seconds(sep_deg: float, *, small_deg: float, small_time: float,
         t = small_time + (sep_deg - small_deg) / max(rate_deg_per_s, 1e-3)
     return t + settle_s
 
-def per_sn_time_seconds(filters, sep_deg: float, cfg: PlannerConfig):
-    """Compute total time budget for observing one supernova.
+def per_sn_time_seconds(filters: Sequence[str], sep_deg: float, cfg: PlannerConfig):
+    """Compute the total time to execute a visit in the given ``filters``."""
 
-    Parameters
-    ----------
-    filters : Sequence[str]
-        Filters to use for the target.
-    sep_deg : float
-        Slew distance from the previous target in degrees.
-    cfg : PlannerConfig
-        Configuration with exposure and overhead settings.
-
-    Returns
-    -------
-    tuple
-        ``(total_s, slew_s, exposure_s, readout_s, filter_changes_s)`` in seconds.
-    """
     slew = slew_time_seconds(
         sep_deg,
         small_deg=cfg.slew_small_deg,
@@ -158,40 +189,52 @@ def per_sn_time_seconds(filters, sep_deg: float, cfg: PlannerConfig):
         rate_deg_per_s=cfg.slew_rate_deg_per_s,
         settle_s=cfg.slew_settle_s,
     )
-    exptime = sum(cfg.exposure_by_filter.get(f, 0.0) for f in filters)
-    readout = cfg.readout_s * len(filters)
-    fchanges = cfg.filter_change_s * max(0, len(filters)-1)
-    total = slew + exptime + readout + fchanges
-    return total, slew, exptime, readout, fchanges
+    exposure = sum(cfg.exposure_by_filter.get(f, 0.0) for f in filters)
+    readout = cfg.readout_time_s * len(filters)
+    fchanges = cfg.filter_change_time_s * max(0, len(filters) - 1)
+    total = slew + exposure + readout + fchanges
+    return total, slew, exposure, readout, fchanges
 
-def choose_filters_with_cap(filters, sep_deg: float, cap_s: float, cfg: PlannerConfig):
-    """Select a subset of filters whose total time fits within a cap.
 
-    Parameters
-    ----------
-    filters : Sequence[str]
-        Candidate filters in priority order.
-    sep_deg : float
-        Slew distance from the previous target in degrees.
-    cap_s : float
-        Maximum allowed time in seconds.
-    cfg : PlannerConfig
-        Timing configuration.
+def choose_filters_with_cap(
+    filters: List[str],
+    sep_deg: float,
+    cap_s: float,
+    cfg: PlannerConfig,
+    *,
+    current_filter: str | None = None,
+    max_filters_per_visit: int | None = None,
+) -> tuple[List[str], dict]:
+    """Choose a sequence of filters that fits within ``cap_s`` seconds.
 
-    Returns
-    -------
-    tuple
-        ``(used_filters, timing)`` where ``timing`` matches
-        :func:`per_sn_time_seconds` keys.
+    The function accounts for slew time, cross‑target filter changes and
+    per‑filter exposures/readouts.  If no filter fits within the cap, the first
+    requested filter is returned even if it slightly exceeds the cap.  The
+    ``timing`` dictionary contains a breakdown of the time budget with keys:
+
+    ``total_s``
+        Total visit time including all overheads.
+    ``slew_s``
+        Slew time from the previous target.
+    ``cross_filter_change_s``
+        Carousel change needed before the first exposure.
+    ``filter_changes_s``
+        Internal changes within the visit (after the first filter).
+    ``readout_s``
+        Total readout time.
+    ``exposure_s``
+        Sum of exposure times.
+    ``exp_times``
+        Mapping of filter to exposure time.
     """
-    from .photom_rubin import PhotomConfig, cap_exposure_for_saturation
-    from .sky_model import SkyModelConfig, sky_mag_arcsec2
 
-    used: list[str] = []
-
-    if not cfg.allow_filter_changes_in_twilight:
-        filters = list(filters)[:1]
-    _slew = slew_time_seconds(
+    if max_filters_per_visit is not None:
+        max_filters = max_filters_per_visit
+    elif getattr(cfg, "allow_filter_changes_in_twilight", False):
+        max_filters = len(filters)
+    else:
+        max_filters = cfg.max_filters_per_visit
+    slew = slew_time_seconds(
         sep_deg,
         small_deg=cfg.slew_small_deg,
         small_time=cfg.slew_small_time_s,
@@ -199,67 +242,56 @@ def choose_filters_with_cap(filters, sep_deg: float, cap_s: float, cfg: PlannerC
         settle_s=cfg.slew_settle_s,
     )
 
-    phot_cfg = PhotomConfig(
-        pixel_scale_arcsec=cfg.pixel_scale_arcsec,
-        zpt1s=cfg.zpt1s or None,
-        k_m=cfg.k_m or None,
-        fwhm_eff=cfg.fwhm_eff or None,
-        read_noise_e=cfg.read_noise_e,
-        gain_e_per_adu=cfg.gain_e_per_adu,
-        zpt_err_mag=cfg.zpt_err_mag,
-        npe_pixel_saturate=cfg.simlib_npe_pixel_saturate,
-    )
-    sky_cfg = SkyModelConfig(
-        dark_sky_mag=cfg.dark_sky_mag,
-        twilight_delta_mag=cfg.twilight_delta_mag,
-    )
-
-    def capped_exp(f: str) -> float:
-        base = cfg.exposure_by_filter.get(f, 0.0)
-        if cfg.current_mag_by_filter and f in cfg.current_mag_by_filter:
-            alt = cfg.current_alt_deg if cfg.current_alt_deg is not None else cfg.min_alt_deg
-            if cfg.sky_provider:
-                sky = cfg.sky_provider.sky_mag(None, None, None, f, airmass_from_alt_deg(alt))
-            else:
-                sky = sky_mag_arcsec2(f, sky_cfg)
-            base = cap_exposure_for_saturation(
-                f,
-                base,
-                alt,
-                cfg.current_mag_by_filter[f],
-                sky,
-                phot_cfg,
-                min_exp_s=1.0,
-            )
-        return base
+    used: List[str] = []
+    cross_change = 0.0
+    exposure = 0.0
+    readout = 0.0
+    internal_changes = 0.0
 
     for f in filters:
-        trial = used + [f]
-        exp_times = {x: capped_exp(x) for x in trial}
-        exptime = sum(exp_times.values())
-        readout = cfg.readout_s * len(trial)
-        fchanges = cfg.filter_change_s * max(0, len(trial) - 1)
-        total = _slew + exptime + readout + fchanges
-        if total <= cap_s:
-            used = trial
+        if len(used) >= max_filters:
+            break
+        exp = cfg.exposure_by_filter.get(f, 0.0)
+        trial_cross = cfg.filter_change_time_s if (used == [] and current_filter and f != current_filter) else 0.0
+        trial_internal = cfg.filter_change_time_s if used else 0.0
+        trial_total = (
+            slew
+            + cross_change
+            + trial_cross
+            + internal_changes
+            + trial_internal
+            + exposure
+            + exp
+            + readout
+            + cfg.readout_time_s
+        )
+        if trial_total <= cap_s or not used:
+            if used == []:
+                cross_change = trial_cross
+            else:
+                internal_changes += trial_internal
+            used.append(f)
+            exposure += exp
+            readout += cfg.readout_time_s
         else:
             break
 
     if not used and filters:
         used = [filters[0]]
+        exp = cfg.exposure_by_filter.get(filters[0], 0.0)
+        cross_change = cfg.filter_change_time_s if current_filter and filters[0] != current_filter else 0.0
+        exposure = exp
+        readout = cfg.readout_time_s
 
-    exp_times = {x: capped_exp(x) for x in used}
-    exptime = sum(exp_times.values())
-    readout = cfg.readout_s * len(used)
-    fchanges = cfg.filter_change_s * max(0, len(used) - 1)
-    total = _slew + exptime + readout + fchanges
+    total = slew + cross_change + internal_changes + exposure + readout
     timing = {
         "total_s": total,
-        "slew_s": _slew,
-        "exposure_s": exptime,
+        "slew_s": slew,
+        "cross_filter_change_s": cross_change,
+        "filter_changes_s": internal_changes,
         "readout_s": readout,
-        "filter_changes_s": fchanges,
-        "exp_times": exp_times,
+        "exposure_s": exposure,
+        "exp_times": {f: cfg.exposure_by_filter.get(f, 0.0) for f in used},
     }
     return used, timing
 
@@ -287,29 +319,21 @@ def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
             return int(math.ceil(1.2 * days))
     return int(math.ceil(1.2 * cfg.default_typical_days))
 
-def _best_time_with_moon(sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg):
-    """Find the best time within a window that meets altitude and moon constraints.
+def _best_time_with_moon(
+    sc: SkyCoord,
+    window: Tuple[datetime, datetime],
+    loc: EarthLocation,
+    step_min: int,
+    min_alt_deg: float,
+    min_moon_sep_deg: float,
+) -> Tuple[float, datetime | None]:
+    """Sample a window and return the best observation time.
 
-    Parameters
-    ----------
-    sc : astropy.coordinates.SkyCoord
-        Target coordinates.
-    window : tuple[datetime, datetime]
-        Candidate twilight window.
-    loc : astropy.coordinates.EarthLocation
-        Observatory location.
-    step_min : int
-        Sampling step size in minutes.
-    min_alt_deg : float
-        Minimum altitude requirement in degrees.
-    min_moon_sep_deg : float
-        Minimum separation from the Moon in degrees.
-
-    Returns
-    -------
-    tuple
-        ``(best_alt_deg, best_time_utc)`` where ``best_time_utc`` is a
-        ``datetime`` or ``None`` if no suitable time exists.
+    Both the target and the Moon are transformed into the same topocentric
+    :class:`~astropy.coordinates.AltAz` frame to evaluate the separation.  The
+    separation constraint is ignored if the Moon is below the horizon.  The
+    function is vectorised and avoids Astropy's angular-separation warnings by
+    construction.
     """
     t0, t1 = window
     if t1 <= t0:
