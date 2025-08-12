@@ -19,7 +19,36 @@ def predict_m5(
     airmass: float,
     seeing: float,
 ) -> float:
-    """Very small heuristic m5 estimator."""
+    """Estimate the 5σ limiting magnitude for a single exposure.
+
+    Parameters
+    ----------
+    filt : str
+        Photometric filter name.
+    sun_alt_deg : float
+        Altitude of the Sun in degrees (negative below horizon).
+    moon_alt_deg : float
+        Altitude of the Moon in degrees.
+    moon_phase : float
+        Fractional lunar illumination in ``[0, 1]``.
+    moon_sep_deg : float
+        Angular separation between target and Moon in degrees.
+    airmass : float
+        Airmass along the line of sight.
+    seeing : float
+        Full width at half maximum of the point-spread function in arcseconds.
+
+    Returns
+    -------
+    float
+        Heuristic estimate of the 5σ depth ``m5`` in magnitudes.
+
+    Notes
+    -----
+    This calculator is intentionally lightweight and is not a substitute for a
+    full Rubin Observatory sky brightness model. It merely captures relative
+    trends with Sun and Moon conditions.
+    """
     sun_term = max(0.0, sun_alt_deg + 12.0)
     factors = {"g": 0.35, "r": 0.30, "i": 0.15, "z": 0.10, "y": 0.05}
     sun_penalty = sun_term * factors.get(filt, 0.2)
@@ -30,6 +59,19 @@ def predict_m5(
 
 
 def heuristic_filters_from_sun_alt(sun_alt_deg: float) -> List[str]:
+    """Fallback filter ordering based solely on Sun altitude.
+
+    Parameters
+    ----------
+    sun_alt_deg : float
+        Altitude of the Sun in degrees.
+
+    Returns
+    -------
+    list of str
+        Filters sorted from most to least preferred under the heuristic
+        assumption that redder filters cope better with twilight brightness.
+    """
     if sun_alt_deg > -8:
         return ["i", "z", "y"]
     if sun_alt_deg > -15:
@@ -46,9 +88,42 @@ def allowed_filters_for_window(
     airmass: float,
     seeing: float,
 ) -> List[str]:
+    """Select filters that are predicted to reach the target's magnitude.
+
+    Parameters
+    ----------
+    target_mag_dict : dict of str to float
+        Target magnitudes by filter. Missing filters fall back to the ``"r"``
+        entry or ``21.5`` if absent.
+    sun_alt_deg : float
+        Altitude of the Sun in degrees.
+    moon_alt_deg : float
+        Altitude of the Moon in degrees.
+    moon_phase : float
+        Fractional lunar illumination in ``[0, 1]``.
+    moon_sep_deg : float
+        Separation between target and Moon in degrees.
+    airmass : float
+        Airmass along the line of sight.
+    seeing : float
+        Seeing FWHM in arcseconds.
+
+    Returns
+    -------
+    list of str
+        Filters deemed viable. When the m5 model rejects all filters, a
+        heuristic set based on Sun altitude is returned as a fallback.
+
+    Notes
+    -----
+    The selection is heuristic and meant for quick pruning; it does not
+    guarantee the requested signal-to-noise ratio in practice.
+    """
     allowed: List[str] = []
     for filt in ["g", "r", "i", "z", "y"]:
-        m5 = predict_m5(filt, sun_alt_deg, moon_alt_deg, moon_phase, moon_sep_deg, airmass, seeing)
+        m5 = predict_m5(
+            filt, sun_alt_deg, moon_alt_deg, moon_phase, moon_sep_deg, airmass, seeing
+        )
         target_mag = target_mag_dict.get(filt, target_mag_dict.get("r", 21.5))
         if m5 - target_mag >= MARGIN_MAG:
             allowed.append(filt)

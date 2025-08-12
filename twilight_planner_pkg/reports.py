@@ -6,6 +6,35 @@ import pandas as pd
 
 
 def summarize_night(plan_df: pd.DataFrame, twilight_window_s: float) -> Dict[str, Any]:
+    """Compute nightly efficiency and science KPIs from a plan.
+
+    Parameters
+    ----------
+    plan_df : pandas.DataFrame
+        DataFrame describing the executed or planned observations. Required
+        columns are ``exposure_s``, ``readout_s``, ``filter_changes_s``,
+        ``cross_filter_change_s``, ``slew_s``, ``filter`` and ``Name``. Optional
+        columns ``airmass`` and ``moon_sep`` enable additional metrics.
+    twilight_window_s : float
+        Duration of the available twilight window in seconds.
+
+    Returns
+    -------
+    dict
+        Mapping of metric names to values. The same information is written to
+        ``twilight_outputs/nightly_metrics.csv``.
+
+    Notes
+    -----
+    Key performance indicators include
+
+    ``science_efficiency``
+        ``science_exptime_s / total_used_s``
+    ``twilight_utilization``
+        ``total_used_s / twilight_window_s``
+    ``color_completeness_frac``
+        Fraction of supernovae observed in at least two filters.
+    """
     totals = {
         "science_exptime_s": float(plan_df.get("exposure_s", pd.Series(dtype=float)).sum()),
         "readout_s": float(plan_df.get("readout_s", pd.Series(dtype=float)).sum()),
