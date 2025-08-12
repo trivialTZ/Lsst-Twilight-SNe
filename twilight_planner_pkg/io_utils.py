@@ -5,6 +5,9 @@ import pandas as pd
 import astropy.units as u
 from astropy.coordinates import Angle
 from astropy.time import Time
+import warnings
+
+from .astro_utils import parse_sn_type_to_window_days
 
 from .config import PlannerConfig
 
@@ -311,16 +314,16 @@ def normalize_ra_dec_to_degrees(df: pd.DataFrame, ra_col: str, dec_col: str) -> 
     else:
         dec_deg = pd.Series([_parse_dec_value(v) for v in out[dec_col].values], index=out.index, dtype=float)
 
-    out["RA_deg"]  = np.mod(ra_deg.astype(float), 360.0)
-    out["Dec_deg"] = dec_deg.astype(float)
-
-    dec_min, dec_max = float(np.nanmin(out["Dec_deg"])), float(np.nanmax(out["Dec_deg"]))
-    if dec_min < -90.5 or dec_max > 90.5:
-        bad = out[(out["Dec_deg"] < -90.5) | (out["Dec_deg"] > 90.5)][[ra_col, dec_col, "RA_deg", "Dec_deg"]].head(10)
-        raise ValueError(
-            f"Declination outside ±90° after normalization: range=({dec_min}, {dec_max}). "
-            f"Example offending rows:\n{bad.to_string(index=False)}"
+    out["RA_deg"] = np.mod(ra_deg.astype(float), 360.0)
+    dec_vals = dec_deg.astype(float)
+    mask = (dec_vals < -90.0) | (dec_vals > 90.0)
+    if mask.any():
+        warnings.warn(
+            "Declination outside [-90, +90] deg; clamping values",
+            RuntimeWarning,
         )
+        dec_vals = dec_vals.clip(-90.0, 90.0)
+    out["Dec_deg"] = dec_vals
     return out
 
 def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
@@ -338,15 +341,19 @@ def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
     """
     numeric = pd.to_numeric(series, errors="coerce")
     if numeric.notna().any():
+        out = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns, UTC]")
         mask_mjd = (numeric >= 30000) & (numeric <= 90000)
         if mask_mjd.any():
-            dt = pd.to_datetime(Time(numeric[mask_mjd].values, format="mjd").to_datetime("utc"))
-            out = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns, UTC]")
-            out.loc[mask_mjd.index[mask_mjd]] = dt.values
-            rest = series[~mask_mjd]
-            if rest.size:
-                out.loc[rest.index] = pd.to_datetime(rest, utc=True, errors="coerce")
-            return out
+            dt_mjd = pd.to_datetime(Time(numeric[mask_mjd].values, format="mjd").to_datetime("utc"))
+            out.loc[mask_mjd.index[mask_mjd]] = dt_mjd
+        mask_jd = (numeric >= 2400000) & (numeric <= 2500000)
+        if mask_jd.any():
+            dt_jd = pd.to_datetime(Time(numeric[mask_jd].values, format="jd").to_datetime("utc"))
+            out.loc[mask_jd.index[mask_jd]] = dt_jd
+        remaining = series[~(mask_mjd | mask_jd)]
+        if remaining.size:
+            out.loc[remaining.index] = pd.to_datetime(remaining, utc=True, errors="coerce")
+        return out
     dt = pd.to_datetime(series, utc=True, errors="coerce")
     if dt.dt.tz is None:
         dt = dt.dt.tz_localize("UTC")
@@ -381,6 +388,7 @@ def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
     df["discovery_datetime"] = parsed
     df["Name"] = df[name_col].astype(str) if name_col in df.columns else [f"SN_{i:05d}" for i in range(len(df))]
     df["SN_type_raw"] = df[type_col].astype(str) if (type_col and type_col in df.columns) else np.nan
+    df["typical_lifetime_days"] = df["SN_type_raw"].apply(lambda t: parse_sn_type_to_window_days(t, cfg))
     return df
 
 
