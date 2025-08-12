@@ -67,15 +67,15 @@ def test_per_sn_time_and_filter_cap():
     total, slew, exptime, readout, fchanges = per_sn_time_seconds(["g", "r"], sep_deg=2, cfg=cfg)
     assert (total, slew, exptime, readout, fchanges) == pytest.approx((29, 2, 20, 2, 5))
 
-    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=40, cfg=cfg)
+    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=40, cfg=cfg, max_filters_per_visit=2)
     assert used == ["g", "r"]
     assert timing["total_s"] == pytest.approx(29)
 
-    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=20, cfg=cfg)
+    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=20, cfg=cfg, max_filters_per_visit=2)
     assert used == ["g"]
     assert timing["total_s"] == pytest.approx(13)
 
-    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=5, cfg=cfg)
+    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=5, cfg=cfg, max_filters_per_visit=2)
     assert used == ["g"]
     assert timing["total_s"] == pytest.approx(13)
 
