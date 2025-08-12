@@ -2,9 +2,10 @@
 
 Provides Kasten & Young (1989) airmass, Moon-aware timing helpers using
 ``astropy.coordinates.get_body`` in a shared AltAz frame, and functions for
-filter-aware visit timing.  Moon separation constraints are automatically
-waived when the Moon is below the horizon.  Slew, readout, and filter-change
-overheads reflect Rubin Observatory technical notes.
+filter-aware visit timing.  Moon separation requirements are graded by Moon
+altitude and phase rather than simply waived below the horizon.  Slew,
+readout, and filter-change overheads reflect Rubin Observatory technical
+notes.
 """
 
 from __future__ import annotations
@@ -449,13 +450,14 @@ def _best_time_with_moon(
 
     Both the target and the Moon are transformed into the same topocentric
     :class:`~astropy.coordinates.AltAz` frame to evaluate the separation.  The
-    separation constraint is ignored if the Moon is below the horizon.  The
-    function is vectorised and avoids Astropy's angular-separation warnings by
-    construction.
+    separation requirement is scaled by :func:`~twilight_planner_pkg.constraints.moon_separation_factor`,
+    which gradually relaxes the minimum separation when the Moon is low or
+    below the horizon.  The function is vectorised and avoids Astropy's
+    angular-separation warnings by construction.
     """
     t0, t1 = window
     if t1 <= t0:
-        return -np.inf, None
+        return -np.inf, None, float("nan"), float("nan"), float("nan")
     n = 1 + int((t1 - t0).total_seconds() // (step_min * 60))
     ts = Time([t0 + timedelta(minutes=step_min * i) for i in range(n)])
     altaz = AltAz(obstime=ts, location=loc)

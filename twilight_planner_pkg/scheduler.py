@@ -54,7 +54,6 @@ from .astro_utils import (
     airmass_from_alt_deg,
     slew_time_seconds,
     pick_first_filter_for_target,
-    validate_coords,
 )
 from .priority import PriorityTracker
 from .simlib_writer import SimlibWriter, SimlibHeader
@@ -103,7 +102,6 @@ def plan_twilight_range_with_caps(
     Path(outdir).mkdir(parents=True, exist_ok=True)
     raw = pd.read_csv(csv_path)
     df = standardize_columns(raw, cfg)
-    df["RA_deg"], df["Dec_deg"] = zip(*df.apply(lambda r: validate_coords(r["RA_deg"], r["Dec_deg"]), axis=1))
     mag_lookup = extract_current_mags(df)
 
     phot_cfg = PhotomConfig(

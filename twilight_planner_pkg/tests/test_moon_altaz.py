@@ -6,7 +6,9 @@ from astropy.utils.exceptions import AstropyWarning
 import pytest
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+import numpy as np
 from twilight_planner_pkg.astro_utils import _best_time_with_moon
+from twilight_planner_pkg.constraints import moon_separation_factor
 
 
 @pytest.mark.parametrize(
@@ -24,13 +26,19 @@ def test_best_time_with_moon_no_warnings(when, sc):
     assert not any(issubclass(wi.category, AstropyWarning) for wi in w)
 
 
-def test_moon_separation_waived_when_down():
+def test_moon_separation_factor_allows_low_altitude_moon():
+    f_deep = moon_separation_factor(-15.0, 0.8)
+    f_mid = moon_separation_factor(-5.0, 0.8)
+    assert f_deep == 0.0
+    assert 0.0 < f_mid < 1.0
+
+
+def test_best_time_with_moon_zero_length_window():
     sc = SkyCoord(0 * u.deg, 0 * u.deg)
-    now = datetime(2024, 1, 1, 12, tzinfo=timezone.utc)
-    window = (now, now + timedelta(hours=1))
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    window = (now, now)
     loc = EarthLocation(lat=0 * u.deg, lon=0 * u.deg, height=0 * u.m)
-    with warnings.catch_warnings(record=True) as w:
-        alt, t, *_ = _best_time_with_moon(sc, window, loc, 10, -10.0, 180.0)
-    assert not w
-    assert alt != float("-inf")
-    assert t is not None
+    alt, t, m_alt, m_phase, m_sep = _best_time_with_moon(sc, window, loc, 10, -10.0, 5.0)
+    assert alt == float("-inf")
+    assert t is None
+    assert np.isnan(m_alt) and np.isnan(m_phase) and np.isnan(m_sep)
