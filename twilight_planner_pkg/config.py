@@ -1,138 +1,139 @@
+"""Configuration definitions for the twilight planner.
+
+This module exposes :class:`PlannerConfig`, a dataclass collecting the many
+parameters used by the scheduler.  The defaults are tailored for the LSST site
+at Cerro Pach\u00f3n and can be customised for testing purposes.
+"""
+
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+
 @dataclass
 class PlannerConfig:
-    """Configuration container for twilight planning.
+    """Container of user‑tunable parameters for twilight planning.
 
-    Attributes
-    ----------
-    lat_deg, lon_deg, height_m : float
-        Observatory latitude, longitude, and elevation.
-    min_alt_deg : float, optional
-        Minimum altitude for targets in degrees.
-    typical_days_by_type : dict[str, int], optional
-        Mapping from supernova type to typical visibility window.
-    default_typical_days : int, optional
-        Fallback visibility window in days when type is unknown.
-    slew_small_deg : float, optional
-        Threshold for small slews in degrees.
-    slew_small_time_s : float, optional
-        Time in seconds for slews ``<=`` ``slew_small_deg``.
-    slew_rate_deg_per_s : float, optional
-        Slew rate for large moves.
-    slew_settle_s : float, optional
-        Additional settling time in seconds.
-    readout_s : float, optional
-        Detector readout time per exposure.
-    filter_change_s : float, optional
-        Overhead for a filter change in seconds.
-    filters : list[str], optional
-        Available filters in order of priority.
-    exposure_by_filter : dict[str, float], optional
-        Exposure time for each filter in seconds.
-    carousel_capacity : int, optional
-        Maximum number of filters the carousel can hold.
-    twilight_step_min : int, optional
-        Step size in minutes when sampling twilight windows.
-    evening_cap_s, morning_cap_s : float, optional
-        Time caps in seconds for evening and morning windows.
-    max_sn_per_night : int, optional
-        Maximum number of supernovae scheduled per night.
-    per_sn_cap_s : float, optional
-        Time cap per supernova in seconds.
-    min_moon_sep_by_filter : dict[str, float], optional
-        Minimum Moon separation per filter in degrees.
-    require_single_time_for_all_filters : bool, optional
-        Require one time satisfying Moon separation for all filters.
-    priority_strategy : str, optional
-        Strategy for dynamic prioritization (``"hybrid"`` or ``"lc"``).
-    hybrid_detections : int, optional
-        Detections in ≥2 filters marking completion of the Hybrid goal.
-    hybrid_exposure_s : float, optional
-        Total exposure seconds marking completion of the Hybrid goal.
-    lc_detections : int, optional
-        Detections required for the LSST-only goal.
-    lc_exposure_s : float, optional
-        Total exposure seconds for the LSST-only goal.
-    lc_phase_range : tuple[float, float], optional
-        Phase range (days from discovery) for LSST-only coverage.
-    ra_col, dec_col, disc_col, name_col, type_col : str or None, optional
-        Overrides for catalog column names. ``None`` enables auto-detection.
+    Only a subset of the fields are typically supplied by a user; the rest
+    carry defaults that reflect LSST design values.  The dataclass is purposely
+    lightweight so it can be serialised in tests and debugging sessions.
     """
-    # Site
-    lat_deg: float
-    lon_deg: float
-    height_m: float
 
-    # Selection
-    min_alt_deg: float = 20.0
-    typical_days_by_type: Dict[str, int] = field(default_factory=dict)
-    default_typical_days: int = 30
+    # -- Site ---------------------------------------------------------------
+    lat_deg: float = -30.2446
+    lon_deg: float = -70.7494
+    height_m: float = 2647.0
 
-    # Slew/overheads
-    slew_small_deg: float = 3.0
-    slew_small_time_s: float = 2.0
-    slew_rate_deg_per_s: float = 3.5
-    slew_settle_s: float = 2.0
-    readout_s: float = 2.0
-    filter_change_s: float = 120.0
+    # -- Visibility --------------------------------------------------------
+    min_alt_deg: float = 30.0
 
-    # Filters
-    filters: List[str] = field(default_factory=lambda: ["g","r","i","z"])
-    exposure_by_filter: Dict[str, float] = field(default_factory=lambda: {"g":5.0, "r":5.0, "i":5.0, "z":5.0})
-    carousel_capacity: int = 6
+    # -- Filters and hardware ---------------------------------------------
+    filters: List[str] = field(
+        default_factory=lambda: ["g", "r", "i", "z", "y"]
+    )
+    carousel_capacity: int = 5
+    filter_change_time_s: float = 120.0
+    readout_time_s: float = 2.0
+    # Legacy argument names supported via __post_init__
+    readout_s: float | None = None
+    filter_change_s: float | None = None
+    exposure_by_filter: Dict[str, float] = field(
+        default_factory=lambda: {
+            "u": 30.0,
+            "g": 15.0,
+            "r": 15.0,
+            "i": 15.0,
+            "z": 15.0,
+            "y": 15.0,
+        }
+    )
+    max_filters_per_visit: int = 1
 
-    # Twilight/caps
-    twilight_step_min: int = 2
-    evening_cap_s: float = 600.0
-    morning_cap_s: float = 600.0
-    max_sn_per_night: int = 10
-    per_sn_cap_s: float = 120.0
+    # -- Slew model --------------------------------------------------------
+    slew_small_deg: float = 3.5
+    slew_small_time_s: float = 4.0
+    slew_rate_deg_per_s: float = 5.25
+    slew_settle_s: float = 1.0
 
-    # Moon
-    min_moon_sep_by_filter: Dict[str, float] = field(default_factory=lambda: {"g":30.0, "r":25.0, "i":20.0, "z":15.0})
+    # -- Moon --------------------------------------------------------------
+    min_moon_sep_by_filter: Dict[str, float] = field(
+        default_factory=lambda: {
+            "u": 80.0,
+            "g": 50.0,
+            "r": 35.0,
+            "i": 30.0,
+            "z": 25.0,
+            "y": 20.0,
+        }
+    )
     require_single_time_for_all_filters: bool = True
 
-    # Priority
-    priority_strategy: str = "hybrid"
+    # -- Time caps ---------------------------------------------------------
+    per_sn_cap_s: float = 600.0
+    morning_cap_s: float = 1800.0
+    evening_cap_s: float = 1800.0
+    twilight_step_min: int = 2
+    max_sn_per_night: int = 20
+
+    # -- Priority tracking -------------------------------------------------
     hybrid_detections: int = 2
     hybrid_exposure_s: float = 300.0
     lc_detections: int = 5
     lc_exposure_s: float = 300.0
-    lc_phase_range: tuple[float, float] = (-7.0, 20.0)
+    priority_strategy: str = "hybrid"
 
-    # CSV columns (Optional: set to None for auto-detect)
+    # -- Photometry / sky --------------------------------------------------
+    pixel_scale_arcsec: float = 0.2
+    zpt1s: Dict[str, float] | None = None
+    k_m: Dict[str, float] | None = None
+    fwhm_eff: Dict[str, float] | None = None
+    read_noise_e: float = 5.0
+    gain_e_per_adu: float = 1.0
+    zpt_err_mag: float = 0.01
+    dark_sky_mag: Dict[str, float] | None = None
+    twilight_delta_mag: float = 2.5
+
+    # -- SIMLIB ------------------------------------------------------------
+    simlib_out: str | None = None
+    simlib_survey: str = "LSST"
+    simlib_filters: str = "grizy"
+    simlib_pixsize: float = 0.2
+    simlib_npe_pixel_saturate: float = 1.0e6
+    simlib_photflag_saturate: int = 4096
+    simlib_psf_unit: str = "arcsec"
+
+    # -- Miscellaneous -----------------------------------------------------
+    typical_days_by_type: Dict[str, int] = field(
+        default_factory=lambda: {
+            "Ia": 70,
+            "II-P": 100,
+            "II-L": 70,
+            "IIn": 120,
+            "IIb": 70,
+            "Ib": 60,
+            "Ic": 60,
+        }
+    )
+    default_typical_days: int = 60
+
     ra_col: Optional[str] = None
     dec_col: Optional[str] = None
     disc_col: Optional[str] = None
     name_col: Optional[str] = None
     type_col: Optional[str] = None
 
-    # --- Photometry & SIMLIB -------------------------------------------------
-    simlib_out: Optional[str] = None
-    simlib_survey: str = "LSST_TWILIGHT"
-    simlib_filters: str = "ugrizY"
-    simlib_pixsize: float = 0.200
-    simlib_npe_pixel_saturate: int = 120000
-    simlib_photflag_saturate: int = 2048
-    simlib_psf_unit: str = "NEA_PIXEL"
-
-    pixel_scale_arcsec: float = 0.2
-    zpt1s: Dict[str, float] | None = None
-    k_m: Dict[str, float] | None = None
-    fwhm_eff: Dict[str, float] | None = None
-    read_noise_e: float = 9.0
-    gain_e_per_adu: float = 1.6
-    zpt_err_mag: float = 0.005
-
-    dark_sky_mag: Dict[str, float] | None = None
-    twilight_delta_mag: float = 2.5
-
-    allow_filter_changes_in_twilight: bool = False
-
-    # Per-target hooks populated by the scheduler (not user-facing)
+    # Hooks filled in by the scheduler for per-target context ----------------
     current_mag_by_filter: Optional[Dict[str, float]] = None
     current_alt_deg: Optional[float] = None
     sky_provider: Optional[object] = None
+
+    # Backwards-compatibility options
+    allow_filter_changes_in_twilight: bool = False
+
+    def __post_init__(self) -> None:  # type: ignore[override]
+        if self.readout_s is not None:
+            self.readout_time_s = self.readout_s
+        if self.filter_change_s is not None:
+            self.filter_change_time_s = self.filter_change_s
+
