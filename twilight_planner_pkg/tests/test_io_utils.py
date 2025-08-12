@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from astropy.time import Time
 from datetime import timezone
+import warnings
 
 # Ensure package root is importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -110,3 +111,39 @@ def test_parse_discovery_to_datetime():
         Time.to_datetime = orig_to_datetime
     mjd_parsed = pd.to_datetime(mjd_parsed, utc=True)
     pd.testing.assert_series_equal(mjd_parsed, expected_mjd)
+
+
+def test_standardize_columns_units_and_dates():
+    df = pd.DataFrame(
+        {
+            "ra": [400.0, -10.0],
+            "dec": [95.0, -100.0],
+            "discoverydate": [60000.0, 2459123.5],
+            "name": ["SN1", "SN2"],
+            "type": ["Ia", "II-P"],
+        }
+    )
+    cfg_inst = cfg()
+    orig_to_datetime = Time.to_datetime
+    import datetime as dt_mod
+
+    def _patched(self, timezone=None):
+        if isinstance(timezone, str) and timezone.lower() == "utc":
+            timezone = dt_mod.timezone.utc
+        return orig_to_datetime(self, timezone=timezone)
+
+    Time.to_datetime = _patched
+    try:
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            out = standardize_columns(df, cfg_inst)
+        assert np.allclose(out["RA_deg"], [40.0, 350.0])
+        assert np.allclose(out["Dec_deg"], [90.0, -90.0])
+        assert any("clamping" in str(wi.message) for wi in w)
+        exp0 = pd.to_datetime(Time(60000.0, format="mjd").to_datetime(dt_mod.timezone.utc))
+        exp1 = pd.to_datetime(Time(2459123.5, format="jd").to_datetime(dt_mod.timezone.utc))
+        assert out["discovery_datetime"].iloc[0] == exp0
+        assert out["discovery_datetime"].iloc[1] == exp1
+        assert list(out["typical_lifetime_days"]) == [84, 120]
+    finally:
+        Time.to_datetime = orig_to_datetime
