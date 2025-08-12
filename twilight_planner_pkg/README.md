@@ -79,6 +79,13 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 - Visibility window lasts `ceil(1.2 × days)` after discovery where `days`
   comes from `typical_days_by_type` or a default fallback
 
+Key selection criteria recap:
+
+- A supernova must have a valid discovery date within the configured observation window.
+- Must be observable at altitude ≥ `min_alt_deg` (default 20°) during at least one twilight window (Sun altitude between −18° and 0°).
+- Eligibility duration after discovery is scaled from a `typical_days_by_type` value (or a default if type unknown) and multiplied by 1.2 to provide a buffer.
+- Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
+
 ### Twilight Windows & Best Time
 - Twilight windows are spans with Sun altitude $h_\odot \in [-18^\circ,0^\circ)$
 - Sample each window every `twilight_step_min` minutes
@@ -89,6 +96,15 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 - Keep the top `max_sn_per_night` globally; split by window (0=morning, 1=evening)
 - Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
 - Enforce window caps (`morning_cap_s`, `evening_cap_s`) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
+
+Prioritization strategy recap:
+
+- Hybrid strategy (default): Aim for quick color (≥ 2 detections in ≥ 2 filters or ≥ 300 s total). Once met:
+  - Type Ia SNe escalate to the LSST-only light-curve goal (≥ 5 detections or ≥ 300 s across ≥ 2 filters).
+  - Non-Ia SNe drop to zero priority, freeing time for other targets.
+- LSST-only light curve strategy: Every SN is pursued until the LC goal is met.
+- Candidates are ranked nightly first by need score (how far from meeting the active goal) and then by their maximum altitude within the twilight window.
+- Scheduling within each window uses a greedy nearest-neighbor approach on sky position to minimize slew time, constrained by per-SN and per-window time caps.
 
 ### Slews & Overheads
 - Two‑regime slew: small moves ≤3.5° take ≈4 s; larger moves add $t_{\rm slew} \approx 4\,\mathrm{s} + \frac{\max(0,\Delta\theta-3.5^\circ)}{5.25^\circ/\mathrm{s}} + 1\,\mathrm{s}_{\rm settle}$
@@ -110,53 +126,53 @@ This section documents the math implemented by the planner and used when writing
 ### 1) Geometry, Airmass, and Altitude
 Given site latitude (\phi), target declination (\delta), and hour angle (H),
 the altitude (h) and zenith distance (z = 90^\circ - h) are
-\[
+$$
 \sin h = \sin\phi\,\sin\delta + \cos\phi\,\cos\delta\,\cos H.
-\]
+$$
 The airmass (X) uses the Kasten–Young (1989) approximation (robust near twilight):
-\[
+$$
 X(h) = \left[\cos z + 0.50572 \left(96.07995^\circ - z\right)^{-1.6364}\right]^{-1}.
-\]
+$$
 Eligibility requires $h \ge h_{\min}$ (default $20^\circ$) at some sampled time in a twilight window.
 
 ### 2) Moon Separation (Graded Policy)
 Let $\Delta\theta_{\rm Moon}$ be the angular separation from the Moon, $f\in[0,1]$ the Moon illuminated fraction, and $h_{\rm Moon}$ the Moon altitude. The planner uses a graded minimum separation:
-\[
+$$
 \Delta\theta_{\min}(f,h_{\rm Moon}) := \Delta\theta_0 \Big[ 1 - \alpha f \Big] \Big[ 1 - \beta \max(0, \sin h_{\rm Moon}) \Big],
-\]
+$$
 with band‑dependent $\Delta\theta_0$ (e.g., $g!:!30^\circ,\ r!:!25^\circ,\ i!:!20^\circ,\ z!:!15^\circ$) and gentle coefficients $(\alpha,\beta)$ (defaults $\sim 0.3$).
 If the Moon is below the horizon ($h_{\rm Moon} < 0^\circ$), the constraint is waived.
 
 ### 3) Photometric Kernel (Zeropoint, Extinction, Sky, SNR)
 We treat counts in photo‑electrons. For filter $m$, define a 1‑s instrumental zeropoint ($ZP_{1\rm s,m}$) such that a source of magnitude $ZP_{1\rm s,m}$ yields 1 e⁻ s⁻¹ at unit airmass.
 - Extinction‑corrected rate at airmass X for a source of magnitude m:
-\[
+$$
 R_*(m, X) = 10^{-0.4[\,m - ZP_{1\rm s} + k_m(X-1)\,]}\quad [\mathrm{e^-\,s^{-1}}]
-\]
+$$
 - Total source electrons in exposure time t:
-\[
+$$
 F_* = R_*(m,X)\,t.
-\]
+$$
 - Sky background per pixel (electrons) uses a twilight sky model or `rubin_sim.skybrightness` if available. Given sky surface brightness $\mu_{\rm sky}$ [mag/arcsec²], pixel scale p [arcsec/px], and airmass X,
-\[
+$$
 B_{\rm px} = 10^{-0.4[\,\mu_{\rm sky} - ZP_{1\rm s} + k_m(X-1)\,]} p^2 t.
-\]
+$$
 - Effective noise pixels for a Gaussian PSF with FWHM $\theta$ and pixel scale p (arcsec/px) use
-\[
+$$
 n_{\rm pix} \approx 4\pi\sigma_{\rm pix}^2, \qquad \sigma_{\rm pix}=\frac{\theta}{2\sqrt{2\ln 2}\,p}.
-\]
+$$
 - SNR for a point source:
-\[
+$$
 \mathrm{SNR} = \frac{F_*}{\sqrt{F_* + n_{\rm pix}\big(B_{\rm px} + \mathrm{RN}^2\big)}},
-\]
+$$
 with RN the read‑noise (e⁻). This SNR is used for feasibility checks and for the 5σ depth below.
 
 ### 4) 5σ Depth (m_5) (Twilight‑aware)
 Solve SNR (=5) for the magnitude that just reaches 5σ in exposure t.
 Using $F_*(m) = 10^{-0.4[\,m - ZP_{1\rm s} + k(X-1)\,]} t$ and the SNR above:
-\[
+$$
 m_5 \approx ZP_{1\rm s} - k(X-1) - 2.5\log_{10}\left(\frac{5}{t}\sqrt{n_{\rm pix}\left(B_{\rm px} + \mathrm{RN}^2\right)}\right),
-\]
+$$
 which is accurate in the background‑dominated regime (typical in twilight).
 The planner adds gentle Sun/Moon penalties to $m_5$ in bright conditions and falls back to redder filters if needed.
 
@@ -165,15 +181,15 @@ Filter feasibility rule (per candidate/time): select the first filter m for whic
 ### 5) Saturation Guard (Central‑Pixel Model)
 To avoid CCD blooming, we approximate the central‑pixel electrons for a Gaussian PSF:
 - Peak pixel fraction:
-\[
+$$
 f_{\rm peak} \approx \frac{1}{2\pi\sigma_{\rm pix}^2}\underbrace{p^2}_{\text{pixel area}}, \qquad \sigma_{\rm pix}=\frac{\theta}{2\sqrt{2\ln 2}\,p}.
-\]
-- Central pixel electrons: $N_{\rm cen} \approx f_{\rm peak}F_*$.\
+$$
+- Central pixel electrons: $N_{\rm cen} \approx f_{\rm peak}F_*$.
 If $N_{\rm cen} > N_{\rm sat}$ (default $N_{\rm sat}\sim 1\times 10^5$ e⁻), the planner shortens the exposure.
 Because $F_* \propto t$, the bright‑limit magnitude that saturates scales as
-\[
+$$
 m_{\rm sat}(t) = m_{\rm sat}(t_0) + 2.5\log_{10}\left(\frac{t}{t_0}\right),
-\]
+$$
 so 1 s vs 15 s shifts the r‑band bright limit by $\approx 2.9$ mag, enabling very short twilight snaps to avoid saturation.
 
 ### 6) Priority Scoring (Hybrid → LC)
@@ -183,18 +199,18 @@ For each SN we track:
 - $|\mathcal{F}|$: number of distinct filters used
 
 Define goal progress for hybrid and LC stages:
-\[
+$$
 P_{\rm hybrid} = \max\Bigg( \frac{N_{\rm det}}{2}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \Bigg) ;;;\text{and};;;\
 P_{\rm LC} = \max\Bigg( \frac{N_{\rm det}}{5}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \Bigg).
-\]
+$$
 Clamp to $[0,1]$. The need score at a candidate time is
-\[
+$$
 S_{\rm need} = \begin{cases}
 1 - P_{\rm hybrid}, & \text{if strategy = hybrid and hybrid not met} \\
 \mathbf{1}_{\rm Ia}(1 - P_{\rm LC}), & \text{if hybrid met (Ia escalates)} \\
 0, & \text{if hybrid met and non-Ia}
 \end{cases}
-\]
+$$
 and the overall sort key is $(S_{\rm need}, \sin h)$, i.e., need first, then altitude.
 
 ### 7) SIMLIB Export (SNANA)
