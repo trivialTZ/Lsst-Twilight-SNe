@@ -192,52 +192,70 @@ def plan_twilight_range_with_caps(
                 if window_sum + timing["total_s"] > cap_s:
                     continue
                 window_sum += timing["total_s"]
-                if writer:
-                    writer.start_libid(libid_counter, t["RA_deg"], t["Dec_deg"], comment=t["Name"])
-                    libid_counter += 1
+
+                epochs = []
                 for f in filters_used:
                     exp_s = timing.get("exp_times", {}).get(f, cfg.exposure_by_filter.get(f, 0.0))
                     alt_deg = float(t["max_alt_deg"])
-                    mjd = Time(t["best_time_utc"]).mjd if isinstance(t["best_time_utc"], (datetime, pd.Timestamp)) else np.nan
+                    mjd = (
+                        Time(t["best_time_utc"]).mjd
+                        if isinstance(t["best_time_utc"], (datetime, pd.Timestamp))
+                        else np.nan
+                    )
                     if sky_provider:
-                        sky_mag = sky_provider.sky_mag(mjd, t["RA_deg"], t["Dec_deg"], f, airmass_from_alt_deg(alt_deg))
+                        sky_mag = sky_provider.sky_mag(
+                            mjd, t["RA_deg"], t["Dec_deg"], f, airmass_from_alt_deg(alt_deg)
+                        )
                     else:
                         sky_mag = sky_mag_arcsec2(f, sky_cfg)
                     eph = compute_epoch_photom(f, exp_s, alt_deg, sky_mag, phot_cfg)
                     if writer:
-                        writer.add_epoch(
-                            mjd=mjd,
-                            band=f,
-                            gain=eph.GAIN,
-                            rdnoise=eph.RDNOISE,
-                            skysig=eph.SKYSIG,
-                            psf1=cfg.fwhm_eff.get(f, 0.83) if cfg.fwhm_eff else 0.83,
-                            psf2=0.0,
-                            psfrat=0.0,
-                            zpavg=eph.ZPTAVG,
-                            zperr=eph.ZPTERR,
-                            mag=-99.0,
+                        epochs.append(
+                            {
+                                "mjd": mjd,
+                                "band": f,
+                                "gain": eph.GAIN,
+                                "rdnoise": eph.RDNOISE,
+                                "skysig": eph.SKYSIG,
+                                "nea": eph.NEA_pix,
+                                "zpavg": eph.ZPTAVG,
+                                "zperr": eph.ZPTERR,
+                                "mag": -99.0,
+                            }
                         )
-                    pernight_rows.append({
-                        "date": day.date().isoformat(),
-                        "twilight_window": window_labels.get(idx_w, f"W{idx_w}"),
-                        "SN": t["Name"],
-                        "RA_deg": round(t["RA_deg"], 6),
-                        "Dec_deg": round(t["Dec_deg"], 6),
-                        "best_twilight_time_utc": pd.Timestamp(t["best_time_utc"]).tz_convert("UTC").isoformat() if isinstance(t["best_time_utc"], pd.Timestamp) else str(t["best_time_utc"]),
-                        "filter": f,
-                        "t_exp_s": round(exp_s, 1),
-                        "airmass": round(airmass_from_alt_deg(alt_deg), 3),
-                        "alt_deg": round(alt_deg, 2),
-                        "sky_mag_arcsec2": round(sky_mag, 2),
-                        "ZPT": round(eph.ZPTAVG, 3),
-                        "SKYSIG": round(eph.SKYSIG, 3),
-                        "NEA_pix": round(eph.NEA_pix, 2),
-                        "RDNOISE": round(eph.RDNOISE, 2),
-                        "GAIN": round(eph.GAIN, 2),
-                        "saturation_guard_applied": exp_s < cfg.exposure_by_filter.get(f, exp_s) - 1e-6,
-                        "priority_score": round(float(t["priority_score"]), 2),
-                    })
+                    pernight_rows.append(
+                        {
+                            "date": day.date().isoformat(),
+                            "twilight_window": window_labels.get(idx_w, f"W{idx_w}"),
+                            "SN": t["Name"],
+                            "RA_deg": round(t["RA_deg"], 6),
+                            "Dec_deg": round(t["Dec_deg"], 6),
+                            "best_twilight_time_utc": pd.Timestamp(t["best_time_utc"]).tz_convert("UTC").isoformat()
+                            if isinstance(t["best_time_utc"], pd.Timestamp)
+                            else str(t["best_time_utc"]),
+                            "filter": f,
+                            "t_exp_s": round(exp_s, 1),
+                            "airmass": round(airmass_from_alt_deg(alt_deg), 3),
+                            "alt_deg": round(alt_deg, 2),
+                            "sky_mag_arcsec2": round(sky_mag, 2),
+                            "ZPT": round(eph.ZPTAVG, 3),
+                            "SKYSIG": round(eph.SKYSIG, 3),
+                            "NEA_pix": round(eph.NEA_pix, 2),
+                            "RDNOISE": round(eph.RDNOISE, 2),
+                            "GAIN": round(eph.GAIN, 2),
+                            "saturation_guard_applied": exp_s < cfg.exposure_by_filter.get(f, exp_s) - 1e-6,
+                            "priority_score": round(float(t["priority_score"]), 2),
+                        }
+                    )
+
+                if writer and epochs:
+                    writer.start_libid(
+                        libid_counter, t["RA_deg"], t["Dec_deg"], nobs=len(epochs), comment=t["Name"]
+                    )
+                    libid_counter += 1
+                    for epoch in epochs:
+                        writer.add_epoch(**epoch)
+                    writer.end_libid()
                 prev = t
                 tracker.record_detection(t["Name"], timing["exposure_s"], filters_used)
 

@@ -72,4 +72,34 @@ def test_simlib_output(tmp_path, monkeypatch):
     lines = simlib_path.read_text().strip().splitlines()
     s_lines = [l for l in lines if l.startswith("S:")]
     assert len(s_lines) == len(pernight_df)
-    assert any("SURVEY:" in l for l in lines[:5])
+
+    assert lines[0] == "BEGIN LIBGEN"
+    header_line = "#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR MAG"
+    libid_indices = [i for i, l in enumerate(lines) if l.startswith("LIBID:")]
+    assert lines.count(header_line) == len(libid_indices)
+
+    last_end_line = None
+    for idx in libid_indices:
+        libid = lines[idx].split(":")[1].strip()
+        nobs_line = lines[idx + 1]
+        assert nobs_line.startswith("NOBS:")
+        nobs_val = int(nobs_line.split()[1])
+
+        j = idx + 2
+        while j < len(lines) and lines[j] != header_line:
+            j += 1
+        assert j < len(lines)
+
+        k = j + 1
+        s_count = 0
+        while k < len(lines) and lines[k].startswith("S:"):
+            s_count += 1
+            k += 1
+
+        end_line = f"END_LIBID: {libid}"
+        assert lines[k] == end_line
+        assert nobs_val == s_count
+        last_end_line = end_line
+
+    assert lines[-1] == last_end_line
+    assert any("SURVEY:" in l for l in lines[:10])
