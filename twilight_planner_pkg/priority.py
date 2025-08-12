@@ -11,6 +11,8 @@ that the goal for the stage has been met.
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Set, List
 
+from .constraints import effective_min_sep
+
 
 @dataclass
 class _SNHistory:
@@ -86,3 +88,21 @@ class PriorityTracker:
         # Work on a shallow copy so the caller does not see side effects
         tmp = _SNHistory(hist.detections, hist.exposure_s, set(hist.filters), hist.escalated)
         return self._score(tmp, sn_type, strategy, mutate=False)
+
+
+def apply_moon_penalty(
+    priority_score: float,
+    filt: str,
+    moon_sep_deg: float,
+    moon_alt_deg: float,
+    moon_phase_frac: float,
+    weight: float = 1.0,
+    base_min_sep: Dict[str, float] | None = None,
+) -> float:
+    """Reduce ``priority_score`` if the Moon is too close."""
+
+    req = effective_min_sep(filt, moon_alt_deg, moon_phase_frac, base_min_sep)
+    if req <= 0:
+        return priority_score
+    penalty = max(0.0, (req - moon_sep_deg) / req)
+    return priority_score - weight * penalty

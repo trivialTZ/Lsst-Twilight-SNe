@@ -30,7 +30,7 @@ def test_moon_separation_waived_when_down():
     window = (now, now + timedelta(hours=1))
     loc = EarthLocation(lat=0 * u.deg, lon=0 * u.deg, height=0 * u.m)
     with warnings.catch_warnings(record=True) as w:
-        alt, t = _best_time_with_moon(sc, window, loc, 10, -10.0, 180.0)
+        alt, t, *_ = _best_time_with_moon(sc, window, loc, 10, -10.0, 180.0)
     assert not w
     assert alt != float("-inf")
     assert t is not None

@@ -39,7 +39,7 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
 
     def mock_best_time_with_moon(sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg):
         start, _ = window
-        return 50.0, start + timedelta(minutes=5)
+        return 50.0, start + timedelta(minutes=5), 0.0, 0.0, 180.0
 
     def mock_sep(ra1, dec1, ra2, dec2):
         return 0.0
