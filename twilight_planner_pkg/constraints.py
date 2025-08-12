@@ -7,13 +7,13 @@ import numpy as np
 BASE_MIN_SEP: Dict[str, float] = {"g": 30.0, "r": 25.0, "i": 20.0, "z": 15.0, "y": 10.0}
 
 
-def _clamp(val: float, lo: float, hi: float) -> float:
-    """Clamp a value into the interval ``[lo, hi]``.
+def _clamp(val, lo: float, hi: float):
+    """Clamp value(s) into ``[lo, hi]``; supports scalars and ndarrays.
 
     Parameters
     ----------
-    val : float
-        Value to constrain.
+    val : float or array-like
+        Value(s) to constrain.
     lo : float
         Lower bound of the interval.
     hi : float
@@ -21,14 +21,14 @@ def _clamp(val: float, lo: float, hi: float) -> float:
 
     Returns
     -------
-    float
+    float or ndarray
         ``val`` limited to the inclusive range ``[lo, hi]``.
 
     Notes
     -----
-    This helper performs no type checking and is intended for internal use.
+    Uses numpy.clip for proper ndarray handling.
     """
-    return max(lo, min(hi, val))
+    return np.clip(val, lo, hi)
 
 
 def moon_separation_factor(moon_alt_deg: float, moon_phase_frac: float):
@@ -54,21 +54,19 @@ def moon_separation_factor(moon_alt_deg: float, moon_phase_frac: float):
 
     Notes
     -----
-    For altitudes below ``-10``° the requirement is fully relaxed. Between
-    ``-10`` and ``0``° the weight varies linearly with altitude and is further
-    modulated by the illuminated fraction of the Moon. Above the horizon the
-    weight is ``1``.
+    Below -10° the requirement is fully relaxed (0). Between -10° and 0° the
+    weight varies linearly with altitude and is modulated by the illuminated
+    fraction of the Moon. Above 0° the weight is 1.
     """
     alt = np.asarray(moon_alt_deg, dtype=float)
     phase = np.asarray(moon_phase_frac, dtype=float)
-    out = np.ones_like(alt, dtype=float)
-    mask_low = alt <= -10.0
-    out[mask_low] = 0.0
-    mask_mid = (alt > -10.0) & (alt < 0.0)
-    if np.any(mask_mid):
-        alt_w = (alt[mask_mid] + 10.0) / 10.0
-        phase_w = _clamp(0.3 + 0.7 * phase[mask_mid], 0.3, 1.0)
-        out[mask_mid] = alt_w * phase_w
+    phase_w = _clamp(0.3 + 0.7 * phase, 0.3, 1.0)
+    out = np.where(
+        alt <= -10.0,
+        0.0,
+        np.where(alt < 0.0, ((alt + 10.0) / 10.0) * phase_w, 1.0),
+    )
+    out = np.asarray(out, dtype=float)
     return out if out.size > 1 else float(out)
 
 

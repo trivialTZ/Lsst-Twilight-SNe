@@ -148,11 +148,6 @@ def plan_twilight_range_with_caps(
         filters.remove(drop)
         cfg.filters = filters
 
-    req_sep = (
-        max(cfg.min_moon_sep_by_filter.get(f, 0.0) for f in filters)
-        if cfg.require_single_time_for_all_filters and cfg.min_moon_sep_by_filter
-        else max(cfg.min_moon_sep_by_filter.values()) if cfg.min_moon_sep_by_filter else 0.0
-    )
 
     site = EarthLocation(lat=cfg.lat_deg*u.deg, lon=cfg.lon_deg*u.deg, height=cfg.height_m*u.m)
     start = pd.to_datetime(start_date, utc=True).date()
@@ -174,6 +169,16 @@ def plan_twilight_range_with_caps(
         windows = twilight_windows_astro(day_utc, site)
         if not windows:
             continue
+        # Conservative baseline Moon separation used while sampling best times.
+        # Detailed per-filter checks with altitude/phase scaling are applied later via effective_min_sep.
+        vals: list[float] = []
+        if getattr(cfg, "min_moon_sep_by_filter", None) and getattr(cfg, "filters", None):
+            try:
+                vals = [cfg.min_moon_sep_by_filter.get(f, 0.0) for f in cfg.filters]
+            except Exception:
+                vals = []
+        req_sep = max(vals) if vals else 0.0
+
         current_filter_by_window = {0: cfg.start_filter, 1: cfg.start_filter}
         swap_count_by_window = {0: 0, 1: 0}
         window_caps = {0: cfg.morning_cap_s, 1: cfg.evening_cap_s}
