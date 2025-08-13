@@ -113,9 +113,9 @@ For each window index `idx_w` present that night:
 - **Priority strategy:**  
   `PRIORITY_STRATEGY="hybrid"` with `HYBRID_DETECTIONS=2`, `HYBRID_EXPOSURE=300s`, `LC_DETECTIONS=5`, `LC_EXPOSURE=300s`.  
   Starts broad with quick detections; escalates to deeper coverage for promising SNe.
-- **Photometry / Sky:**  
-  `PIXEL_SCALE_ARCSEC=0.2`, `READ_NOISE_E=5`, `GAIN_E_PER_ADU=1`, `ZPT_ERR_MAG=0.01`.  
-  `TWILIGHT_DELTA_MAG=2.5` if the fallback sky model is used (Rubin provider preferred).
+- **Photometry / Sky:**
+  `PIXEL_SCALE_ARCSEC=0.2` (Rubin pixel scale), `READ_NOISE_E=6` (typical 5.4–6.2 e⁻; requirement ≤9 e⁻ per LCA‑48‑J), `GAIN_E_PER_ADU=1` (measured ≈1.5–1.7 e⁻/ADU; using 1 acceptable per SMTN-002), `ZPT_ERR_MAG=0.01`, saturation threshold ≈1×10⁵ e⁻ (PTC turnoff 103 ke⁻ e2v / 129 ke⁻ ITL).
+  Dark-sky surface brightnesses {u:23.05, g:22.25, r:21.20, i:20.46, z:19.61, y:18.60} mag/arcsec² (SMTN‑002); prefer `rubin_sim.skybrightness` when available, `TWILIGHT_DELTA_MAG=2.5` is an approximate fallback. Airmass uses the Kasten–Young (1989) approximation.
 - **SIMLIB:**  
   `SIMLIB_OUT=None` (disabled in the example). Set e.g. `"twilight.simlib"` to generate a SIMLIB.
 - **Misc:**  
@@ -130,3 +130,12 @@ For each window index `idx_w` present that night:
 - The Sun-altitude policy is strict: even if a filter is loaded, it won’t be used when the Sun is too high for that band.
 - If you want multi-filter color on the same visit, increase `MAX_FILTERS_PER_VISIT` and be prepared to raise `PER_SN_CAP_S` and the window caps—or add a Sun-alt exposure ladder so exposures shrink as the Sun rises.
 
+---
+
+## References
+1. [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) — pixel scale, readout/shutter timing, site coordinates.
+2. [DMTN-065: Detailed Filter Changer Timing](https://dmtn-065.lsst.io) — 120 s filter-change breakdown.
+3. [SMTN-002: Expected LSST Performance](https://smtn-002.lsst.io) — sky brightness, read-noise/gain assumptions.
+4. [LCA-48-J](https://project.lsst.org/lsst-camera/lca-48-j) — camera read-noise requirement (≤9 e⁻).
+5. Ivezić, Ž., et al. 2019, ApJ, 873, 111 — LSST overview.
+6. Kasten, F., & Young, A. T. 1989, Appl. Opt., 28, 4735 — airmass formula.
