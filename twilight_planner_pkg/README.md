@@ -295,9 +295,7 @@ Define goal progress for hybrid and LC stages:
 
 ```math
 
-P_{\rm hybrid} = \max\Bigg( \frac{N_{\rm det}}{2}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \Bigg) ;;;\text{and};;;\
-
-P_{\rm LC} = \max\Bigg( \frac{N_{\rm det}}{5}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \Bigg).
+$$P_{\rm hybrid} = \max\left( \frac{N_{\rm det}}{2}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \right) \quad \mathrm{and} \quad P_{\rm LC} = \max\left( \frac{N_{\rm det}}{5}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \right).$$
 
 ```
 
