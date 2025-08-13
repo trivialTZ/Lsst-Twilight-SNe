@@ -18,6 +18,11 @@ class PlannerConfig:
     Only a subset of the fields are typically supplied by a user; the rest
     carry defaults that reflect LSST design values.  The dataclass is purposely
     lightweight so it can be serialised in tests and debugging sessions.
+    Optional ``sun_alt_exposure_ladder`` entries allow shorter exposures in
+    bright twilight, overriding ``exposure_by_filter`` within the specified Sun
+    altitude ranges.  The scheduler populates transient fields such as
+    ``current_mag_by_filter``, ``current_alt_deg``, and ``current_mjd`` for
+    per-target exposure capping; users normally leave these as ``None``.
     """
 
     # -- Site ---------------------------------------------------------------
@@ -29,9 +34,7 @@ class PlannerConfig:
     min_alt_deg: float = 30.0
 
     # -- Filters and hardware ---------------------------------------------
-    filters: List[str] = field(
-        default_factory=lambda: ["g", "r", "i", "z", "y"]
-    )
+    filters: List[str] = field(default_factory=lambda: ["g", "r", "i", "z", "y"])
     carousel_capacity: int = 5
     filter_change_s: float = 120.0
     readout_s: float = 2.0
@@ -56,6 +59,10 @@ class PlannerConfig:
             (-15.0, -12.0, ["z", "i", "r"]),
             (-12.0, 0.0, ["i", "z", "y"]),
         ]
+    )
+    # Exposure overrides per Sun-altitude range; later entries take precedence
+    sun_alt_exposure_ladder: List[Tuple[float, float, Dict[str, float]]] = field(
+        default_factory=list
     )
 
     # -- Slew model --------------------------------------------------------
@@ -107,7 +114,7 @@ class PlannerConfig:
     simlib_survey: str = "LSST"
     simlib_filters: str = "grizy"
     simlib_pixsize: float = 0.2
-    simlib_npe_pixel_saturate: float = 1.0e6
+    simlib_npe_pixel_saturate: float = 100_000.0
     simlib_photflag_saturate: int = 4096
     simlib_psf_unit: str = "arcsec"
 
@@ -134,6 +141,7 @@ class PlannerConfig:
     # Hooks filled in by the scheduler for per-target context ----------------
     current_mag_by_filter: Optional[Dict[str, float]] = None
     current_alt_deg: Optional[float] = None
+    current_mjd: Optional[float] = None  # populated by scheduler for exposure capping
     sky_provider: Optional[object] = None
 
     # Backwards-compatibility options
@@ -146,4 +154,3 @@ class PlannerConfig:
             self.readout_s = self.readout_time_s
         if self.start_filter is None and self.filters:
             self.start_filter = self.filters[0]
-

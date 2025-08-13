@@ -3,6 +3,14 @@
 Modular planner for scheduling **Vera C. Rubin Observatory (LSST)** twilight observations of supernovae (SNe).
 Optimized for fast, shallow snaps in bright sky, with options to export **SNANA SIMLIBs** for downstream simulations.
 
+## Recent Enhancements
+
+- Dynamic sky brightness model driven by Sun altitude for realistic twilight backgrounds.
+- Dual-threshold exposure capping that shortens visits when either source or sky electrons approach saturation.
+- Strict enforcement of `sun_alt_policy` filter limits during scheduling.
+- Optional `sun_alt_exposure_ladder` to override baseline exposures in bright twilight.
+- Unified pixel saturation thresholds: 100 ke⁻ hard cap with an 80 ke⁻ warning band.
+
 ---
 
 ## Installation
@@ -116,6 +124,27 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
   would exceed `per_sn_cap_s`
 - Planning continues even if requested filters exceed
   `carousel_capacity`, but a warning is issued
+- `sun_alt_policy` is enforced: filters forbidden at the current Sun altitude are skipped.
+- Optional `sun_alt_exposure_ladder` overrides default exposure times based on Sun altitude.
+
+### Non-linearity & Saturation Policy
+
+- Hard pixel saturation cap: **100&nbsp;ke⁻/pixel**
+- Non-linear warning region: **80–100&nbsp;ke⁻/pixel**
+- The planner flags exposures with `warn_nonlinear` when predicted charge
+  falls in the warning band and sets `saturation_guard_applied` when the
+  exposure is shortened to respect the hard cap.
+- Exposure capping considers both source and sky background electrons; whichever is higher drives the reduction.
+
+#### Dynamic twilight sky in capping
+
+The planner now applies the Sun-altitude–aware sky brightness when computing
+safe exposure times, not just when reporting sky values.  In bright twilight
+the background per pixel rises rapidly, so exposures are automatically
+shortened before detector saturation.  The hard 100 ke⁻ cap and 80–100 ke⁻
+warning band are evaluated against the maximum of source and sky electrons.
+Any configured `sun_alt_exposure_ladder` sets an initial guess; the capping
+logic then enforces detector safety.
 
 ---
 
@@ -318,11 +347,11 @@ When `--simlib-out` is provided, the planner writes `S:` rows with the following
 ## Module Overview
 - `config.py` — `PlannerConfig` (site, filters, caps, overheads, photometry)
 - `priority.py` — state tracking & hybrid→LC escalation (Ia keep priority; non‑Ia drop after quick color)
-- `scheduler.py` — nightly visibility, scoring, per‑window scheduling, time accounting
+- `scheduler.py` — nightly visibility, scoring, per‑window scheduling, time accounting; applies `sun_alt_policy` and optional exposure ladder
 - `astro_utils.py` — twilight windows, airmass, Sun/Moon geometry, slews
 - `filter_policy.py` — 5σ/m5 heuristic with Sun/Moon penalties and red‑band fallback
-- `photom_rubin.py` — Rubin‑tuned photometric kernel & saturation guard
-- `sky_model.py` — twilight/dark sky providers; optional `rubin_sim.skybrightness`
+- `photom_rubin.py` — Rubin‑tuned photometric kernel with source+sky saturation guard
+- `sky_model.py` — twilight/dark sky providers with Sun-altitude brightening; optional `rubin_sim.skybrightness`
 - `simlib_writer.py` — minimal SNANA SIMLIB exporter
 - `io_utils.py` — robust CSV parsing; RA/Dec/discovery inference
 - `main.py` — CLI wrapper

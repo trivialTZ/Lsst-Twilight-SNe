@@ -9,38 +9,49 @@ notes.
 """
 
 from __future__ import annotations
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Sequence
-import numpy as np
-import astropy.units as u
+
 import warnings
-from astropy.coordinates import (
-    SkyCoord, AltAz, EarthLocation, get_sun, get_body
-)
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple
+
+import astropy.units as u
+import numpy as np
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_sun
 from astropy.time import Time
 from astropy.utils.exceptions import AstropyDeprecationWarning, AstropyWarning
 
 try:
-    from astropy.coordinates.baseframe import NonRotationTransformationWarning  # most versions
+    from astropy.coordinates.baseframe import (  # most versions
+        NonRotationTransformationWarning,
+    )
 except Exception:
     try:
         from astropy.coordinates.transformations import NonRotationTransformationWarning
     except Exception:
+
         class NonRotationTransformationWarning(AstropyWarning):
             pass
 
-warnings.filterwarnings("ignore", category=AstropyDeprecationWarning)
-warnings.filterwarnings("ignore", category=NonRotationTransformationWarning)
-warnings.filterwarnings("ignore",
-                        message="Angular separation can depend on the direction of the transformation",
-                        category=Warning,
-                        module="astropy")
 
 from .config import PlannerConfig
-from .constraints import moon_separation_factor, effective_min_sep
+from .constraints import moon_separation_factor
+
+if TYPE_CHECKING:
+    from .priority import PriorityTracker
+
+warnings.filterwarnings("ignore", category=AstropyDeprecationWarning)
+warnings.filterwarnings("ignore", category=NonRotationTransformationWarning)
+warnings.filterwarnings(
+    "ignore",
+    message="Angular separation can depend on the direction of the transformation",
+    category=Warning,
+    module="astropy",
+)
 
 
-def validate_coords(ra_deg: float, dec_deg: float, eps: float = 1e-6) -> Tuple[float, float]:
+def validate_coords(
+    ra_deg: float, dec_deg: float, eps: float = 1e-6
+) -> Tuple[float, float]:
     """Normalize and validate equatorial coordinates.
 
     Parameters
@@ -104,7 +115,10 @@ def airmass_from_alt_deg(alt_deg: float) -> float:
     x = 1.0 / denom
     return float(max(x, 1.0))
 
-def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple[datetime, datetime]]:
+
+def twilight_windows_astro(
+    date_utc: datetime, loc: EarthLocation
+) -> List[Tuple[datetime, datetime]]:
     """Compute astronomical twilight windows for a given date and location.
 
     Parameters
@@ -120,7 +134,7 @@ def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple
         Sorted list of ``(start, end)`` UTC times where ``-18° <`` Sun altitude ``< 0°``.
     """
     start = date_utc.replace(tzinfo=timezone.utc) - timedelta(hours=12)
-    times = Time([start + timedelta(minutes=i) for i in range(48*60)])
+    times = Time([start + timedelta(minutes=i) for i in range(48 * 60)])
     altaz = AltAz(obstime=times, location=loc)
     sun_alt = get_sun(times).transform_to(altaz).alt.to(u.deg).value
     mask = (sun_alt > -18.0) & (sun_alt < 0.0)
@@ -129,20 +143,25 @@ def twilight_windows_astro(date_utc: datetime, loc: EarthLocation) -> List[Tuple
     for e in edges:
         segments.append((prev, e))
         prev = e + 1
-    segments.append((prev, len(mask)-1))
+    segments.append((prev, len(mask) - 1))
     windows = []
     for a, b in segments:
-        if np.any(mask[a:b+1]):
-            i0 = a + int(np.argmax(mask[a:b+1]))
+        if np.any(mask[a : b + 1]):
+            i0 = a + int(np.argmax(mask[a : b + 1]))
             i1 = i0
-            while i0 > a and mask[i0-1]:
+            while i0 > a and mask[i0 - 1]:
                 i0 -= 1
-            while i1 < b and mask[i1+1]:
+            while i1 < b and mask[i1 + 1]:
                 i1 += 1
-            windows.append((Time(times[i0]).to_datetime(timezone.utc),
-                            Time(times[i1]).to_datetime(timezone.utc)))
+            windows.append(
+                (
+                    Time(times[i0]).to_datetime(timezone.utc),
+                    Time(times[i1]).to_datetime(timezone.utc),
+                )
+            )
     windows.sort(key=lambda w: w[0])
     return windows
+
 
 def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
     """Compute on-sky separation between two coordinates."""
@@ -152,7 +171,7 @@ def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
     d_dec = dec2_r - dec1_r
     sin_ddec2 = np.sin(d_dec / 2.0)
     sin_dra2 = np.sin(d_ra / 2.0)
-    a = sin_ddec2 ** 2 + np.cos(dec1_r) * np.cos(dec2_r) * sin_dra2 ** 2
+    a = sin_ddec2**2 + np.cos(dec1_r) * np.cos(dec2_r) * sin_dra2**2
     return float(np.rad2deg(2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))))
 
 
@@ -221,8 +240,15 @@ def pick_first_filter_for_target(
         return current_filter
     return ordered[0] if ordered else candidates[0]
 
-def slew_time_seconds(sep_deg: float, *, small_deg: float, small_time: float,
-                      rate_deg_per_s: float, settle_s: float) -> float:
+
+def slew_time_seconds(
+    sep_deg: float,
+    *,
+    small_deg: float,
+    small_time: float,
+    rate_deg_per_s: float,
+    settle_s: float,
+) -> float:
     """Estimate telescope slew time including settle time.
 
     Parameters
@@ -251,6 +277,7 @@ def slew_time_seconds(sep_deg: float, *, small_deg: float, small_time: float,
         t = small_time + (sep_deg - small_deg) / max(rate_deg_per_s, 1e-3)
     return t + settle_s
 
+
 def per_sn_time_seconds(filters: Sequence[str], sep_deg: float, cfg: PlannerConfig):
     """Compute the total time to execute a visit in the given ``filters``."""
 
@@ -268,16 +295,20 @@ def per_sn_time_seconds(filters: Sequence[str], sep_deg: float, cfg: PlannerConf
     return total, slew, exposure, readout, fchanges
 
 
-def compute_capped_exptime(band: str, cfg: PlannerConfig) -> float:
-    """Return a saturation-safe exposure time for ``band``.
+def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[str]]:
+    """Return a saturation-safe exposure time and flags for ``band``.
 
     The function examines ``cfg.current_mag_by_filter`` and
     ``cfg.current_alt_deg`` for the SN currently under consideration.  If a
     ``cfg.sky_provider`` is available it is queried for the sky brightness.
-    These parameters are fed into
+    When ``cfg.current_mjd`` is set the provider receives it, allowing
+    Sun-altitude--aware brightening to drive exposure capping.  These
+    parameters are fed into
     :func:`photom_rubin.cap_exposure_for_saturation`, potentially reducing the
-    baseline exposure from ``cfg.exposure_by_filter``.  When the required
-    context is missing, the baseline exposure is returned unchanged.
+    baseline exposure from ``cfg.exposure_by_filter``.  The returned tuple
+    includes a set of flags such as ``{"warn_nonlinear"}``.
+    When the required context is missing, the baseline exposure and an empty
+    flag set are returned.
     """
 
     base = cfg.exposure_by_filter.get(band, 0.0)
@@ -286,13 +317,16 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> float:
         or band not in cfg.current_mag_by_filter
         or cfg.current_alt_deg is None
     ):
-        return base
+        return base, set()
 
     from .photom_rubin import PhotomConfig, cap_exposure_for_saturation
 
     if cfg.sky_provider:
+        # Use the actual MJD (if provided) so the Sun-altitude–aware sky model
+        # informs capping. Brighter twilight implies shorter safe exposures.
+        mjd = getattr(cfg, "current_mjd", None)
         sky_mag = cfg.sky_provider.sky_mag(
-            None, None, None, band, airmass_from_alt_deg(cfg.current_alt_deg)
+            mjd, None, None, band, airmass_from_alt_deg(cfg.current_alt_deg)
         )
     else:
         sky_mag = 21.0
@@ -332,8 +366,8 @@ def choose_filters_with_cap(
     differs from ``current_filter``.  Additional in‑visit filter switches incur
     an "internal" change cost for each extra filter.  Exposure times are either
     the baseline values from ``cfg.exposure_by_filter`` or, when
-    ``use_capped_exposure`` is true, the saturation‑safe values returned by
-    :func:`compute_capped_exptime`.
+    ``use_capped_exposure`` is true, the saturation‑safe values and flag sets
+    returned by :func:`compute_capped_exptime`.
     """
 
     max_filters = (
@@ -351,17 +385,17 @@ def choose_filters_with_cap(
 
     used: list[str] = []
     exp_times: dict[str, float] = {}
+    flags_by_filter: dict[str, set[str]] = {}
     cross_change = 0.0
     internal_changes = 0.0
 
     for f in filters:
         if len(used) >= max_filters:
             break
-        exp = (
-            compute_capped_exptime(f, cfg)
-            if use_capped_exposure
-            else cfg.exposure_by_filter.get(f, 0.0)
-        )
+        if use_capped_exposure:
+            exp, flags = compute_capped_exptime(f, cfg)
+        else:
+            exp, flags = cfg.exposure_by_filter.get(f, 0.0), set()
         trial_len = len(used) + 1
         trial_cross = cross_change or (
             cfg.filter_change_s
@@ -380,6 +414,7 @@ def choose_filters_with_cap(
         if trial_total <= cap_s or not used:
             used.append(f)
             exp_times[f] = exp
+            flags_by_filter[f] = flags
             cross_change = trial_cross
             internal_changes = cfg.filter_change_s * max(0, len(used) - 1)
         else:
@@ -387,16 +422,17 @@ def choose_filters_with_cap(
 
     if not used and filters:
         f = filters[0]
-        exp_times = {
-            f: (
-                compute_capped_exptime(f, cfg)
-                if use_capped_exposure
-                else cfg.exposure_by_filter.get(f, 0.0)
-            )
-        }
+        if use_capped_exposure:
+            exp, flags = compute_capped_exptime(f, cfg)
+        else:
+            exp, flags = cfg.exposure_by_filter.get(f, 0.0), set()
+        exp_times = {f: exp}
+        flags_by_filter = {f: flags}
         used = [f]
         cross_change = (
-            cfg.filter_change_s if current_filter is not None and f != current_filter else 0.0
+            cfg.filter_change_s
+            if current_filter is not None and f != current_filter
+            else 0.0
         )
 
     exposure_s = sum(exp_times.values())
@@ -411,8 +447,11 @@ def choose_filters_with_cap(
         "exposure_s": exposure_s,
         "readout_s": readout_s,
         "exp_times": exp_times,
+        # flags keyed by filter, e.g. {'r': {'warn_nonlinear'}}
+        "flags_by_filter": flags_by_filter,
     }
     return used, timing
+
 
 def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
     """Estimate the number of days a supernova remains observable.
@@ -430,6 +469,7 @@ def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
         Observation window in days, scaled by ``1.2`` for safety.
     """
     import math
+
     if not isinstance(type_str, str) or not type_str.strip():
         return int(math.ceil(1.2 * cfg.default_typical_days))
     s = type_str.lower()
@@ -437,6 +477,7 @@ def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
         if str(key).lower() in s:
             return int(math.ceil(1.2 * days))
     return int(math.ceil(1.2 * cfg.default_typical_days))
+
 
 def _best_time_with_moon(
     sc: SkyCoord,
@@ -478,4 +519,10 @@ def _best_time_with_moon(
         return -np.inf, None, float("nan"), float("nan"), float("nan")
     alt_ok = np.where(ok, alt, -np.inf)
     j = int(np.argmax(alt_ok))
-    return float(alt_ok[j]), ts[j].to_datetime(timezone.utc), float(moon_alt[j]), float(phase[j]), float(sep_deg[j])
+    return (
+        float(alt_ok[j]),
+        ts[j].to_datetime(timezone.utc),
+        float(moon_alt[j]),
+        float(phase[j]),
+        float(sep_deg[j]),
+    )
