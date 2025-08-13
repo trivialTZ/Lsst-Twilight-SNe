@@ -79,12 +79,12 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 - Visibility window lasts `ceil(1.2 × days)` after discovery where `days`
   comes from `typical_days_by_type` or a default fallback
 
-Key selection criteria recap:
-
-- A supernova must have a valid discovery date within the configured observation window.
-- Must be observable at altitude ≥ `min_alt_deg` (default 20°) during at least one twilight window (Sun altitude between −18° and 0°).
-- Eligibility duration after discovery is scaled from a `typical_days_by_type` value (or a default if type unknown) and multiplied by 1.2 to provide a buffer.
-- Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
+> ### Key selection criteria recap:
+>
+> - A supernova must have a valid discovery date within the configured observation window.
+> - Must be observable at altitude ≥ `min_alt_deg` (default 20°) during at least one twilight window (Sun altitude between −18° and 0°).
+> - Eligibility duration after discovery is scaled from a `typical_days_by_type` value (or a default if type unknown) and multiplied by 1.2 to provide a buffer.
+> - Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
 
 ### Twilight Windows & Best Time
 - Twilight windows are spans with Sun altitude $h_\odot \in [-18^\circ,0^\circ)$
@@ -97,14 +97,14 @@ Key selection criteria recap:
 - Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
 - Enforce window caps (`morning_cap_s`, `evening_cap_s`) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
 
-Prioritization strategy recap:
-
-- Hybrid strategy (default): Aim for quick color (≥ 2 detections in ≥ 2 filters or ≥ 300 s total). Once met:
-  - Type Ia SNe escalate to the LSST-only light-curve goal (≥ 5 detections or ≥ 300 s across ≥ 2 filters).
-  - Non-Ia SNe drop to zero priority, freeing time for other targets.
-- LSST-only light curve strategy: Every SN is pursued until the LC goal is met.
-- Candidates are ranked nightly first by need score (how far from meeting the active goal) and then by their maximum altitude within the twilight window.
-- Scheduling within each window uses a greedy nearest-neighbor approach on sky position to minimize slew time, constrained by per-SN and per-window time caps.
+> ### Prioritization strategy recap:
+>
+> - Hybrid strategy (default): Aim for quick color (≥ 2 detections in ≥ 2 filters or ≥ 300 s total). Once met:
+>  - Type Ia SNe escalate to the LSST-only light-curve goal (≥ 5 detections or ≥ 300 s across ≥ 2 filters).
+>  - Non-Ia SNe drop to zero priority, freeing time for other targets.
+> - LSST-only light curve strategy: Every SN is pursued until the LC goal is met.
+> - Candidates are ranked nightly first by need score (how far from meeting the active goal) and then by their maximum altitude within the twilight window.
+> - Scheduling within each window uses a greedy nearest-neighbor approach on sky position to minimize slew time, constrained by per-SN and per-window time caps.
 
 ### Slews & Overheads
 - Two‑regime slew: small moves ≤3.5° take ≈4 s; larger moves add $t_{\rm slew} \approx 4\,\mathrm{s} + \frac{\max(0,\Delta\theta-3.5^\circ)}{5.25^\circ/\mathrm{s}} + 1\,\mathrm{s}_{\rm settle}$
@@ -306,7 +306,6 @@ When `--simlib-out` is provided, the planner writes `S:` rows with the following
 
 - `MAG` — -99 (simulation; true flux provided elsewhere)
 
-The above are computed from the photometric kernel (Sections 3–5). The SIMLIB is minimal but sufficient for fast SNANA simulations.
 ---
 
 ## Outputs
@@ -356,7 +355,7 @@ Below is a compact table summarizing key default values, with direct links to th
 | Light‑curve (LC) threshold | 5 detections or 300 s | — |
 | Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
 | Readout time | 2 s per exposure | [LSST read/write timing](https://www.lsst.org/scientists/keynumbers) |
-| Filter change overhead | 120 s | — (typical value in OpSim‑style planners) |
+| Filter change overhead | 120 s | [Scheduler](https://project.lsst.org/meetings/rubin2020/sites/lsst.org.meetings.rubin2020/files/Peter%20Yoachim%20-%20scheduler_intro%20%28sm%29.pdf) |
 | Airmass formula | Kasten–Young (1989) | [Kasten & Young, Appl. Opt. 28, 4735–4738 (1989)](https://doi.org/10.1364/AO.28.004735) |
 | Horizon airmass (~90°) | ≲ 38 | [Wiki Kasten–Young accuracy](https://en.wikipedia.org/wiki/Air_mass_(astronomy)#Kasten_and_Young) |
 | Carousel capacity (filters) | 5 | — |
