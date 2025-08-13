@@ -215,6 +215,9 @@ B_{\rm px} = 10^{-0.4[\,\mu_{\rm sky} - ZP_{1\rm s} + k_m(X-1)\,]} p^2 t.
 
 ```
 
+Default dark‑sky surface brightness values (u:22.9, g:22.2, r:21.2, i:20.5, z:19.9, y:18.9 mag/arcsec²) follow LSST baseline estimates,
+and the pixel scale defaults to 0.2 arcsec/px per Rubin Observatory specifications. Airmass $X$ is computed via the Kasten–Young (1989) approximation.
+
 - Effective noise pixels for a Gaussian PSF with FWHM $\theta$ and pixel scale p (arcsec/px) use
 
 ```math
@@ -385,6 +388,8 @@ Below is a compact table summarizing key default values, with direct links to th
 | Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
 | Readout time | 2 s per exposure | [LSST read/write timing](https://www.lsst.org/scientists/keynumbers) |
 | Filter change overhead | 120 s | [Scheduler](https://project.lsst.org/meetings/rubin2020/sites/lsst.org.meetings.rubin2020/files/Peter%20Yoachim%20-%20scheduler_intro%20%28sm%29.pdf) |
+| Pixel scale | 0.2 arcsec/px | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
+| Dark‑sky brightness (u:g:r:i:z:y) | 22.9, 22.2, 21.2, 20.5, 19.9, 18.9 mag/arcsec² | [Ivezić et al. 2019, ApJ 873, 111](https://doi.org/10.3847/1538-4357/ab042c) |
 | Airmass formula | Kasten–Young (1989) | [Kasten & Young, Appl. Opt. 28, 4735–4738 (1989)](https://doi.org/10.1364/AO.28.004735) |
 | Horizon airmass (~90°) | ≲ 38 | [Wiki Kasten–Young accuracy](https://en.wikipedia.org/wiki/Air_mass_(astronomy)#Kasten_and_Young) |
 | Carousel capacity (filters) | 5 | — |
@@ -398,3 +403,4 @@ Below is a compact table summarizing key default values, with direct links to th
 3. Wikipedia: Vera C. Rubin Observatory — slew of 3.5° and settle within 4 s
 4. LSST documentation: readout & shutter/open timings (~2 s), filter/exposure overhead generalizations
 5. LSST observing strategy notes / OpSim references: filter exchange timings, slews etc.
+6. Ivezić, Ž., et al. (2019). LSST: From Science Drivers to Reference Design and Anticipated Data Products. *ApJ*, 873, 111. [DOI: 10.3847/1538-4357/ab042c](https://doi.org/10.3847/1538-4357/ab042c)
