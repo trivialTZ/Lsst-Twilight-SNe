@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional, TextIO
 
@@ -10,7 +11,7 @@ class SimlibHeader:
     SURVEY: str = "LSST_TWILIGHT"
     FILTERS: str = "ugrizY"
     PIXSIZE: float = 0.200
-    NPE_PIXEL_SATURATE: int = 90000
+    NPE_PIXEL_SATURATE: int = 100000
     PHOTFLAG_SATURATE: int = 2048
     PSF_UNIT: str = "NEA_PIXEL"
 
