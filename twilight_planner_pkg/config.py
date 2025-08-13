@@ -103,7 +103,7 @@ class PlannerConfig:
     zpt1s: Dict[str, float] | None = None
     k_m: Dict[str, float] | None = None
     fwhm_eff: Dict[str, float] | None = None
-    read_noise_e: float = 5.0
+    read_noise_e: float = 6.0
     gain_e_per_adu: float = 1.0
     zpt_err_mag: float = 0.01
     dark_sky_mag: Dict[str, float] | None = None

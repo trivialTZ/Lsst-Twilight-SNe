@@ -20,13 +20,19 @@ class PhotomConfig:
         Non-linearity warning threshold in electrons; exposures predicting a
         per-pixel charge above this level (~80 ke-) will be flagged but not
         forcibly reduced unless the hard cap is exceeded.
+    read_noise_e: float
+        Read noise per pixel in electrons (typical 5.4–6.2 e⁻ depending on
+        sensor vendor; requirement ≤9 e⁻ per LCA-48-J).
+    gain_e_per_adu: float
+        Gain in electrons per ADU (measured ≈1.5–1.7 e⁻/ADU; using 1 is
+        acceptable for SNR/m₅ per SMTN-002).
     """
 
     pixel_scale_arcsec: float = 0.2
     zpt1s: Dict[str, float] | None = None
     k_m: Dict[str, float] | None = None
     fwhm_eff: Dict[str, float] | None = None
-    read_noise_e: float = 9.0
+    read_noise_e: float = 6.0
     gain_e_per_adu: float = 1.0
     zpt_err_mag: float = 0.005
     npe_pixel_saturate: int = 100_000

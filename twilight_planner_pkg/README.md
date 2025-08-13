@@ -215,6 +215,10 @@ B_{\rm px} = 10^{-0.4[\,\mu_{\rm sky} - ZP_{1\rm s} + k_m(X-1)\,]} p^2 t.
 
 ```
 
+Default dark‑sky surface brightness values (u:23.05, g:22.25, r:21.20, i:20.46, z:19.61, y:18.60 mag/arcsec²) follow SMTN‑002 zenith estimates,
+and the pixel scale defaults to 0.2 arcsec/px per Rubin Observatory specifications. Prefer `rubin_sim.skybrightness` when available; the
+`twilight_delta_mag=2.5` offset is a legacy fallback. Airmass $X$ is computed via the Kasten–Young (1989) approximation.
+
 - Effective noise pixels for a Gaussian PSF with FWHM $\theta$ and pixel scale p (arcsec/px) use
 
 ```math
@@ -383,18 +387,27 @@ Below is a compact table summarizing key default values, with direct links to th
 | Hybrid detections threshold | 2 detections or 300 s | — |
 | Light‑curve (LC) threshold | 5 detections or 300 s | — |
 | Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
-| Readout time | 2 s per exposure | [LSST read/write timing](https://www.lsst.org/scientists/keynumbers) |
-| Filter change overhead | 120 s | [Scheduler](https://project.lsst.org/meetings/rubin2020/sites/lsst.org.meetings.rubin2020/files/Peter%20Yoachim%20-%20scheduler_intro%20%28sm%29.pdf) |
+| Readout time | 2 s per exposure | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
+| Filter change overhead | 120 s | [DMTN-065](https://dmtn-065.lsst.io) |
+| Pixel scale | 0.2 arcsec/px | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
+| Site location (lat, lon, alt) | −30.2446°, −70.7494°, 2663 m | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
+| Shutter open/close time | 1 s | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
+| Read noise | ≈6 e⁻ (typ. 5.4–6.2; requirement ≤9) | [Rubin camera specs](https://www.rubinobservatory.org), [LCA-48-J](https://project.lsst.org/lsst-camera/lca-48-j) |
+| Gain | 1 e⁻/ADU (measured ≈1.5–1.7; 1 acceptable per SMTN‑002) | [SMTN-002](https://smtn-002.lsst.io) |
+| Dark‑sky brightness (u:g:r:i:z:y) | 23.05, 22.25, 21.20, 20.46, 19.61, 18.60 mag/arcsec² | [SMTN-002](https://smtn-002.lsst.io) |
 | Airmass formula | Kasten–Young (1989) | [Kasten & Young, Appl. Opt. 28, 4735–4738 (1989)](https://doi.org/10.1364/AO.28.004735) |
 | Horizon airmass (~90°) | ≲ 38 | [Wiki Kasten–Young accuracy](https://en.wikipedia.org/wiki/Air_mass_(astronomy)#Kasten_and_Young) |
 | Carousel capacity (filters) | 5 | — |
-| Saturation threshold | ~1 × 10⁵ e⁻ (configurable) | — |
+| Saturation threshold | ≈1 × 10⁵ e⁻ (PTC turnoff 103 ke⁻ e2v / 129 ke⁻ ITL) | [Rubin camera specs](https://www.rubinobservatory.org) |
 
 ---
 
 ## References & Notes
-1. Kasten, F., & Young, A. T. (1989). Revised optical air mass tables and approximation formula. *Applied Optics*, 28(22), 4735–4738. [DOI: 10.1364/AO.28.004735](https://doi.org/10.1364/AO.28.004735)
-2. Wikipedia: Air mass (astronomy) — airmass ≈38 at horizon per Kasten–Young formula
-3. Wikipedia: Vera C. Rubin Observatory — slew of 3.5° and settle within 4 s
-4. LSST documentation: readout & shutter/open timings (~2 s), filter/exposure overhead generalizations
-5. LSST observing strategy notes / OpSim references: filter exchange timings, slews etc.
+1. [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) — site coordinates, pixel scale, readout/shutter timing.
+2. [DMTN-065: Detailed Filter Changer Timing](https://dmtn-065.lsst.io) — 120 s filter-change breakdown.
+3. [SMTN-002: Expected LSST Performance](https://smtn-002.lsst.io) — sky brightness, read-noise/gain guidance.
+4. [LCA-48-J](https://project.lsst.org/lsst-camera/lca-48-j) — camera read-noise requirement (≤9 e⁻).
+5. Kasten, F., & Young, A. T. (1989). Revised optical air mass tables and approximation formula. *Applied Optics*, 28(22), 4735–4738. [DOI: 10.1364/AO.28.004735](https://doi.org/10.1364/AO.28.004735)
+6. Wikipedia: Air mass (astronomy) — airmass ≈38 at horizon per Kasten–Young formula
+7. Wikipedia: Vera C. Rubin Observatory — slew of 3.5° and settle within 4 s
+8. Ivezić, Ž., et al. (2019). LSST: From Science Drivers to Reference Design and Anticipated Data Products. *ApJ*, 873, 111. [DOI: 10.3847/1538-4357/ab042c](https://doi.org/10.3847/1538-4357/ab042c)

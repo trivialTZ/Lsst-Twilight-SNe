@@ -18,13 +18,14 @@ class SkyModelConfig:
 
     def __post_init__(self):
         if self.dark_sky_mag is None:
+            # Zenith dark-sky brightness from SMTN-002 (mag/arcsec^2)
             self.dark_sky_mag = {
-                "u": 22.9,
-                "g": 22.2,
-                "r": 21.2,
-                "i": 20.5,
-                "z": 19.9,
-                "y": 18.9,
+                "u": 23.05,
+                "g": 22.25,
+                "r": 21.20,
+                "i": 20.46,
+                "z": 19.61,
+                "y": 18.60,
             }
 
 
