@@ -3,14 +3,6 @@
 Modular planner for scheduling **Vera C. Rubin Observatory (LSST)** twilight observations of supernovae (SNe).
 Optimized for fast, shallow snaps in bright sky, with options to export **SNANA SIMLIBs** for downstream simulations.
 
-## Recent Enhancements
-
-- Dynamic sky brightness model driven by Sun altitude for realistic twilight backgrounds.
-- Dual-threshold exposure capping that shortens visits when either source or sky electrons approach saturation.
-- Strict enforcement of `sun_alt_policy` filter limits during scheduling.
-- Optional `sun_alt_exposure_ladder` to override baseline exposures in bright twilight.
-- Unified pixel saturation thresholds: 100 ke⁻ hard cap with an 80 ke⁻ warning band.
-
 ---
 
 ## Installation
