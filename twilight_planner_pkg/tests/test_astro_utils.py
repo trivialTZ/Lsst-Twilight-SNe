@@ -1,25 +1,25 @@
-import pathlib, sys
+import pathlib
+import sys
 from datetime import datetime, timezone
 
 # Ensure package root is importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-import pytest
 import astropy.units as u
-from astropy.coordinates import EarthLocation, AltAz, get_sun, get_body, SkyCoord
+import pytest
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_sun
 from astropy.time import Time
 
 from twilight_planner_pkg.astro_utils import (
-    twilight_windows_astro,
-    great_circle_sep_deg,
-    slew_time_seconds,
-    per_sn_time_seconds,
-    choose_filters_with_cap,
-    parse_sn_type_to_window_days,
     _best_time_with_moon,
+    choose_filters_with_cap,
+    great_circle_sep_deg,
+    parse_sn_type_to_window_days,
+    per_sn_time_seconds,
+    slew_time_seconds,
+    twilight_windows_astro,
 )
 from twilight_planner_pkg.config import PlannerConfig
-
 
 # Observatory location (CTIO)
 LOC = EarthLocation(lat=-30.1652778 * u.deg, lon=-70.815 * u.deg, height=2215 * u.m)
@@ -28,12 +28,16 @@ LOC = EarthLocation(lat=-30.1652778 * u.deg, lon=-70.815 * u.deg, height=2215 * 
 def test_twilight_windows_astro():
     date = datetime(2024, 1, 15, tzinfo=timezone.utc)
     windows = twilight_windows_astro(date, LOC)
-    assert windows == sorted(windows, key=lambda w: w[0])
-    assert all(s < e for s, e in windows)
+    assert windows == sorted(windows, key=lambda w: w["start"])
+    assert all(w["start"] < w["end"] for w in windows)
     assert windows
-    for s, e in windows:
-        mid = s + (e - s) / 2
-        alt = get_sun(Time(mid)).transform_to(AltAz(obstime=Time(mid), location=LOC)).alt.deg
+    for w in windows:
+        mid = w["start"] + (w["end"] - w["start"]) / 2
+        alt = (
+            get_sun(Time(mid))
+            .transform_to(AltAz(obstime=Time(mid), location=LOC))
+            .alt.deg
+        )
         assert -18 < alt < 0
 
 
@@ -64,18 +68,26 @@ def test_per_sn_time_and_filter_cap():
         filters=["g", "r"],
         allow_filter_changes_in_twilight=True,
     )
-    total, slew, exptime, readout, fchanges = per_sn_time_seconds(["g", "r"], sep_deg=2, cfg=cfg)
+    total, slew, exptime, readout, fchanges = per_sn_time_seconds(
+        ["g", "r"], sep_deg=2, cfg=cfg
+    )
     assert (total, slew, exptime, readout, fchanges) == pytest.approx((29, 2, 20, 2, 5))
 
-    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=40, cfg=cfg, max_filters_per_visit=2)
+    used, timing = choose_filters_with_cap(
+        ["g", "r"], sep_deg=2, cap_s=40, cfg=cfg, max_filters_per_visit=2
+    )
     assert used == ["g", "r"]
     assert timing["total_s"] == pytest.approx(29)
 
-    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=20, cfg=cfg, max_filters_per_visit=2)
+    used, timing = choose_filters_with_cap(
+        ["g", "r"], sep_deg=2, cap_s=20, cfg=cfg, max_filters_per_visit=2
+    )
     assert used == ["g"]
     assert timing["total_s"] == pytest.approx(13)
 
-    used, timing = choose_filters_with_cap(["g", "r"], sep_deg=2, cap_s=5, cfg=cfg, max_filters_per_visit=2)
+    used, timing = choose_filters_with_cap(
+        ["g", "r"], sep_deg=2, cap_s=5, cfg=cfg, max_filters_per_visit=2
+    )
     assert used == ["g"]
     assert timing["total_s"] == pytest.approx(13)
 

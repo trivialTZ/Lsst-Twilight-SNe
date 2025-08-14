@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import warnings
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple, TypedDict
 
 import astropy.units as u
 import numpy as np
@@ -116,9 +116,17 @@ def airmass_from_alt_deg(alt_deg: float) -> float:
     return float(max(x, 1.0))
 
 
+class TwilightWindow(TypedDict):
+    """Twilight window with classification."""
+
+    start: datetime
+    end: datetime
+    label: str | None
+
+
 def twilight_windows_astro(
     date_utc: datetime, loc: EarthLocation
-) -> List[Tuple[datetime, datetime]]:
+) -> List[TwilightWindow]:
     """Compute astronomical twilight windows for a given date and location.
 
     Parameters
@@ -130,8 +138,11 @@ def twilight_windows_astro(
 
     Returns
     -------
-    list[tuple[datetime, datetime]]
-        Sorted list of ``(start, end)`` UTC times where ``-18° <`` Sun altitude ``< 0°``.
+    list[TwilightWindow]
+        Sorted list of twilight windows where ``-18° <`` Sun altitude ``< 0°``.
+        Each window includes a ``label`` of ``"morning"`` or ``"evening"`` when
+        it falls on the given ``date_utc``; windows outside that day remain
+        unlabeled (``None``).
     """
     start = date_utc.replace(tzinfo=timezone.utc) - timedelta(hours=12)
     times = Time([start + timedelta(minutes=i) for i in range(48 * 60)])
@@ -144,7 +155,8 @@ def twilight_windows_astro(
         segments.append((prev, e))
         prev = e + 1
     segments.append((prev, len(mask) - 1))
-    windows = []
+    windows: List[TwilightWindow] = []
+    day_end = date_utc + timedelta(days=1)
     for a, b in segments:
         if np.any(mask[a : b + 1]):
             i0 = a + int(np.argmax(mask[a : b + 1]))
@@ -153,13 +165,15 @@ def twilight_windows_astro(
                 i0 -= 1
             while i1 < b and mask[i1 + 1]:
                 i1 += 1
-            windows.append(
-                (
-                    Time(times[i0]).to_datetime(timezone.utc),
-                    Time(times[i1]).to_datetime(timezone.utc),
-                )
-            )
-    windows.sort(key=lambda w: w[0])
+            start_dt = Time(times[i0]).to_datetime(timezone.utc)
+            end_dt = Time(times[i1]).to_datetime(timezone.utc)
+            alt_start = float(sun_alt[i0])
+            alt_end = float(sun_alt[i1])
+            label: str | None = None
+            if date_utc <= start_dt < day_end:
+                label = "morning" if alt_end > alt_start else "evening"
+            windows.append({"start": start_dt, "end": end_dt, "label": label})
+    windows.sort(key=lambda w: w["start"])
     return windows
 
 
