@@ -136,6 +136,6 @@ For each window index `idx_w` present that night:
 1. [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) — pixel scale, readout/shutter timing, site coordinates.
 2. [DMTN-065: Detailed Filter Changer Timing](https://dmtn-065.lsst.io) — 120 s filter-change breakdown.
 3. [SMTN-002: Expected LSST Performance](https://smtn-002.lsst.io) — sky brightness, read-noise/gain assumptions.
-4. [LCA-48-J](https://project.lsst.org/lsst-camera/lca-48-j) — camera read-noise requirement (≤9 e⁻).
+4. [LCA-48-J](https://project.lsst.org/reviews/jdr-2019/sites/lsst.org.reviews.jdr-2019/files/LCA-48-J_APPROVED_%28CameraSpec%29.pdf) — camera read-noise requirement (≤9 e⁻).
 5. Ivezić, Ž., et al. 2019, ApJ, 873, 111 — LSST overview.
 6. Kasten, F., & Young, A. T. 1989, Appl. Opt., 28, 4735 — airmass formula.
