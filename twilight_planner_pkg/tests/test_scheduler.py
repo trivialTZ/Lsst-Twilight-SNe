@@ -37,7 +37,10 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         end_morning = date_utc.replace(hour=5, minute=30, second=0)
         start_evening = date_utc.replace(hour=18, minute=0, second=0)
         end_evening = date_utc.replace(hour=18, minute=30, second=0)
-        return [(start_morning, end_morning), (start_evening, end_evening)]
+        return [
+            {"start": start_morning, "end": end_morning, "label": "morning"},
+            {"start": start_evening, "end": end_evening, "label": "evening"},
+        ]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
@@ -144,7 +147,7 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
     def mock_twilight_windows_astro(date_utc, loc):
         start_morning = date_utc.replace(hour=5, minute=0, second=0)
         end_morning = date_utc.replace(hour=5, minute=30, second=0)
-        return [(start_morning, end_morning)]
+        return [{"start": start_morning, "end": end_morning, "label": "morning"}]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
@@ -223,7 +226,7 @@ def test_exposure_ladder_applied(tmp_path, monkeypatch):
     def mock_twilight_windows_astro(date_utc, loc):
         start = date_utc.replace(hour=5, minute=0, second=0)
         end = date_utc.replace(hour=5, minute=30, second=0)
-        return [(start, end)]
+        return [{"start": start, "end": end, "label": "morning"}]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg

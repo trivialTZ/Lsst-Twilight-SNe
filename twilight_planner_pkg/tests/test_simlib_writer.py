@@ -16,7 +16,9 @@ def _make_subset_csv(src: Path, out: Path, n: int = 2) -> Path:
 
 
 def test_simlib_output(tmp_path, monkeypatch):
-    data_path = Path(__file__).resolve().parents[2] / "data" / "ATLAS_2021_to25_cleaned.csv"
+    data_path = (
+        Path(__file__).resolve().parents[2] / "data" / "ATLAS_2021_to25_cleaned.csv"
+    )
     subset_csv = _make_subset_csv(data_path, tmp_path / "subset.csv", n=2)
 
     from twilight_planner_pkg import scheduler
@@ -24,16 +26,24 @@ def test_simlib_output(tmp_path, monkeypatch):
     def mock_twilight_windows_astro(date_utc, loc):
         start_morning = date_utc.replace(hour=5, minute=0, second=0)
         end_morning = date_utc.replace(hour=5, minute=30, second=0)
-        return [(start_morning, end_morning)]
+        return [{"start": start_morning, "end": end_morning, "label": "morning"}]
 
-    def mock_best_time_with_moon(sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg):
+    def mock_best_time_with_moon(
+        sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
+    ):
         start, _ = window
         return 50.0, start + timedelta(minutes=5), 0.0, 0.0, 180.0
 
-    monkeypatch.setattr(scheduler, "twilight_windows_astro", mock_twilight_windows_astro)
+    monkeypatch.setattr(
+        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+    )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", lambda *args, **kwargs: 0.0)
-    monkeypatch.setattr(scheduler, "RubinSkyProvider", lambda: scheduler.SimpleSkyProvider(scheduler.SkyModelConfig()))
+    monkeypatch.setattr(
+        scheduler,
+        "RubinSkyProvider",
+        lambda: scheduler.SimpleSkyProvider(scheduler.SkyModelConfig()),
+    )
 
     simlib_path = tmp_path / "plan.SIMLIB"
 
@@ -70,12 +80,12 @@ def test_simlib_output(tmp_path, monkeypatch):
 
     assert simlib_path.exists()
     lines = simlib_path.read_text().strip().splitlines()
-    s_lines = [l for l in lines if l.startswith("S:")]
+    s_lines = [line for line in lines if line.startswith("S:")]
     assert len(s_lines) == len(pernight_df)
 
     assert lines[0] == "BEGIN LIBGEN"
     header_line = "#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR MAG"
-    libid_indices = [i for i, l in enumerate(lines) if l.startswith("LIBID:")]
+    libid_indices = [i for i, line in enumerate(lines) if line.startswith("LIBID:")]
     assert lines.count(header_line) == len(libid_indices)
 
     last_end_line = None
@@ -102,4 +112,4 @@ def test_simlib_output(tmp_path, monkeypatch):
         last_end_line = end_line
 
     assert lines[-1] == last_end_line
-    assert any("SURVEY:" in l for l in lines[:10])
+    assert any("SURVEY:" in line for line in lines[:10])

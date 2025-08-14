@@ -11,7 +11,7 @@ from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
 
 
-def test_nightly_summary_fields(tmp_path):
+def test_nightly_summary_fields(tmp_path, monkeypatch):
     df = pd.DataFrame(
         {
             "ra": [0.0],
@@ -23,11 +23,31 @@ def test_nightly_summary_fields(tmp_path):
     )
     csv = tmp_path / "cat.csv"
     df.to_csv(csv, index=False)
+    from twilight_planner_pkg import scheduler
+
+    def mock_twilight_windows_astro(date_utc, loc):
+        start = date_utc.replace(hour=5, minute=0, second=0)
+        end = date_utc.replace(hour=5, minute=30, second=0)
+        return [{"start": start, "end": end, "label": "morning"}]
+
+    def mock_best_time_with_moon(
+        sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
+    ):
+        start, _ = window
+        return 50.0, start + pd.Timedelta(minutes=5), 0.0, 0.0, 180.0
+
+    monkeypatch.setattr(
+        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+    )
+    monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+
     cfg = PlannerConfig(filters=["i", "z"], morning_cap_s=1000.0, evening_cap_s=1000.0)
     pernight, nights = plan_twilight_range_with_caps(
         str(csv), tmp_path, "2024-01-01", "2024-01-01", cfg, verbose=False
     )
     row = nights.iloc[0]
+    # Ensure we never emit unlabeled windows (e.g., "W0")
+    assert set(pernight["twilight_window"].unique()) <= {"morning", "evening"}
     assert row["swap_count"] == 0
     assert row["internal_filter_changes"] == 0
     assert row["filter_change_s_total"] == 0.0

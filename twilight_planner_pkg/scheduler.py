@@ -189,10 +189,21 @@ def plan_twilight_range_with_caps(
                 vals = []
         req_sep = max(vals) if vals else 0.0
 
-        current_filter_by_window = {0: cfg.start_filter, 1: cfg.start_filter}
-        swap_count_by_window = {0: 0, 1: 0}
-        window_caps = {0: cfg.morning_cap_s, 1: cfg.evening_cap_s}
-        window_labels = {0: "morning", 1: "evening"}
+        current_filter_by_window: Dict[int, str | None] = {}
+        swap_count_by_window: Dict[int, int] = {}
+        window_caps: Dict[int, float] = {}
+        window_labels: Dict[int, str | None] = {}
+        for idx_w, w in enumerate(windows):
+            current_filter_by_window[idx_w] = cfg.start_filter
+            swap_count_by_window[idx_w] = 0
+            label = w.get("label")
+            window_labels[idx_w] = label
+            if label == "morning":
+                window_caps[idx_w] = cfg.morning_cap_s
+            elif label == "evening":
+                window_caps[idx_w] = cfg.evening_cap_s
+            else:
+                window_caps[idx_w] = 0.0
 
         cutoff = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
         if "typical_lifetime_days" in df.columns:
@@ -220,10 +231,20 @@ def plan_twilight_range_with_caps(
             sc = SkyCoord(row["RA_deg"] * u.deg, row["Dec_deg"] * u.deg, frame="icrs")
             max_alt, max_time, max_idx = -999.0, None, None
             best_moon = (float("nan"), float("nan"), float("nan"))
-            for idx_w, w in enumerate(windows):
+            labeled = [
+                (i, w)
+                for i, w in enumerate(windows)
+                if w.get("label") in ("morning", "evening")
+            ]
+            for idx_w, w in labeled:
                 alt_deg, t_utc, moon_alt_deg, moon_phase, moon_sep_deg = (
                     _best_time_with_moon(
-                        sc, w, site, cfg.twilight_step_min, cfg.min_alt_deg, req_sep
+                        sc,
+                        (w["start"], w["end"]),
+                        site,
+                        cfg.twilight_step_min,
+                        cfg.min_alt_deg,
+                        req_sep,
                     )
                 )
                 if alt_deg > max_alt:
@@ -265,9 +286,14 @@ def plan_twilight_range_with_caps(
             group = top_global[top_global["best_window_index"] == idx_w].copy()
             if group.empty:
                 continue
+            # Skip unlabeled (previous/next day) twilight windows entirely
+            if window_labels.get(idx_w) is None:
+                continue
 
             win = windows[idx_w]
-            mid = win[0] + (win[1] - win[0]) / 2
+            mid = win["start"] + (win["end"] - win["start"]) / 2
+            window_label = window_labels.get(idx_w)
+            window_label_out = window_label if window_label else f"W{idx_w}"
             sun_alt = (
                 get_sun(Time(mid))
                 .transform_to(AltAz(location=site, obstime=Time(mid)))
@@ -467,9 +493,7 @@ def plan_twilight_range_with_caps(
                         pernight_rows.append(
                             {
                                 "date": day.date().isoformat(),
-                                "twilight_window": window_labels.get(
-                                    idx_w, f"W{idx_w}"
-                                ),
+                                "twilight_window": window_label_out,
                                 "SN": t["Name"],
                                 "RA_deg": round(t["RA_deg"], 6),
                                 "Dec_deg": round(t["Dec_deg"], 6),
@@ -537,7 +561,7 @@ def plan_twilight_range_with_caps(
             nights_rows.append(
                 {
                     "date": day.date().isoformat(),
-                    "twilight_window": window_labels.get(idx_w, f"W{idx_w}"),
+                    "twilight_window": window_label_out,
                     "n_candidates": int(len(group)),
                     "n_planned": int(
                         len(
@@ -546,8 +570,7 @@ def plan_twilight_range_with_caps(
                                 for r in pernight_rows
                                 if (
                                     r["date"] == day.date().isoformat()
-                                    and r["twilight_window"]
-                                    == window_labels.get(idx_w, f"W{idx_w}")
+                                    and r["twilight_window"] == window_label_out
                                 )
                             ]
                         )
