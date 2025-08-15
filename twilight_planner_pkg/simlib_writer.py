@@ -32,8 +32,15 @@ class SimlibWriter:
 
         self.fp = fp
         self.header = header
+        # Per-LIBID running index for epoch IDs when streaming (unused in buffered mode)
         self._idx = 0
-        self._current_libid: Optional[int] = None
+        # Track the "open" group key while the caller is between start_libid/end_libid.
+        self._current_key: Optional[str] = None
+        # Buffered groups keyed by SN key (comment if present, else RA/DEC key).
+        # Insertion order is preserved (Python 3.7+), used for sequential LIBID renumbering.
+        self._groups: dict[str, dict] = {}
+        # Preserve first-seen order of SN keys (explicit list for clarity).
+        self._order: list[str] = []
 
     def write_header(self) -> None:
         """Write the SIMLIB header block."""
@@ -58,18 +65,33 @@ class SimlibWriter:
         nobs: int,
         comment: str = "",
     ) -> None:
-        """Begin a new LIBID block for a target."""
+        """Begin a new logical LIBID group for a target (BUFFERED; no file I/O).
 
+        We aggregate all subsequent add_epoch() calls into a per-SN buffer keyed by
+        `comment` (preferred) or by a RA/DEC-derived fallback key if `comment` is empty.
+        The actual SIMLIB block for this SN is written only at close(), with NOBS
+        recomputed from the buffered epochs and LIBIDs renumbered sequentially.
+        """
+        # Choose a stable group key: prefer the SN name/comment; else RA/DEC key.
+        key = comment.strip() if comment else f"{ra_deg:.6f},{dec_deg:.6f}"
+        self._current_key = key
+        # First time we see this SN key => create the group and remember insertion order.
+        if key not in self._groups:
+            self._groups[key] = {
+                # We ignore the caller's libid when writing; we renumber at close().
+                "first_seen_libid": libid,
+                "ra_deg": ra_deg,
+                "dec_deg": dec_deg,
+                "comment": comment.strip() if comment else "",
+                "epochs": [],  # list of dicts with epoch fields
+            }
+            self._order.append(key)
+        else:
+            # If RA/DEC vary across visits for the same key, keep first-seen values.
+            # (Optional sanity: could assert closeness; here we just ignore new coords.)
+            pass
+        # Reset per-LIBID epoch counter used ONLY when streaming (we re-ID at flush).
         self._idx = 0
-        self._current_libid = libid
-        w = self.fp.write
-        w("#--------------------------------------------\n")
-        w(f"LIBID: {libid}\n")
-        w(f"NOBS: {nobs}  RA: {ra_deg:11.6f}  DEC: {dec_deg:11.6f}\n")
-        if comment:
-            w(f"# {comment}\n")
-        w("\n")
-        w("#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR MAG\n")
 
     def add_epoch(
         self,
@@ -83,21 +105,64 @@ class SimlibWriter:
         zperr: float,
         mag: float = -99.0,
     ) -> None:
-        """Write an `S:` row describing one exposure."""
-
-        self._idx += 1
-        self.fp.write(
-            f"S: {mjd:11.4f}  {self._idx:3d}  {band:1s}  {gain:5.2f}  {rdnoise:5.2f}  {skysig:7.2f}  {nea:7.2f}  {zpavg:6.3f}  {zperr:5.3f}  {mag:>6}\n"
+        """Buffer an `S:` row (no immediate file I/O)."""
+        if self._current_key is None:
+            # Defensive: if caller forgot start_libid(), ignore silently or raise.
+            # We choose to no-op to preserve backward compatibility.
+            return
+        self._groups[self._current_key]["epochs"].append(
+            {
+                "mjd": mjd,
+                "band": band,
+                "gain": gain,
+                "rdnoise": rdnoise,
+                "skysig": skysig,
+                "nea": nea,
+                "zpavg": zpavg,
+                "zperr": zperr,
+                "mag": mag,
+            }
         )
+        # Keep a local counter to mimic old behavior (unused at flush).
+        self._idx += 1
 
     def end_libid(self) -> None:
-        """Terminate current LIBID block."""
-
-        if self._current_libid is not None:
-            self.fp.write(f"END_LIBID: {self._current_libid}\n")
-            self._current_libid = None
+        """Terminate the current logical LIBID group (BUFFERED; no file I/O)."""
+        self._current_key = None
 
     def close(self) -> None:
-        """Close the underlying file handle."""
-
+        """Flush buffered groups as one LIBID per SN, then close the file handle."""
+        # Emit groups in first-seen order with sequential LIBIDs starting at 1.
+        w = self.fp.write
+        libid_out = 1
+        for key in self._order:
+            g = self._groups[key]
+            epochs = g["epochs"]
+            if not epochs:
+                continue  # no observations buffered for this SN
+            ra = g["ra_deg"]
+            dec = g["dec_deg"]
+            comment = g["comment"]
+            nobs = len(epochs)
+            # Header for this LIBID block.  The SN comment (if any) is appended on
+            # the LIBID line to mirror typical SNANA formatting like:
+            #   LIBID:      236     # from SNID=000236
+            w("#--------------------------------------------\n")
+            libid_line = f"LIBID: {libid_out:7d}"
+            if comment:
+                libid_line += f"     # {comment}"
+            w(f"{libid_line}\n")
+            w(f"NOBS: {nobs}  RA: {ra:11.6f}  DEC: {dec:11.6f}\n")
+            w("\n")
+            w("#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR MAG\n")
+            # Epochs (re-ID from 1..N to guarantee consistency)
+            for idx, e in enumerate(epochs, start=1):
+                w(
+                    f"S: {e['mjd']:11.4f}  {idx:3d}  {e['band']:1s}  "
+                    f"{e['gain']:5.2f}  {e['rdnoise']:5.2f}  {e['skysig']:7.2f}  "
+                    f"{e['nea']:7.2f}  {e['zpavg']:6.3f}  {e['zperr']:5.3f}  {e['mag']:>6}\n"
+                )
+            w(f"END_LIBID: {libid_out}\n")
+            libid_out += 1
+        # Finally close the file
         self.fp.close()

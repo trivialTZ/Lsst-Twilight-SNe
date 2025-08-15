@@ -7,6 +7,7 @@ import pandas as pd
 
 from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
+from twilight_planner_pkg.simlib_writer import SimlibHeader, SimlibWriter
 
 
 def _make_subset_csv(src: Path, out: Path, n: int = 2) -> Path:
@@ -107,7 +108,9 @@ def test_simlib_output(tmp_path, monkeypatch):
 
     last_end_line = None
     for idx in libid_indices:
-        libid = lines[idx].split(":")[1].strip()
+        # LIBID line may include a trailing comment, e.g.,
+        # "LIBID:      1     # SN1".  Extract the numeric token.
+        libid = lines[idx].split()[1]
         nobs_line = lines[idx + 1]
         assert nobs_line.startswith("NOBS:")
         nobs_val = int(nobs_line.split()[1])
@@ -130,3 +133,30 @@ def test_simlib_output(tmp_path, monkeypatch):
 
     assert lines[-1] == last_end_line
     assert any("SURVEY:" in line for line in lines[:10])
+
+
+def test_writer_groups_epochs(tmp_path):
+    path = tmp_path / "out.SIMLIB"
+    with path.open("w") as fp:
+        writer = SimlibWriter(fp, SimlibHeader())
+        writer.write_header()
+        writer.start_libid(1, 1.0, 2.0, 1, comment="SN1")
+        writer.add_epoch(1.0, "r", 1.0, 1.0, 1.0, 1.0, 25.0, 0.1)
+        writer.end_libid()
+        writer.start_libid(2, 1.0, 2.0, 1, comment="SN1")
+        writer.add_epoch(2.0, "r", 1.0, 1.0, 1.0, 1.0, 25.0, 0.1)
+        writer.end_libid()
+        writer.close()
+
+    lines = path.read_text().splitlines()
+    libid_lines = [line for line in lines if line.startswith("LIBID:")]
+    assert len(libid_lines) == 1
+    # Ensure the LIBID number is 1 even with padded spaces.
+    assert libid_lines[0].split()[1] == "1"
+    assert "# SN1" in libid_lines[0]
+    nobs_line = next(line for line in lines if line.startswith("NOBS:"))
+    assert "NOBS: 2" in nobs_line
+    s_lines = [line for line in lines if line.startswith("S:")]
+    assert len(s_lines) == 2
+    assert s_lines[0].split()[2] == "1"
+    assert s_lines[1].split()[2] == "2"
