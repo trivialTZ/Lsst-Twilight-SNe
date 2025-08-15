@@ -1,5 +1,6 @@
 import pathlib
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -25,10 +26,20 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
     df.to_csv(csv, index=False)
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_astro(date_utc, loc):
-        start = date_utc.replace(hour=5, minute=0, second=0)
-        end = date_utc.replace(hour=5, minute=30, second=0)
-        return [{"start": start, "end": end, "label": "morning"}]
+    def mock_twilight_windows_for_local_night(date_local, loc):
+        start = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            5,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end = start + timedelta(minutes=30)
+        return [
+            {"start": start, "end": end, "label": "morning", "night_date": date_local}
+        ]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
@@ -37,7 +48,9 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
         return 50.0, start + pd.Timedelta(minutes=5), 0.0, 0.0, 180.0
 
     monkeypatch.setattr(
-        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
 

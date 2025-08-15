@@ -40,6 +40,7 @@ except Exception:  # pragma: no cover - fallback
 
 from .astro_utils import (
     _best_time_with_moon,
+    _local_timezone_from_location,
     airmass_from_alt_deg,
     allowed_filters_for_sun_alt,
     choose_filters_with_cap,
@@ -47,7 +48,7 @@ from .astro_utils import (
     parse_sn_type_to_window_days,
     pick_first_filter_for_target,
     slew_time_seconds,
-    twilight_windows_astro,
+    twilight_windows_for_local_night,
 )
 from .config import PlannerConfig
 from .constraints import effective_min_sep
@@ -171,10 +172,11 @@ def plan_twilight_range_with_caps(
         lc_detections=cfg.lc_detections,
         lc_exposure_s=cfg.lc_exposure_s,
     )
+    tz_local = _local_timezone_from_location(site)
 
     for day in nights_iter:
-        day_utc = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
-        windows = twilight_windows_astro(day_utc, site)
+        # Here 'day' is interpreted as *local* civil date of the evening block
+        windows = twilight_windows_for_local_night(day, site)
         if not windows:
             continue
         # Conservative baseline Moon separation used while sampling best times.
@@ -205,7 +207,11 @@ def plan_twilight_range_with_caps(
             else:
                 window_caps[idx_w] = 0.0
 
-        cutoff = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
+        # Discovery cutoff at 23:59:59 *local* on the night’s evening date
+        cutoff_local = datetime(
+            day.year, day.month, day.day, 23, 59, 59, tzinfo=tz_local
+        )
+        cutoff = cutoff_local.astimezone(timezone.utc)
         if "typical_lifetime_days" in df.columns:
             lifetime_days_each = df["typical_lifetime_days"]
         else:

@@ -11,7 +11,7 @@ notes.
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple, TypedDict
 
 import astropy.units as u
@@ -122,6 +122,8 @@ class TwilightWindow(TypedDict):
     start: datetime
     end: datetime
     label: str | None
+    # date of the *local night* this window belongs to (evening's civil date)
+    night_date: date | None
 
 
 def twilight_windows_astro(
@@ -172,9 +174,73 @@ def twilight_windows_astro(
             label: str | None = None
             if date_utc <= start_dt < day_end:
                 label = "morning" if alt_end > alt_start else "evening"
-            windows.append({"start": start_dt, "end": end_dt, "label": label})
+            windows.append(
+                {"start": start_dt, "end": end_dt, "label": label, "night_date": None}
+            )
     windows.sort(key=lambda w: w["start"])
     return windows
+
+
+def _local_timezone_from_location(loc: EarthLocation) -> timezone:
+    """Approximate local (solar) timezone from longitude, as a fixed UTC offset.
+
+    Positive offsets are east of Greenwich. West longitudes produce negative offsets.
+    This avoids depending on a civil timezone database and is sufficient for
+    night-bundling logic.
+    """
+    offset_minutes = int(round(loc.lon.to(u.deg).value / 15.0 * 60))
+    return timezone(timedelta(minutes=offset_minutes))
+
+
+def twilight_windows_for_local_night(
+    date_local: date, loc: EarthLocation
+) -> List[TwilightWindow]:
+    """Return the twilight windows (evening and/or morning) for a *local* night.
+
+    The night is identified by the *evening's* local civil date ``date_local``.
+    We compute a ±24h UTC sweep around local midnight, find all twilight windows
+    and then select:
+      - the *evening* window with start_local.date() == date_local
+      - the *morning* window with start_local.date() == date_local + 1 day
+    Each selected window is labeled and stamped with ``night_date = date_local``.
+    """
+    tz = _local_timezone_from_location(loc)
+    local_midnight = datetime(
+        date_local.year, date_local.month, date_local.day, tzinfo=tz
+    )
+    # Center the 48h sweep on the local date's midnight
+    date_utc_anchor = local_midnight.astimezone(timezone.utc)
+    wins = twilight_windows_astro(date_utc_anchor, loc)
+
+    def _is_morning(w: TwilightWindow) -> bool:
+        # compute Sun alt trend at start/end; morning rises, evening falls
+        altaz = AltAz(obstime=Time([w["start"], w["end"]]), location=loc)
+        alt = (
+            get_sun(Time([w["start"], w["end"]]))
+            .transform_to(altaz)
+            .alt.to(u.deg)
+            .value
+        )
+        return float(alt[1]) > float(alt[0])
+
+    selected: List[TwilightWindow] = []
+    # tag local dates
+    for w in wins:
+        start_local = w["start"].astimezone(tz)
+        if _is_morning(w) and start_local.date() == (date_local + timedelta(days=1)):
+            w = dict(w)  # copy
+            w["label"] = "morning"
+            w["night_date"] = date_local
+            selected.append(w)  # keep the one morning of this night (if present)
+        elif (not _is_morning(w)) and start_local.date() == date_local:
+            w = dict(w)
+            w["label"] = "evening"
+            w["night_date"] = date_local
+            selected.append(w)
+
+    # Sort: evening first, then morning
+    selected.sort(key=lambda w: (0 if w["label"] == "evening" else 1, w["start"]))
+    return selected
 
 
 def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
