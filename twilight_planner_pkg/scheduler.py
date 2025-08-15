@@ -20,6 +20,7 @@ twilight.
 from __future__ import annotations
 
 import warnings
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
@@ -147,7 +148,8 @@ def plan_twilight_range_with_caps(
         )
         writer = SimlibWriter(open(cfg.simlib_out, "w"), hdr)
         writer.write_header()
-    libid_counter = 1
+    simlib_epochs_by_sn = defaultdict(list)
+    sn_coords: dict[str, tuple[float, float, str]] = {}
 
     filters = list(cfg.filters or [])
     if cfg.carousel_capacity and len(filters) > cfg.carousel_capacity:
@@ -536,18 +538,10 @@ def plan_twilight_range_with_caps(
                             }
                         )
 
-                    if writer and epochs:
-                        writer.start_libid(
-                            libid_counter,
-                            t["RA_deg"],
-                            t["Dec_deg"],
-                            nobs=len(epochs),
-                            comment=t["Name"],
-                        )
-                        libid_counter += 1
-                        for epoch in epochs:
-                            writer.add_epoch(**epoch)
-                        writer.end_libid()
+                    if cfg.simlib_out and epochs:
+                        key = t["Name"]
+                        sn_coords[key] = (t["RA_deg"], t["Dec_deg"], t["Name"])
+                        simlib_epochs_by_sn[key].extend(epochs)
                     if filters_used:
                         if state is not None and filters_used[0] != state:
                             swap_count_by_window[idx_w] += 1
@@ -609,6 +603,17 @@ def plan_twilight_range_with_caps(
 
     pernight_df = pd.DataFrame(pernight_rows)
     nights_df = pd.DataFrame(nights_rows)
+    if cfg.simlib_out and writer is not None:
+        libid = 1
+        for key, epochs in simlib_epochs_by_sn.items():
+            ra, dec, comment = sn_coords[key]
+            epochs.sort(key=lambda e: (e["mjd"], e["band"]))
+            writer.start_libid(libid, ra, dec, nobs=len(epochs), comment=comment)
+            for e in epochs:
+                writer.add_epoch(**e)
+            writer.end_libid()
+            libid += 1
+        writer.close()
     pernight_path = (
         Path(outdir)
         / f"lsst_twilight_plan_{start.isoformat()}_to_{end.isoformat()}.csv"
@@ -619,8 +624,6 @@ def plan_twilight_range_with_caps(
     )
     pernight_df.to_csv(pernight_path, index=False)
     nights_df.to_csv(nights_path, index=False)
-    if writer:
-        writer.close()
     print(f"Wrote:\n  {pernight_path}\n  {nights_path}")
     print(f"Rows: per-SN={len(pernight_df)}, nights*windows={len(nights_df)}")
     return pernight_df, nights_df
