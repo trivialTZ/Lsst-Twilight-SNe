@@ -204,6 +204,15 @@ def twilight_windows_for_local_night(
       - the *morning* window with start_local.date() == date_local + 1 day
     Each selected window is labeled and stamped with ``night_date = date_local``.
     """
+    # Accept pandas.Timestamp or datetime-like; normalize to datetime.date
+    try:
+        from datetime import date as _Date
+
+        if hasattr(date_local, "date") and type(date_local) is not _Date:
+            date_local = date_local.date()
+    except Exception:
+        pass
+
     tz = _local_timezone_from_location(loc)
     local_midnight = datetime(
         date_local.year, date_local.month, date_local.day, tzinfo=tz
