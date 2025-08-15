@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -32,14 +32,40 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
     # Mock astronomy-heavy helpers for deterministic behaviour
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_astro(date_utc, loc):
-        start_morning = date_utc.replace(hour=5, minute=0, second=0)
-        end_morning = date_utc.replace(hour=5, minute=30, second=0)
-        start_evening = date_utc.replace(hour=18, minute=0, second=0)
-        end_evening = date_utc.replace(hour=18, minute=30, second=0)
+    def mock_twilight_windows_for_local_night(date_local, loc):
+        start_morning = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            5,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end_morning = start_morning + timedelta(minutes=30)
+        start_evening = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            18,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end_evening = start_evening + timedelta(minutes=30)
         return [
-            {"start": start_morning, "end": end_morning, "label": "morning"},
-            {"start": start_evening, "end": end_evening, "label": "evening"},
+            {
+                "start": start_morning,
+                "end": end_morning,
+                "label": "morning",
+                "night_date": date_local,
+            },
+            {
+                "start": start_evening,
+                "end": end_evening,
+                "label": "evening",
+                "night_date": date_local,
+            },
         ]
 
     def mock_best_time_with_moon(
@@ -52,7 +78,9 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         return 0.0
 
     monkeypatch.setattr(
-        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)
@@ -144,10 +172,20 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
 
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_astro(date_utc, loc):
-        start_morning = date_utc.replace(hour=5, minute=0, second=0)
-        end_morning = date_utc.replace(hour=5, minute=30, second=0)
-        return [{"start": start_morning, "end": end_morning, "label": "morning"}]
+    def mock_twilight_windows_for_local_night(date_local, loc):
+        start = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            5,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end = start + timedelta(minutes=30)
+        return [
+            {"start": start, "end": end, "label": "morning", "night_date": date_local}
+        ]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
@@ -167,7 +205,9 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(
-        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)
@@ -223,10 +263,20 @@ def test_exposure_ladder_applied(tmp_path, monkeypatch):
 
     from twilight_planner_pkg import astro_utils, scheduler
 
-    def mock_twilight_windows_astro(date_utc, loc):
-        start = date_utc.replace(hour=5, minute=0, second=0)
-        end = date_utc.replace(hour=5, minute=30, second=0)
-        return [{"start": start, "end": end, "label": "morning"}]
+    def mock_twilight_windows_for_local_night(date_local, loc):
+        start = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            5,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end = start + timedelta(minutes=30)
+        return [
+            {"start": start, "end": end, "label": "morning", "night_date": date_local}
+        ]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
@@ -249,7 +299,9 @@ def test_exposure_ladder_applied(tmp_path, monkeypatch):
         return cfg.exposure_by_filter[band], set()
 
     monkeypatch.setattr(
-        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -23,10 +23,25 @@ def test_simlib_output(tmp_path, monkeypatch):
 
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_astro(date_utc, loc):
-        start_morning = date_utc.replace(hour=5, minute=0, second=0)
-        end_morning = date_utc.replace(hour=5, minute=30, second=0)
-        return [{"start": start_morning, "end": end_morning, "label": "morning"}]
+    def mock_twilight_windows_for_local_night(date_local, loc):
+        start_morning = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            5,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end_morning = start_morning + timedelta(minutes=30)
+        return [
+            {
+                "start": start_morning,
+                "end": end_morning,
+                "label": "morning",
+                "night_date": date_local,
+            }
+        ]
 
     def mock_best_time_with_moon(
         sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
@@ -35,7 +50,9 @@ def test_simlib_output(tmp_path, monkeypatch):
         return 50.0, start + timedelta(minutes=5), 0.0, 0.0, 180.0
 
     monkeypatch.setattr(
-        scheduler, "twilight_windows_astro", mock_twilight_windows_astro
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", lambda *args, **kwargs: 0.0)
