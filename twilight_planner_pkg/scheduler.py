@@ -176,7 +176,7 @@ def plan_twilight_range_with_caps(
 
     for day in nights_iter:
         # Here 'day' is interpreted as *local* civil date of the evening block
-        windows = twilight_windows_for_local_night(day, site)
+        windows = twilight_windows_for_local_night(day.date(), site)
         if not windows:
             continue
         # Conservative baseline Moon separation used while sampling best times.
@@ -189,7 +189,8 @@ def plan_twilight_range_with_caps(
                 vals = [cfg.min_moon_sep_by_filter.get(f, 0.0) for f in cfg.filters]
             except Exception:
                 vals = []
-        req_sep = max(vals) if vals else 0.0
+        # Coarse gate should be permissive; strict, per-filter checks happen later.
+        req_sep = min(vals) if vals else 0.0
 
         current_filter_by_window: Dict[int, str | None] = {}
         swap_count_by_window: Dict[int, int] = {}
