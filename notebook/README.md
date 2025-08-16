@@ -33,7 +33,7 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 ### 2. Night‑by‑Night Loop
 For each UTC date in `START_DATE` … `END_DATE`:
 
-1. **Find astronomical twilight windows**: compute morning/evening intervals where the Sun altitude satisfies −18° < alt < 0° (`twilight_windows_astro`).
+1. **Find astronomical twilight windows**: compute morning/evening intervals where the Sun altitude satisfies `cfg.twilight_sun_alt_min_deg` < alt < `cfg.twilight_sun_alt_max_deg` (defaults −18° < alt < 0°) (`twilight_windows_astro`).
 2. **Set a conservative Moon‑separation guard**: use the max of `MIN_MOON_SEP_BY_FILTER` over loaded filters as a baseline; automatically ignore the constraint when the Moon is below the horizon.
 3. **Initialize window state**: for each window keep the current loaded filter (start with `START_FILTER`), filter-swap counters, and time caps (`MORNING_CAP_S` / `EVENING_CAP_S`).
 4. **Filter eligible SNe by “lifetime”**: using discovery time and `TYPICAL_DAYS_BY_TYPE` (with a 1.2× safety factor via `parse_sn_type_to_window_days`), accept only SNe still in their typical observability window on this date.

@@ -32,7 +32,9 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
     # Mock astronomy-heavy helpers for deterministic behaviour
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_for_local_night(date_local, loc):
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
         start_morning = datetime(
             date_local.year,
             date_local.month,
@@ -172,7 +174,9 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
 
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_for_local_night(date_local, loc):
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
         start = datetime(
             date_local.year,
             date_local.month,
@@ -263,7 +267,9 @@ def test_exposure_ladder_applied(tmp_path, monkeypatch):
 
     from twilight_planner_pkg import astro_utils, scheduler
 
-    def mock_twilight_windows_for_local_night(date_local, loc):
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
         start = datetime(
             date_local.year,
             date_local.month,

@@ -82,12 +82,12 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 > ### Key selection criteria recap:
 >
 > - A supernova must have a valid discovery date within the configured observation window.
-> - Must be observable at altitude ≥ `min_alt_deg` (default 20°) during at least one twilight window (Sun altitude between −18° and 0°).
+> - Must be observable at altitude ≥ `min_alt_deg` (default 20°) during at least one twilight window where the Sun altitude lies between `twilight_sun_alt_min_deg` and `twilight_sun_alt_max_deg` (defaults −18° to 0°).
 > - Eligibility duration after discovery is scaled from a `typical_days_by_type` value (or a default if type unknown) and multiplied by 1.2 to provide a buffer.
 > - Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
 
 ### Twilight Windows & Best Time
-- Twilight windows are spans with Sun altitude $h_\odot \in [-18^\circ,0^\circ)$
+- Twilight windows are spans with Sun altitude $h_\odot \in [\texttt{twilight\_sun\_alt\_min\_deg},\texttt{twilight\_sun\_alt\_max\_deg})$ (defaults −18° to 0°)
 - Sample each window every `twilight_step_min` minutes
 - For each SN, choose the time of maximum altitude that passes altitude and Moon constraints (below)
 
@@ -372,7 +372,7 @@ Below is a compact table summarizing key default values, with direct links to th
 
 | Parameter | Default Value | Source & Link |
 | --- | --- | --- |
-| Sun altitude for twilight | −18° to 0° | — |
+| Sun altitude for twilight | `twilight_sun_alt_min_deg` to `twilight_sun_alt_max_deg` (default −18° to 0°) | — |
 | Minimum target altitude | 20° | — |
 | Hybrid detections threshold | 2 detections or 300 s | — |
 | Light‑curve (LC) threshold | 5 detections or 300 s | — |

@@ -27,7 +27,13 @@ LOC = EarthLocation(lat=-30.1652778 * u.deg, lon=-70.815 * u.deg, height=2215 * 
 
 def test_twilight_windows_astro():
     date = datetime(2024, 1, 15, tzinfo=timezone.utc)
-    windows = twilight_windows_astro(date, LOC)
+    cfg = PlannerConfig()
+    windows = twilight_windows_astro(
+        date,
+        LOC,
+        min_sun_alt_deg=cfg.twilight_sun_alt_min_deg,
+        max_sun_alt_deg=cfg.twilight_sun_alt_max_deg,
+    )
     assert windows == sorted(windows, key=lambda w: w["start"])
     assert all(w["start"] < w["end"] for w in windows)
     assert windows
@@ -38,7 +44,27 @@ def test_twilight_windows_astro():
             .transform_to(AltAz(obstime=Time(mid), location=LOC))
             .alt.deg
         )
-        assert -18 < alt < 0
+        assert cfg.twilight_sun_alt_min_deg < alt < cfg.twilight_sun_alt_max_deg
+
+
+def test_twilight_windows_astro_respects_bounds():
+    date = datetime(2024, 1, 15, tzinfo=timezone.utc)
+    cfg = PlannerConfig(twilight_sun_alt_min_deg=-15.0, twilight_sun_alt_max_deg=-5.0)
+    windows = twilight_windows_astro(
+        date,
+        LOC,
+        min_sun_alt_deg=cfg.twilight_sun_alt_min_deg,
+        max_sun_alt_deg=cfg.twilight_sun_alt_max_deg,
+    )
+    assert windows
+    for w in windows:
+        mid = w["start"] + (w["end"] - w["start"]) / 2
+        alt = (
+            get_sun(Time(mid))
+            .transform_to(AltAz(obstime=Time(mid), location=LOC))
+            .alt.deg
+        )
+        assert cfg.twilight_sun_alt_min_deg < alt < cfg.twilight_sun_alt_max_deg
 
 
 def test_great_circle_sep_deg():

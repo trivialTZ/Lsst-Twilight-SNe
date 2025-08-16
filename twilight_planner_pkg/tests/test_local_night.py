@@ -1,5 +1,5 @@
 import types
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 import astropy.units as u
 import pandas as pd
@@ -25,17 +25,29 @@ def test_scheduler_passes_date_to_local_night(monkeypatch, tmp_path):
     """Ensure the scheduler passes a datetime.date into twilight_windows_for_local_night."""
     seen_types = []
 
-    def fake_twilight_windows_for_local_night(date_local, loc):
+    def fake_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
         seen_types.append(type(date_local))
         d = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
         return [
-            {"start": d.replace(hour=23, minute=45), "end": d.replace(day=2, hour=1, minute=24), "label": "evening"},
-            {"start": d.replace(hour=8, minute=9), "end": d.replace(hour=9, minute=49), "label": "morning"},
+            {
+                "start": d.replace(hour=23, minute=45),
+                "end": d.replace(day=2, hour=1, minute=24),
+                "label": "evening",
+            },
+            {
+                "start": d.replace(hour=8, minute=9),
+                "end": d.replace(hour=9, minute=49),
+                "label": "morning",
+            },
         ]
 
     import twilight_planner_pkg.scheduler as sched
 
-    monkeypatch.setattr(sched, "twilight_windows_for_local_night", fake_twilight_windows_for_local_night)
+    monkeypatch.setattr(
+        sched, "twilight_windows_for_local_night", fake_twilight_windows_for_local_night
+    )
 
     def fake_read_csv(_):
         return pd.DataFrame(
@@ -114,6 +126,8 @@ def test_scheduler_passes_date_to_local_night(monkeypatch, tmp_path):
         typical_days_by_type={},
         default_typical_days=100,
         sun_alt_policy=[],
+        twilight_sun_alt_min_deg=-18.0,
+        twilight_sun_alt_max_deg=0.0,
     )
 
     monkeypatch.setattr(sched, "RubinSkyProvider", lambda *a, **k: None)
@@ -194,13 +208,23 @@ def test_coarse_moon_gate_uses_min(monkeypatch, tmp_path):
         typical_days_by_type={},
         default_typical_days=100,
         sun_alt_policy=[],
+        twilight_sun_alt_min_deg=-18.0,
+        twilight_sun_alt_max_deg=0.0,
     )
 
-    def fake_local_night(date_local, loc):
+    def fake_local_night(date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0):
         d = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
         return [
-            {"start": d.replace(hour=23, minute=45), "end": d.replace(day=2, hour=1, minute=24), "label": "evening"},
-            {"start": d.replace(hour=8, minute=9), "end": d.replace(hour=9, minute=49), "label": "morning"},
+            {
+                "start": d.replace(hour=23, minute=45),
+                "end": d.replace(day=2, hour=1, minute=24),
+                "label": "evening",
+            },
+            {
+                "start": d.replace(hour=8, minute=9),
+                "end": d.replace(hour=9, minute=49),
+                "label": "morning",
+            },
         ]
 
     monkeypatch.setattr(sched, "twilight_windows_for_local_night", fake_local_night)
