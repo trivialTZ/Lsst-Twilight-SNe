@@ -11,6 +11,7 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 - **Science constraints**: target altitude, Moon separation (scaled by Moon altitude/phase), twilight sky brightness, and typical post-discovery visibility windows by SN type.
 - **Engineering constraints**: slew and settle times, readout, filter-change overheads, carousel capacity, and per-window time caps.
 - **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth), batching by the first filter, and greedy routing to minimize combined slew and filter-change cost.
+- **Guard spacing**: a minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If natural overheads are shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
 
 ### Outputs
 

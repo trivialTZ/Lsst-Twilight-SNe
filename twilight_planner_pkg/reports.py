@@ -58,8 +58,17 @@ def summarize_night(
         ),
         "slew_s": float(plan_df.get("slew_s", pd.Series(dtype=float)).sum()),
     }
+    totals["inter_exposure_guard_s"] = float(
+        plan_df.get("guard_s", pd.Series(dtype=float)).sum()
+    )
+    totals["inter_exposure_guard_count"] = int(
+        plan_df.get("inter_exposure_guard_enforced", pd.Series(dtype=bool)).sum()
+    )
     totals["overhead_s"] = (
-        totals["readout_s"] + totals["filter_change_s"] + totals["slew_s"]
+        totals["readout_s"]
+        + totals["filter_change_s"]
+        + totals["slew_s"]
+        + totals["inter_exposure_guard_s"]
     )
     totals["total_used_s"] = totals["science_exptime_s"] + totals["overhead_s"]
 

@@ -1,7 +1,7 @@
 # LSST Twilight Planner
 
 Modular planner for scheduling **Vera C. Rubin Observatory (LSST)** twilight observations of supernovae (SNe).
-Optimized for fast, shallow snaps in bright sky, with options to export **SNANA SIMLIBs** for downstream simulations.
+Optimized for fast, shallow snaps in bright sky, with options to export **SNANA SIMLIBs** for downstream simulations. A minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If that gap is shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
 
 ---
 
@@ -380,6 +380,7 @@ Below is a compact table summarizing key default values, with direct links to th
 | Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
 | Readout time | 2 s per exposure | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Filter change overhead | 120 s | [DMTN-065](https://dmtn-065.lsst.io) |
+| Inter-exposure minimum | `inter_exposure_min_s = 15 s` | thermal/operational margin |
 | Pixel scale | 0.2 arcsec/px | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Site location (lat, lon, alt) | −30.2446°, −70.7494°, 2663 m | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Shutter open/close time | 1 s | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |

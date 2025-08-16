@@ -495,10 +495,42 @@ def plan_twilight_range_with_caps(
                         current_filter=state,
                         max_filters_per_visit=cfg.max_filters_per_visit,
                     )
-                    if window_sum + timing["total_s"] > cap_s:
+                    # Readout overlaps with slew. The time from end of previous
+                    # exposure to the start of this visit's first exposure is
+                    # max(slew, readout) plus any cross-target filter change that
+                    # cannot overlap with slew.
+                    natural_gap_first = max(
+                        timing["slew_s"], cfg.readout_s
+                    ) + timing.get("cross_filter_change_s", 0.0)
+
+                    guard_first_s = (
+                        0.0
+                        if window_sum == 0.0
+                        else max(0.0, cfg.inter_exposure_min_s - natural_gap_first)
+                    )
+                    internal_gap = cfg.readout_s + (
+                        cfg.filter_change_s if len(filters_used) > 1 else 0.0
+                    )
+                    guard_internal_per = max(
+                        0.0, cfg.inter_exposure_min_s - internal_gap
+                    )
+                    guard_internal_total = guard_internal_per * max(
+                        0, len(filters_used) - 1
+                    )
+                    guard_s = guard_first_s + guard_internal_total
+                    elapsed_overhead = max(
+                        timing["slew_s"], cfg.readout_s
+                    ) + timing.get("filter_changes_s", 0.0)
+                    total_with_guard = elapsed_overhead + timing["exposure_s"] + guard_s
+                    if window_sum + total_with_guard > cap_s:
                         continue
-                    window_sum += timing["total_s"]
+                    window_sum += total_with_guard
                     window_filter_change_s += timing.get("filter_changes_s", 0.0)
+                    timing["total_s"] = total_with_guard
+                    timing["guard_s"] = guard_s
+                    timing["elapsed_overhead_s"] = elapsed_overhead
+                    timing["guard_first_s"] = guard_first_s
+                    timing["guard_internal_s"] = guard_internal_total
 
                     epochs = []
                     for f in filters_used:
@@ -539,46 +571,80 @@ def plan_twilight_range_with_caps(
                                     "mag": -99.0,
                                 }
                             )
-                        pernight_rows.append(
-                            {
-                                "date": day.date().isoformat(),
-                                "twilight_window": window_label_out,
-                                "SN": t["Name"],
-                                "RA_deg": round(t["RA_deg"], 6),
-                                "Dec_deg": round(t["Dec_deg"], 6),
-                                "best_twilight_time_utc": (
-                                    pd.Timestamp(t["best_time_utc"])
-                                    .tz_convert("UTC")
-                                    .isoformat()
-                                    if isinstance(t["best_time_utc"], pd.Timestamp)
-                                    else str(t["best_time_utc"])
-                                ),
-                                "filter": f,
-                                "t_exp_s": round(exp_s, 1),
-                                "airmass": round(air, 3),
-                                "alt_deg": round(alt_deg, 2),
-                                "sky_mag_arcsec2": round(sky_mag, 2),
-                                "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
-                                "ZPT": round(eph.ZPTAVG, 3),
-                                "SKYSIG": round(eph.SKYSIG, 3),
-                                "NEA_pix": round(eph.NEA_pix, 2),
-                                "RDNOISE": round(eph.RDNOISE, 2),
-                                "GAIN": round(eph.GAIN, 2),
-                                "saturation_guard_applied": "sat_guard" in flags,
-                                "warn_nonlinear": "warn_nonlinear" in flags,
-                                "priority_score": round(float(t["priority_score"]), 2),
-                                "slew_s": round(timing["slew_s"], 2),
-                                "cross_filter_change_s": round(
-                                    timing.get("cross_filter_change_s", 0.0), 2
-                                ),
-                                "filter_changes_s": round(
-                                    timing.get("filter_changes_s", 0.0), 2
-                                ),
-                                "readout_s": round(timing["readout_s"], 2),
-                                "exposure_s": round(timing["exposure_s"], 2),
-                                "total_time_s": round(timing["total_s"], 2),
-                            }
-                        )
+                        row = {
+                            "date": day.date().isoformat(),
+                            "twilight_window": window_label_out,
+                            "SN": t["Name"],
+                            "RA_deg": round(t["RA_deg"], 6),
+                            "Dec_deg": round(t["Dec_deg"], 6),
+                            "best_twilight_time_utc": (
+                                pd.Timestamp(t["best_time_utc"])
+                                .tz_convert("UTC")
+                                .isoformat()
+                                if isinstance(t["best_time_utc"], pd.Timestamp)
+                                else str(t["best_time_utc"])
+                            ),
+                            "filter": f,
+                            "t_exp_s": round(exp_s, 1),
+                            "airmass": round(air, 3),
+                            "alt_deg": round(alt_deg, 2),
+                            "sky_mag_arcsec2": round(sky_mag, 2),
+                            "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
+                            "ZPT": round(eph.ZPTAVG, 3),
+                            "SKYSIG": round(eph.SKYSIG, 3),
+                            "NEA_pix": round(eph.NEA_pix, 2),
+                            "RDNOISE": round(eph.RDNOISE, 2),
+                            "GAIN": round(eph.GAIN, 2),
+                            "saturation_guard_applied": "sat_guard" in flags,
+                            "warn_nonlinear": "warn_nonlinear" in flags,
+                            "priority_score": round(float(t["priority_score"]), 2),
+                            "slew_s": (
+                                round(timing["slew_s"], 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "cross_filter_change_s": (
+                                round(timing.get("cross_filter_change_s", 0.0), 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "filter_changes_s": (
+                                round(timing.get("filter_changes_s", 0.0), 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "readout_s": (
+                                round(timing["readout_s"], 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "exposure_s": (
+                                round(timing["exposure_s"], 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "guard_s": (
+                                round(timing.get("guard_s", 0.0), 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "inter_exposure_guard_enforced": (
+                                bool(timing.get("guard_s", 0.0) > 0.0)
+                                if f == filters_used[0]
+                                else False
+                            ),
+                            "total_time_s": (
+                                round(timing["total_s"], 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                            "elapsed_overhead_s": (
+                                round(timing.get("elapsed_overhead_s", 0.0), 2)
+                                if f == filters_used[0]
+                                else 0.0
+                            ),
+                        }
+                        pernight_rows.append(row)
 
                     if writer and epochs:
                         writer.start_libid(
@@ -628,6 +694,16 @@ def plan_twilight_range_with_caps(
                 if r["date"] == day.date().isoformat()
                 and r["twilight_window"] == window_label_out
             ]
+            guard_rows = [
+                r
+                for r in pernight_rows
+                if r["date"] == day.date().isoformat()
+                and r["twilight_window"] == window_label_out
+            ]
+            guard_s_total = float(sum(r.get("guard_s", 0.0) for r in guard_rows))
+            guard_count = int(
+                sum(1 for r in guard_rows if r.get("inter_exposure_guard_enforced"))
+            )
             nights_rows.append(
                 {
                     "date": day.date().isoformat(),
@@ -650,6 +726,8 @@ def plan_twilight_range_with_caps(
                     "swap_count": int(swap_count_by_window.get(idx_w, 0)),
                     "internal_filter_changes": int(internal_changes),
                     "filter_change_s_total": round(window_filter_change_s, 1),
+                    "inter_exposure_guard_s": round(guard_s_total, 1),
+                    "inter_exposure_guard_count": guard_count,
                     "mean_slew_s": (
                         float(np.mean(window_slew_times)) if window_slew_times else 0.0
                     ),
