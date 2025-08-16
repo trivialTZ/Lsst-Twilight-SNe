@@ -4,24 +4,7 @@
 This plan tracks incremental, testable stages for the twilight planner and the saturation proof pipeline.
 ---
 
-## Stage 3: Exposure floor = max(15 s, calculated) during observations
-**Why**: Twilight visits should never be shorter than 15 s (to avoid detector heating/thermal stress), but can be longer if saturation/sky/SNR math demands it.  
-
-**Scope**:
-- Add a small policy layer that sets `exptime_s := max(15.0, exptime_calc_s)`.
-- `exptime_calc_s` comes from current photom logic (anti-saturation / target SNR). Keep code changes minimal.
-- Respect instrument overheads already modeled (slew/readout/filter-change).
-- Nightly summary should report per-visit `exptime_s` and a count of visits where the 15 s floor was enforced vs. cases where the calculation required longer.
-
-**Files/Interfaces**:
-- `twilight_planner_pkg/photom_rubin.py`: expose `estimate_exptime_s(...)`.
-- `twilight_planner_pkg/scheduler.py`: apply `exptime_s = max(15.0, estimate_exptime_s(...))`.
-- Config: add `cfg.twilight_exptime_floor_s` (default `15.0`).
-
-**Success Criteria**:
-- Planner never outputs exposures shorter than 15 s.
-- Unit test verifies the floor logic for a bright (would need <15 s) and a faint (requires >15 s) case.
-
+## Stage 3: Enforce inter-exposure spacing (≥ 15 s)
 **Tests**:
 - `pytest twilight_planner_pkg/tests/test_exptime_floor.py`
 
