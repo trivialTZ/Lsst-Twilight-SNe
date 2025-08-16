@@ -22,7 +22,9 @@ class PlannerConfig:
     bright twilight, overriding ``exposure_by_filter`` within the specified Sun
     altitude ranges.  The scheduler populates transient fields such as
     ``current_mag_by_filter``, ``current_alt_deg``, and ``current_mjd`` for
-    per-target exposure capping; users normally leave these as ``None``.
+    per-target exposure capping; users normally leave these as ``None``.  Minimum
+    required time between consecutive exposures (idle 'guard' time is inserted if
+    natural overhead < this value).
     """
 
     # -- Site ---------------------------------------------------------------
@@ -40,6 +42,7 @@ class PlannerConfig:
     carousel_capacity: int = 5
     filter_change_s: float = 120.0
     readout_s: float = 2.0
+    inter_exposure_min_s: float = 15.0
     # Legacy argument names supported via __post_init__
     filter_change_time_s: float | None = None
     readout_time_s: float | None = None
