@@ -127,9 +127,12 @@ class TwilightWindow(TypedDict):
 
 
 def twilight_windows_astro(
-    date_utc: datetime, loc: EarthLocation
+    date_utc: datetime,
+    loc: EarthLocation,
+    min_sun_alt_deg: float = PlannerConfig.twilight_sun_alt_min_deg,
+    max_sun_alt_deg: float = PlannerConfig.twilight_sun_alt_max_deg,
 ) -> List[TwilightWindow]:
-    """Compute astronomical twilight windows for a given date and location.
+    """Compute twilight windows for a given date and location.
 
     Parameters
     ----------
@@ -137,20 +140,24 @@ def twilight_windows_astro(
         Reference date in UTC.
     loc : astropy.coordinates.EarthLocation
         Observatory location.
+    min_sun_alt_deg, max_sun_alt_deg : float, optional
+        Inclusive Sun-altitude bounds in degrees. Windows are emitted where
+        ``min_sun_alt_deg < h_☉ < max_sun_alt_deg``. Defaults reflect
+        astronomical twilight (``-18°`` to ``0°``).
 
     Returns
     -------
     list[TwilightWindow]
-        Sorted list of twilight windows where ``-18° <`` Sun altitude ``< 0°``.
-        Each window includes a ``label`` of ``"morning"`` or ``"evening"`` when
-        it falls on the given ``date_utc``; windows outside that day remain
+        Sorted list of twilight windows within the Sun-altitude range. Each
+        window includes a ``label`` of ``"morning"`` or ``"evening"`` when it
+        falls on the given ``date_utc``; windows outside that day remain
         unlabeled (``None``).
     """
     start = date_utc.replace(tzinfo=timezone.utc) - timedelta(hours=12)
     times = Time([start + timedelta(minutes=i) for i in range(48 * 60)])
     altaz = AltAz(obstime=times, location=loc)
     sun_alt = get_sun(times).transform_to(altaz).alt.to(u.deg).value
-    mask = (sun_alt > -18.0) & (sun_alt < 0.0)
+    mask = (sun_alt > min_sun_alt_deg) & (sun_alt < max_sun_alt_deg)
     edges = np.where(np.diff(mask.astype(int)) != 0)[0]
     segments, prev = [], 0
     for e in edges:
@@ -193,15 +200,35 @@ def _local_timezone_from_location(loc: EarthLocation) -> timezone:
 
 
 def twilight_windows_for_local_night(
-    date_local: date, loc: EarthLocation
+    date_local: date,
+    loc: EarthLocation,
+    min_sun_alt_deg: float = PlannerConfig.twilight_sun_alt_min_deg,
+    max_sun_alt_deg: float = PlannerConfig.twilight_sun_alt_max_deg,
 ) -> List[TwilightWindow]:
-    """Return the twilight windows (evening and/or morning) for a *local* night.
+    """Return twilight windows (evening and/or morning) for a *local* night.
 
-    The night is identified by the *evening's* local civil date ``date_local``.
-    We compute a ±24h UTC sweep around local midnight, find all twilight windows
-    and then select:
-      - the *evening* window with start_local.date() == date_local
-      - the *morning* window with start_local.date() == date_local + 1 day
+    Parameters
+    ----------
+    date_local : datetime.date
+        Local civil date identifying the evening of the night.
+    loc : astropy.coordinates.EarthLocation
+        Observatory location.
+    min_sun_alt_deg, max_sun_alt_deg : float, optional
+        Sun-altitude bounds passed through to :func:`twilight_windows_astro`.
+        Defaults match astronomical twilight.
+
+    Returns
+    -------
+    list[TwilightWindow]
+        At most two windows (evening then morning) labeled and stamped with
+        ``night_date = date_local``.
+
+    Notes
+    -----
+    We compute a ±24h UTC sweep around local midnight, find all twilight
+    windows and then select:
+      - the *evening* window with ``start_local.date() == date_local``
+      - the *morning* window with ``start_local.date() == date_local + 1 day``
     Each selected window is labeled and stamped with ``night_date = date_local``.
     """
     # Accept pandas.Timestamp or datetime-like; normalize to datetime.date
@@ -219,7 +246,12 @@ def twilight_windows_for_local_night(
     )
     # Center the 48h sweep on the local date's midnight
     date_utc_anchor = local_midnight.astimezone(timezone.utc)
-    wins = twilight_windows_astro(date_utc_anchor, loc)
+    wins = twilight_windows_astro(
+        date_utc_anchor,
+        loc,
+        min_sun_alt_deg=min_sun_alt_deg,
+        max_sun_alt_deg=max_sun_alt_deg,
+    )
 
     def _is_morning(w: TwilightWindow) -> bool:
         # compute Sun alt trend at start/end; morning rises, evening falls

@@ -24,7 +24,9 @@ def test_simlib_output(tmp_path, monkeypatch):
 
     from twilight_planner_pkg import scheduler
 
-    def mock_twilight_windows_for_local_night(date_local, loc):
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
         start_morning = datetime(
             date_local.year,
             date_local.month,

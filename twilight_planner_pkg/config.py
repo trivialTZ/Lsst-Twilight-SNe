@@ -32,6 +32,8 @@ class PlannerConfig:
 
     # -- Visibility --------------------------------------------------------
     min_alt_deg: float = 30.0
+    twilight_sun_alt_min_deg: float = -18.0
+    twilight_sun_alt_max_deg: float = 0.0
 
     # -- Filters and hardware ---------------------------------------------
     filters: List[str] = field(default_factory=lambda: ["g", "r", "i", "z", "y"])

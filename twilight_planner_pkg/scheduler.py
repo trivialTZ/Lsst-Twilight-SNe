@@ -176,7 +176,12 @@ def plan_twilight_range_with_caps(
 
     for day in nights_iter:
         # Here 'day' is interpreted as *local* civil date of the evening block
-        windows = twilight_windows_for_local_night(day.date(), site)
+        windows = twilight_windows_for_local_night(
+            day.date(),
+            site,
+            cfg.twilight_sun_alt_min_deg,
+            cfg.twilight_sun_alt_max_deg,
+        )
         if not windows:
             continue
         # Conservative baseline Moon separation used while sampling best times.
