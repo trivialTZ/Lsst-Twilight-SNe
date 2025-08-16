@@ -366,6 +366,7 @@ def plan_twilight_range_with_caps(
                     "sn_type": row.get("SN_type_raw"),
                     "allowed": allowed,
                     "moon_sep_ok": moon_sep_ok,
+                    "moon_sep": float(row["_moon_sep"]),
                 }
                 candidates.append(cand)
             if not candidates:
@@ -386,6 +387,7 @@ def plan_twilight_range_with_caps(
             window_filter_change_s = 0.0
             window_slew_times: List[float] = []
             window_airmasses: List[float] = []
+            window_skymags: List[float] = []
             filters_used_set: set[str] = set()
             state = current_filter_by_window.get(idx_w)
 
@@ -483,6 +485,7 @@ def plan_twilight_range_with_caps(
                         else:
                             sky_mag = sky_mag_arcsec2(f, sky_cfg)
                         eph = compute_epoch_photom(f, exp_s, alt_deg, sky_mag, phot_cfg)
+                        window_skymags.append(sky_mag)
                         if writer:
                             epochs.append(
                                 {
@@ -516,6 +519,7 @@ def plan_twilight_range_with_caps(
                                 "airmass": round(air, 3),
                                 "alt_deg": round(alt_deg, 2),
                                 "sky_mag_arcsec2": round(sky_mag, 2),
+                                "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
                                 "ZPT": round(eph.ZPTAVG, 3),
                                 "SKYSIG": round(eph.SKYSIG, 3),
                                 "NEA_pix": round(eph.NEA_pix, 2),
@@ -565,6 +569,32 @@ def plan_twilight_range_with_caps(
                     )
 
             used_filters_csv = ",".join(sorted(filters_used_set))
+            win = windows[idx_w]
+            start_utc = pd.Timestamp(win["start"]).tz_convert("UTC").isoformat()
+            end_utc = pd.Timestamp(win["end"]).tz_convert("UTC").isoformat()
+            dur_s = (win["end"] - win["start"]).total_seconds()
+            mid = win["start"] + (win["end"] - win["start"]) / 2
+            mid_utc = pd.Timestamp(mid).tz_convert("UTC").isoformat()
+            sun_alt_mid = float(
+                get_sun(Time(mid))
+                .transform_to(AltAz(location=site, obstime=Time(mid)))
+                .alt.to(u.deg)
+                .value
+            )
+            policy_filters_mid = ",".join(allowed_filters_for_sun_alt(sun_alt_mid, cfg))
+            cap_source = (
+                "morning_cap_s"
+                if window_labels.get(idx_w) == "morning"
+                else (
+                    "evening_cap_s" if window_labels.get(idx_w) == "evening" else "none"
+                )
+            )
+            alts = [
+                r["alt_deg"]
+                for r in pernight_rows
+                if r["date"] == day.date().isoformat()
+                and r["twilight_window"] == window_label_out
+            ]
             nights_rows.append(
                 {
                     "date": day.date().isoformat(),
@@ -595,6 +625,19 @@ def plan_twilight_range_with_caps(
                     ),
                     "loaded_filters": ",".join(cfg.filters),
                     "filters_used_csv": used_filters_csv,
+                    "window_start_utc": start_utc,
+                    "window_end_utc": end_utc,
+                    "window_duration_s": int(dur_s),
+                    "window_mid_utc": mid_utc,
+                    "sun_alt_mid_deg": round(sun_alt_mid, 2),
+                    "policy_filters_mid_csv": policy_filters_mid,
+                    "window_utilization": round(window_sum / max(1.0, dur_s), 4),
+                    "cap_utilization": round(window_sum / max(1.0, cap_s), 4),
+                    "cap_source": cap_source,
+                    "median_sky_mag_arcsec2": (
+                        float(np.median(window_skymags)) if window_skymags else np.nan
+                    ),
+                    "median_alt_deg": (float(np.median(alts)) if alts else np.nan),
                 }
             )
             if override_exp is not None:

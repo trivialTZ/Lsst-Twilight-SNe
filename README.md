@@ -62,6 +62,20 @@ plan_twilight_range_with_caps("my_catalog.csv", "out", "2024-01-01", "2024-01-01
 The repository includes `data/demo_three_targets.csv` illustrating a simple
 three-target run.
 
+## Outputs
+
+The night/window summary CSV now includes the following columns capturing
+twilight timing and basic science metrics:
+
+- `window_start_utc`, `window_end_utc`, `window_duration_s`, `window_mid_utc`
+- `sun_alt_mid_deg`, `policy_filters_mid_csv`
+- `window_utilization`, `cap_utilization`, `cap_source`
+- `median_sky_mag_arcsec2`, `median_alt_deg`
+
+`window_cap_s` is populated from
+`PlannerConfig.morning_cap_s` or `PlannerConfig.evening_cap_s` according to the
+window label.
+
 ## Installation
 
 ```bash

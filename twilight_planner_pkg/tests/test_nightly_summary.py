@@ -70,3 +70,11 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
     assert row["median_airmass"] == pytest.approx(am_expected, rel=1e-3)
     assert row["filters_used_csv"] == ",".join(sorted(pernight["filter"].unique()))
     assert row["n_planned"] == 1
+    assert "moon_sep" in pernight.columns
+    start = datetime(2024, 1, 1, 5, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=30)
+    assert row["window_start_utc"] == pd.Timestamp(start).tz_convert("UTC").isoformat()
+    assert row["window_end_utc"] == pd.Timestamp(end).tz_convert("UTC").isoformat()
+    assert row["window_duration_s"] == 1800
+    assert row["cap_source"] == "morning_cap_s"
+    assert row["median_alt_deg"] == pytest.approx(pernight["alt_deg"].median())
