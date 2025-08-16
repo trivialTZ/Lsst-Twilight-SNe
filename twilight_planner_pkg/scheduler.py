@@ -184,22 +184,26 @@ def plan_twilight_range_with_caps(
         )
         if not windows:
             continue
-        evening_tw: datetime | None = None
-        morning_tw: datetime | None = None
+        evening_start: datetime | None = None
+        evening_end: datetime | None = None
+        morning_start: datetime | None = None
+        morning_end: datetime | None = None
         for w in windows:
             if w.get("label") == "evening":
-                evening_tw = w["start"]
+                evening_start = w["start"]
+                evening_end = w["end"]
             elif w.get("label") == "morning":
-                morning_tw = w["start"]
+                morning_start = w["start"]
+                morning_end = w["end"]
         if cfg.evening_twilight:
             hh, mm = map(int, cfg.evening_twilight.split(":"))
             dt_local = datetime(day.year, day.month, day.day, hh, mm, tzinfo=tz_local)
-            evening_tw = dt_local.astimezone(timezone.utc)
+            evening_start = dt_local.astimezone(timezone.utc)
         if cfg.morning_twilight:
             hh, mm = map(int, cfg.morning_twilight.split(":"))
             d2 = day + pd.Timedelta(days=1)
             dt_local = datetime(d2.year, d2.month, d2.day, hh, mm, tzinfo=tz_local)
-            morning_tw = dt_local.astimezone(timezone.utc)
+            morning_start = dt_local.astimezone(timezone.utc)
         # Conservative baseline Moon separation used while sampling best times.
         # Detailed per-filter checks with altitude/phase scaling are applied later via effective_min_sep.
         vals: list[float] = []
@@ -676,21 +680,34 @@ def plan_twilight_range_with_caps(
             planned_today = [
                 r for r in pernight_rows if r["date"] == day.date().isoformat()
             ]
-            filters_csv = ",".join(cfg.filters)
-            eve_str = (
-                pd.Timestamp(evening_tw).tz_convert("UTC").isoformat()
-                if evening_tw
-                else "na"
-            )
-            morn_str = (
-                pd.Timestamp(morning_tw).tz_convert("UTC").isoformat()
-                if morning_tw
-                else "na"
-            )
+
+            def _fmt_window(start: datetime | None, end: datetime | None) -> str:
+                if start is None or end is None:
+                    return "na"
+                start_utc = pd.Timestamp(start).tz_convert("UTC")
+                end_utc = pd.Timestamp(end).tz_convert("UTC")
+                start_local = start_utc.tz_convert(tz_local)
+                end_local = end_utc.tz_convert(tz_local)
+                offset_td = start_local.utcoffset() or timedelta(0)
+                sign = "+" if offset_td >= timedelta(0) else "-"
+                offset_td = abs(offset_td)
+                hours = int(offset_td.total_seconds() // 3600)
+                minutes = int((offset_td.total_seconds() % 3600) // 60)
+                offset_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
+                return (
+                    f"{start_utc.isoformat()} \u2192 {end_utc.isoformat()} "
+                    f"(local {start_local.strftime('%H:%M')} \u2192 {end_local.strftime('%H:%M')} {offset_str})"
+                )
+
+            eve_str = _fmt_window(evening_start, evening_end)
+            morn_str = _fmt_window(morning_start, morning_end)
+
             print(
-                f"{day.date().isoformat()}: eligible={len(subset)} visible={len(visible)} planned_total={len(planned_today)} "
-                f"evening_twilight={eve_str} morning_twilight={morn_str} filters={filters_csv}"
+                f"{day.date().isoformat()}: eligible={len(subset)} visible={len(visible)} "
+                f"planned_total={len(planned_today)}"
             )
+            print(f"  evening_twilight: {eve_str}")
+            print(f"  morning_twilight: {morn_str}")
 
     pernight_df = pd.DataFrame(pernight_rows)
     nights_df = pd.DataFrame(nights_rows)
