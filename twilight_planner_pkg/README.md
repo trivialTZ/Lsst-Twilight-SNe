@@ -19,7 +19,8 @@ pip install -r requirements.txt
 python -m twilight_planner_pkg.main --csv your.csv --out results \
     --start 2024-01-01 --end 2024-01-07 \
     --lat -30.2446 --lon -70.7494 --height 2663 \
-    --filters g,r,i,z --exp g:5,r:5,i:5,z:5 \
+    --evening-twilight 18:00 --morning-twilight 05:00 \
+    --filters griz --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap auto --morning_cap auto \
     --per_sn_cap 120 --max_sn 10 --strategy hybrid \
     --hybrid-detections 2 --hybrid-exposure 300 \

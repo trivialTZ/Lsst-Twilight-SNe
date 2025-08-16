@@ -6,6 +6,8 @@ Usage (example):
         --out /mnt/data/out \
         --start 2024-01-01 --end 2024-01-07 \
         --lat -30.2446 --lon -70.7494 --height 2663 \
+        --evening-twilight 18:00 --morning-twilight 05:00 \
+        --filters g,r,i,z \
         --strategy hybrid
 """
 
@@ -50,7 +52,9 @@ def build_parser():
         help="Maximum Sun altitude (deg) for twilight windows",
     )
     p.add_argument(
-        "--filters", default="g,r,i,z", help="Comma-separated filter list, e.g. g,r,i,z"
+        "--filters",
+        default="g,r,i,z",
+        help="Filter list, e.g. 'g,r,i,z' or 'griz'",
     )
     p.add_argument(
         "--exp",
@@ -70,6 +74,14 @@ def build_parser():
     p.add_argument("--per_sn_cap", type=float, default=120.0)
     p.add_argument("--max_sn", type=int, default=10)
     p.add_argument("--twilight_step", type=int, default=2)
+    p.add_argument(
+        "--evening-twilight",
+        help="Override evening twilight start time (HH:MM, local)",
+    )
+    p.add_argument(
+        "--morning-twilight",
+        help="Override morning twilight start time (HH:MM, local)",
+    )
     p.add_argument(
         "--require_single_time",
         action="store_true",
@@ -139,6 +151,13 @@ def parse_exp_map(s: str):
     return m
 
 
+def parse_filters(s: str) -> list[str]:
+    """Parse a filter list from comma or character-separated string."""
+    if "," in s:
+        return [x.strip() for x in s.split(",") if x.strip()]
+    return [c for c in s if c.strip()]
+
+
 def _parse_cap(val: str) -> float | str:
     """Parse a window cap argument.
 
@@ -171,11 +190,13 @@ def main():
         min_alt_deg=args.min_alt,
         twilight_sun_alt_min_deg=args.twilight_sun_alt_min,
         twilight_sun_alt_max_deg=args.twilight_sun_alt_max,
-        filters=[x.strip() for x in args.filters.split(",") if x.strip()],
+        filters=parse_filters(args.filters),
         exposure_by_filter=exp_map,
         twilight_step_min=args.twilight_step,
         evening_cap_s=_parse_cap(args.evening_cap),
         morning_cap_s=_parse_cap(args.morning_cap),
+        evening_twilight=args.evening_twilight,
+        morning_twilight=args.morning_twilight,
         per_sn_cap_s=args.per_sn_cap,
         max_sn_per_night=args.max_sn,
         require_single_time_for_all_filters=args.require_single_time,
