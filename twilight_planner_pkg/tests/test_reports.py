@@ -1,6 +1,7 @@
-import pathlib, sys
+import pathlib
+import sys
+
 import pandas as pd
-import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
@@ -27,8 +28,8 @@ def test_summarize_night_basic(tmp_path, monkeypatch):
     out_dir = tmp_path / "twilight_outputs"
     out_dir.mkdir()
     monkeypatch.chdir(tmp_path)
-    m = summarize_night(plan, twilight_window_s=600)
+    m = summarize_night(plan, twilight=600, outdir=str(out_dir))
     assert 0.0 <= m["science_efficiency"] <= 1.0
     assert m["color_completeness_frac"] >= 0.5
-    csv_path = tmp_path / "twilight_outputs" / "nightly_metrics.csv"
+    csv_path = out_dir / "nightly_metrics.csv"
     assert csv_path.exists()
