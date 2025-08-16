@@ -160,6 +160,106 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
     assert (nights_df["sum_time_s"] <= nights_df["window_cap_s"]).all()
 
 
+def test_window_cap_auto_uses_duration(tmp_path, monkeypatch):
+    """Automatic caps equal the true window duration."""
+
+    data_path = (
+        Path(__file__).resolve().parents[2] / "data" / "ATLAS_2021_to25_cleaned.csv"
+    )
+    subset_csv = _make_subset_csv(data_path, tmp_path / "subset.csv", n=3)
+
+    from twilight_planner_pkg import scheduler
+
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
+        start_morning = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            5,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end_morning = start_morning + timedelta(minutes=10)
+        start_evening = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            18,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end_evening = start_evening + timedelta(minutes=10)
+        return [
+            {
+                "start": start_morning,
+                "end": end_morning,
+                "label": "morning",
+                "night_date": date_local,
+            },
+            {
+                "start": start_evening,
+                "end": end_evening,
+                "label": "evening",
+                "night_date": date_local,
+            },
+        ]
+
+    def mock_best_time_with_moon(
+        sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
+    ):
+        start, _ = window
+        return 50.0, start + timedelta(minutes=1), 0.0, 0.0, 180.0
+
+    def mock_sep(ra1, dec1, ra2, dec2):
+        return 0.0
+
+    monkeypatch.setattr(
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
+    )
+    monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)
+
+    cfg = PlannerConfig(
+        lat_deg=0.0,
+        lon_deg=0.0,
+        height_m=0.0,
+        filters=["g"],
+        exposure_by_filter={"g": 10.0},
+        readout_s=0.0,
+        filter_change_s=0.0,
+        evening_cap_s="auto",
+        morning_cap_s="auto",
+        max_sn_per_night=1,
+        per_sn_cap_s=10.0,
+        min_moon_sep_by_filter={"g": 0.0},
+        require_single_time_for_all_filters=False,
+        min_alt_deg=0.0,
+        twilight_step_min=1,
+        allow_filter_changes_in_twilight=True,
+        sun_alt_policy=[(-18.0, 0.0, ["g"])],
+    )
+
+    start_date = end_date = "2025-07-30"
+
+    _, nights_df = plan_twilight_range_with_caps(
+        csv_path=str(subset_csv),
+        outdir=str(tmp_path),
+        start_date=start_date,
+        end_date=end_date,
+        cfg=cfg,
+        verbose=False,
+    )
+
+    assert (nights_df["window_cap_s"] == nights_df["window_duration_s"]).all()
+    assert (nights_df["cap_source"] == "window_duration").all()
+
+
 def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
     """Filters outside the sun_alt_policy are never scheduled."""
 
