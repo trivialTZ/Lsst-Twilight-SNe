@@ -184,6 +184,22 @@ def plan_twilight_range_with_caps(
         )
         if not windows:
             continue
+        evening_tw: datetime | None = None
+        morning_tw: datetime | None = None
+        for w in windows:
+            if w.get("label") == "evening":
+                evening_tw = w["start"]
+            elif w.get("label") == "morning":
+                morning_tw = w["start"]
+        if cfg.evening_twilight:
+            hh, mm = map(int, cfg.evening_twilight.split(":"))
+            dt_local = datetime(day.year, day.month, day.day, hh, mm, tzinfo=tz_local)
+            evening_tw = dt_local.astimezone(timezone.utc)
+        if cfg.morning_twilight:
+            hh, mm = map(int, cfg.morning_twilight.split(":"))
+            d2 = day + pd.Timedelta(days=1)
+            dt_local = datetime(d2.year, d2.month, d2.day, hh, mm, tzinfo=tz_local)
+            morning_tw = dt_local.astimezone(timezone.utc)
         # Conservative baseline Moon separation used while sampling best times.
         # Detailed per-filter checks with altitude/phase scaling are applied later via effective_min_sep.
         vals: list[float] = []
@@ -660,8 +676,20 @@ def plan_twilight_range_with_caps(
             planned_today = [
                 r for r in pernight_rows if r["date"] == day.date().isoformat()
             ]
+            filters_csv = ",".join(cfg.filters)
+            eve_str = (
+                pd.Timestamp(evening_tw).tz_convert("UTC").isoformat()
+                if evening_tw
+                else "na"
+            )
+            morn_str = (
+                pd.Timestamp(morning_tw).tz_convert("UTC").isoformat()
+                if morning_tw
+                else "na"
+            )
             print(
-                f"{day.date().isoformat()}: eligible={len(subset)} visible={len(visible)} planned_total={len(planned_today)}"
+                f"{day.date().isoformat()}: eligible={len(subset)} visible={len(visible)} planned_total={len(planned_today)} "
+                f"evening_twilight={eve_str} morning_twilight={morn_str} filters={filters_csv}"
             )
 
     pernight_df = pd.DataFrame(pernight_rows)
