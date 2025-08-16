@@ -127,6 +127,7 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         "RA_deg",
         "Dec_deg",
         "best_twilight_time_utc",
+        "sn_end_utc",
         "filter",
         "t_exp_s",
         "airmass",
@@ -144,6 +145,13 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
     assert expected_cols.issubset(pernight_df.columns)
 
     assert (pernight_df["t_exp_s"] >= 0).all()
+
+    # End time equals start time plus total visit duration
+    mask = pernight_df["total_time_s"] > 0
+    starts = pd.to_datetime(pernight_df.loc[mask, "best_twilight_time_utc"], utc=True)
+    ends = pd.to_datetime(pernight_df.loc[mask, "sn_end_utc"], utc=True)
+    durations = pernight_df.loc[mask, "total_time_s"]
+    assert ((ends - starts).dt.total_seconds().round(3) == durations.round(3)).all()
 
     # ------------------------------------------------------------------
     # nights_df checks

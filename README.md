@@ -64,6 +64,9 @@ three-target run.
 
 ## Outputs
 
+The per-SN planning CSV now includes an `sn_end_utc` column giving the
+end of each visit (start time plus total scheduled duration).
+
 The night/window summary CSV now includes the following columns capturing
 twilight timing and basic science metrics:
 

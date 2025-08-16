@@ -571,19 +571,22 @@ def plan_twilight_range_with_caps(
                                     "mag": -99.0,
                                 }
                             )
+                        # Observation start and end times in UTC
+                        start_utc = pd.Timestamp(t["best_time_utc"])
+                        if start_utc.tzinfo is None:
+                            start_utc = start_utc.tz_localize("UTC")
+                        else:
+                            start_utc = start_utc.tz_convert("UTC")
+                        total_s = round(timing["total_s"], 2)
+                        end_utc = start_utc + pd.to_timedelta(total_s, unit="s")
                         row = {
                             "date": day.date().isoformat(),
                             "twilight_window": window_label_out,
                             "SN": t["Name"],
                             "RA_deg": round(t["RA_deg"], 6),
                             "Dec_deg": round(t["Dec_deg"], 6),
-                            "best_twilight_time_utc": (
-                                pd.Timestamp(t["best_time_utc"])
-                                .tz_convert("UTC")
-                                .isoformat()
-                                if isinstance(t["best_time_utc"], pd.Timestamp)
-                                else str(t["best_time_utc"])
-                            ),
+                            "best_twilight_time_utc": start_utc.isoformat(),
+                            "sn_end_utc": end_utc.isoformat(),
                             "filter": f,
                             "t_exp_s": round(exp_s, 1),
                             "airmass": round(air, 3),
@@ -633,11 +636,7 @@ def plan_twilight_range_with_caps(
                                 if f == filters_used[0]
                                 else False
                             ),
-                            "total_time_s": (
-                                round(timing["total_s"], 2)
-                                if f == filters_used[0]
-                                else 0.0
-                            ),
+                            "total_time_s": (total_s if f == filters_used[0] else 0.0),
                             "elapsed_overhead_s": (
                                 round(timing.get("elapsed_overhead_s", 0.0), 2)
                                 if f == filters_used[0]
