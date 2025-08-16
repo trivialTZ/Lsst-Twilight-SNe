@@ -72,9 +72,10 @@ twilight timing and basic science metrics:
 - `window_utilization`, `cap_utilization`, `cap_source`
 - `median_sky_mag_arcsec2`, `median_alt_deg`
 
-`window_cap_s` is populated from
-`PlannerConfig.morning_cap_s` or `PlannerConfig.evening_cap_s` according to the
-window label.
+`window_cap_s` records the effective limit on scheduled time in each twilight
+window. It comes from `PlannerConfig.morning_cap_s` or `PlannerConfig.evening_cap_s`.
+When these are set to "auto" (the default), the cap equals the true duration of
+each window; otherwise a fixed number of seconds is used.
 
 ## Installation
 

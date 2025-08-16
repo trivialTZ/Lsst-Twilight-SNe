@@ -8,7 +8,7 @@ at Cerro Pach\u00f3n and can be customised for testing purposes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 
 @dataclass
@@ -88,8 +88,8 @@ class PlannerConfig:
 
     # -- Time caps ---------------------------------------------------------
     per_sn_cap_s: float = 600.0
-    morning_cap_s: float = 1800.0
-    evening_cap_s: float = 1800.0
+    morning_cap_s: float | Literal["auto"] = "auto"
+    evening_cap_s: float | Literal["auto"] = "auto"
     twilight_step_min: int = 2
     max_sn_per_night: int = 20
 

@@ -9,6 +9,8 @@ Usage (example):
         --strategy hybrid
 """
 
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 
@@ -55,8 +57,16 @@ def build_parser():
         default="g:5,r:5,i:5,z:5",
         help="Exposure per filter seconds, e.g. g:5,r:5,i:5,z:5",
     )
-    p.add_argument("--evening_cap", type=float, default=600.0)
-    p.add_argument("--morning_cap", type=float, default=600.0)
+    p.add_argument(
+        "--evening_cap",
+        default="auto",
+        help="Cap seconds in evening twilight; number or 'auto' to use window duration",
+    )
+    p.add_argument(
+        "--morning_cap",
+        default="auto",
+        help="Cap seconds in morning twilight; number or 'auto' to use window duration",
+    )
     p.add_argument("--per_sn_cap", type=float, default=120.0)
     p.add_argument("--max_sn", type=int, default=10)
     p.add_argument("--twilight_step", type=int, default=2)
@@ -129,6 +139,23 @@ def parse_exp_map(s: str):
     return m
 
 
+def _parse_cap(val: str) -> float | str:
+    """Parse a window cap argument.
+
+    Parameters
+    ----------
+    val : str
+        Value provided on the command line.
+
+    Returns
+    -------
+    float | str
+        ``"auto"`` to use window duration or the numeric cap in seconds.
+    """
+
+    return float(val) if val != "auto" else "auto"
+
+
 def main():
     """Run the command-line planner.
 
@@ -147,8 +174,8 @@ def main():
         filters=[x.strip() for x in args.filters.split(",") if x.strip()],
         exposure_by_filter=exp_map,
         twilight_step_min=args.twilight_step,
-        evening_cap_s=args.evening_cap,
-        morning_cap_s=args.morning_cap,
+        evening_cap_s=_parse_cap(args.evening_cap),
+        morning_cap_s=_parse_cap(args.morning_cap),
         per_sn_cap_s=args.per_sn_cap,
         max_sn_per_night=args.max_sn,
         require_single_time_for_all_filters=args.require_single_time,
