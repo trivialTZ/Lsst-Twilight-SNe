@@ -1,26 +1,23 @@
-"""High-level scheduling routines for LSST twilight supernova observations.
+"""Twilight scheduling pipeline for LSST supernova follow-up.
 
-This module batches targets by their first filter, routes within a batch using a
-filter-aware slew cost, and accounts for carousel overheads.  Cross-target
-filter swaps incur a one-time ``filter_change_s`` penalty, while additional
-filters within a visit add internal changes.  The allowed filter set per
-twilight window is strictly governed by the Sun-altitude policy in
-``PlannerConfig.sun_alt_policy``; filters outside the policy are never scheduled
-unless the user supplies a custom policy.  Moon
-separation constraints are evaluated in a shared AltAz frame and are ignored
-whenever the Moon is below the horizon.
+The module exposes :func:`plan_twilight_range_with_caps`, the main entry point
+that reads a candidate CSV, prepares evening and morning windows, schedules
+visits subject to Sun-altitude filter policies, and writes per-night plan,
+summary, and sequence CSVs plus optional SIMLIB files.  Targets are batched by
+their first filter, routed with a filter-aware slew cost, and charged carousel
+overheads for cross-target swaps.  Moon separation and Sun altitude constraints
+gate filter availability at each twilight window.
 
 Overhead values follow Rubin Observatory technical notes (slew, readout, and
 filter change times), and airmass calculations use the Kasten & Young (1989)
 formula.  Exposure times may be overridden by
-``PlannerConfig.sun_alt_exposure_ladder`` to shorten visits in bright
-twilight.
+``PlannerConfig.sun_alt_exposure_ladder`` to shorten visits in bright twilight.
 """
 
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Dict, List
 
@@ -74,6 +71,667 @@ warnings.filterwarnings(
 )
 
 
+def _fmt_window(start: datetime | None, end: datetime | None, tz_local: tzinfo) -> str:
+    """Format a twilight window in UTC and local time.
+
+    Returns ``"na"`` if either bound is ``None``.
+    """
+    if start is None or end is None:
+        return "na"
+    start_utc = pd.Timestamp(start).tz_convert("UTC")
+    end_utc = pd.Timestamp(end).tz_convert("UTC")
+    start_local = start_utc.tz_convert(tz_local)
+    end_local = end_utc.tz_convert(tz_local)
+    offset_td = start_local.utcoffset() or timedelta(0)
+    sign = "+" if offset_td >= timedelta(0) else "-"
+    offset_td = abs(offset_td)
+    hours = int(offset_td.total_seconds() // 3600)
+    minutes = int((offset_td.total_seconds() % 3600) // 60)
+    offset_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
+    return (
+        f"{start_utc.isoformat()} \u2192 {end_utc.isoformat()} "
+        f"(local {start_local.strftime('%H:%M')} \u2192 "
+        f"{end_local.strftime('%H:%M')} {offset_str})"
+    )
+
+
+def _mid_sun_alt_of_window(window: dict, site: EarthLocation) -> float:
+    """Return Sun altitude in degrees at the midpoint of ``window``."""
+    mid = window["start"] + (window["end"] - window["start"]) / 2
+    return float(
+        get_sun(Time(mid))
+        .transform_to(AltAz(location=site, obstime=Time(mid)))
+        .alt.to(u.deg)
+        .value
+    )
+
+
+def _policy_filters_mid(sun_alt_deg: float, cfg: PlannerConfig) -> list[str]:
+    """Allowed filters at ``sun_alt_deg`` according to policy."""
+    return allowed_filters_for_sun_alt(sun_alt_deg, cfg)
+
+
+def _path_plan(outdir: str | Path, start: datetime, end: datetime) -> Path:
+    """Return output path for the per-SN plan CSV."""
+    return (
+        Path(outdir)
+        / f"lsst_twilight_plan_{start.isoformat()}_to_{end.isoformat()}.csv"
+    )
+
+
+def _path_summary(outdir: str | Path, start: datetime, end: datetime) -> Path:
+    """Return output path for the nightly/window summary CSV."""
+    return (
+        Path(outdir)
+        / f"lsst_twilight_summary_{start.isoformat()}_to_{end.isoformat()}.csv"
+    )
+
+
+def _path_sequence(outdir: str | Path, start: datetime, end: datetime) -> Path:
+    """Return output path for the true on-sky sequence CSV."""
+    return (
+        Path(outdir)
+        / f"lsst_twilight_sequence_true_{start.isoformat()}_to_{end.isoformat()}.csv"
+    )
+
+
+def _log_day_status(
+    day_iso: str,
+    eligible: int,
+    visible: int,
+    planned_total: int,
+    evening_start: datetime | None,
+    evening_end: datetime | None,
+    morning_start: datetime | None,
+    morning_end: datetime | None,
+    tz_local: tzinfo,
+    verbose: bool,
+) -> None:
+    """Print nightly eligibility and twilight window information."""
+    if not verbose:
+        return
+    print(
+        f"{day_iso}: eligible={eligible} visible={visible} "
+        f"planned_total={planned_total}"
+    )
+    print(
+        f"  evening_twilight: " f"{_fmt_window(evening_start, evening_end, tz_local)}"
+    )
+    print(
+        f"  morning_twilight: " f"{_fmt_window(morning_start, morning_end, tz_local)}"
+    )
+
+
+def _emit_simlib(
+    writer: SimlibWriter,
+    libid_counter: int,
+    name: str,
+    ra_deg: float,
+    dec_deg: float,
+    epochs: list[dict],
+) -> int:
+    """Write one SIMLIB block and return the incremented libid counter."""
+    writer.start_libid(
+        libid_counter,
+        ra_deg,
+        dec_deg,
+        nobs=len(epochs),
+        comment=name,
+    )
+    libid_counter += 1
+    for epoch in epochs:
+        writer.add_epoch(**epoch)
+    writer.end_libid()
+    return libid_counter
+
+
+def _prepare_window_candidates(
+    group_df: pd.DataFrame,
+    window: dict,
+    idx_w: int,
+    cfg: PlannerConfig,
+    site: EarthLocation,
+    tracker: PriorityTracker,
+    mag_lookup: dict,
+    current_filter_by_window: dict[int, str],
+    cad_on: bool,
+    cad_tgt: float,
+    cad_sig: float,
+    cad_wt: float,
+    cad_first: float,
+) -> tuple[list[dict], bool]:
+    """Build candidate target dicts for a twilight window.
+
+    Returns the candidate list and a flag indicating whether an exposure
+    override from ``cfg.sun_alt_exposure_ladder`` was applied.
+    """
+    mid_sun_alt = _mid_sun_alt_of_window(window, site)
+    current_time_utc = pd.Timestamp(window["start"]).tz_convert("UTC")
+    override_applied = False
+    for low, high, exp_dict in cfg.sun_alt_exposure_ladder:
+        if low < mid_sun_alt <= high:
+            override_exp = cfg.exposure_by_filter.copy()
+            override_exp.update(exp_dict)
+            cfg.exposure_by_filter = override_exp
+            override_applied = True
+            break
+
+    candidates: list[dict] = []
+    for _, row in group_df.iterrows():
+        allowed = allowed_filters_for_window(
+            mag_lookup.get(row["Name"], {}),
+            mid_sun_alt,
+            row["_moon_alt"],
+            row["_moon_phase"],
+            row["_moon_sep"],
+            airmass_from_alt_deg(row["max_alt_deg"]),
+            cfg.fwhm_eff or 0.7,
+        )
+        allowed = [f for f in allowed if f in cfg.filters]
+        allowed_policy = _policy_filters_mid(mid_sun_alt, cfg)
+        allowed = [f for f in allowed if f in allowed_policy]
+        moon_sep_ok = {
+            f: row["_moon_sep"]
+            >= effective_min_sep(
+                f,
+                row["_moon_alt"],
+                row["_moon_phase"],
+                cfg.min_moon_sep_by_filter,
+            )
+            for f in allowed
+        }
+        policy_allowed = [f for f in allowed if moon_sep_ok.get(f, False)]
+        if not policy_allowed:
+            continue
+        first = pick_first_filter_for_target(
+            row["Name"],
+            row.get("SN_type_raw"),
+            tracker,
+            policy_allowed,
+            cfg,
+            sun_alt_deg=mid_sun_alt,
+            moon_sep_ok=moon_sep_ok,
+            current_mag=mag_lookup.get(row["Name"]),
+            current_filter=current_filter_by_window.get(idx_w),
+        )
+        if first is None:
+            continue
+        now_mjd_for_bonus = Time(current_time_utc).mjd
+        if cad_on:
+            rest = sorted(
+                [f for f in policy_allowed if f != first],
+                key=lambda f: tracker.cadence_bonus(
+                    row["Name"],
+                    f,
+                    now_mjd_for_bonus,
+                    cad_tgt,
+                    cad_sig,
+                    weight=cad_wt,
+                    first_epoch_weight=cad_first,
+                ),
+                reverse=True,
+            )
+        else:
+            rest = [f for f in policy_allowed if f != first]
+        cand = {
+            "Name": row["Name"],
+            "RA_deg": row["RA_deg"],
+            "Dec_deg": row["Dec_deg"],
+            "best_time_utc": row["best_time_utc"],
+            "max_alt_deg": row["max_alt_deg"],
+            "priority_score": row["priority_score"],
+            "first_filter": first,
+            "sn_type": row.get("SN_type_raw"),
+            "allowed": [first] + rest,
+            "policy_allowed": policy_allowed,
+            "moon_sep_ok": moon_sep_ok,
+            "moon_sep": float(row["_moon_sep"]),
+        }
+        candidates.append(cand)
+
+    return candidates, override_applied
+
+
+def _attempt_schedule_one(
+    target_dict,
+    window_state,
+    cfg: PlannerConfig,
+    site: EarthLocation,
+    tracker: PriorityTracker,
+    phot_cfg: PhotomConfig,
+    sky_cfg: SkyModelConfig,
+    sky_provider,
+    writer_or_none,
+) -> tuple[bool, dict]:
+    """Attempt to schedule a single target within a twilight window.
+
+    Parameters
+    ----------
+    target_dict : dict
+        Candidate target information with filter options and metadata.
+    window_state : dict
+        Per-window state such as current time, filter, and accumulated time.
+
+    Returns
+    -------
+    scheduled : bool
+        ``True`` if the target was scheduled.
+    effects : dict
+        Dict capturing rows, epochs, time usage, and state deltas.
+    """
+
+    if writer_or_none is not None:  # pragma: no cover - placeholder
+        pass
+
+    allow_defer: bool = window_state.get("allow_defer", True)
+    deferred: list[dict] = window_state.get("deferred", [])
+    window_sum: float = window_state.get("window_sum", 0.0)
+    cap_s: float = window_state.get("cap_s", 0.0)
+    state: str | None = window_state.get("state")
+    prev: dict | None = window_state.get("prev")
+    current_time_utc: pd.Timestamp = window_state["current_time_utc"]
+    order_in_window: int = window_state.get("order_in_window", 0)
+    day = window_state["day"]
+    window_label_out: str = window_state["window_label_out"]
+    mag_lookup: dict = window_state["mag_lookup"]
+
+    t = target_dict
+    sep = (
+        0.0
+        if prev is None
+        else great_circle_sep_deg(
+            prev["RA_deg"], prev["Dec_deg"], t["RA_deg"], t["Dec_deg"]
+        )
+    )
+    cfg.current_mag_by_filter = mag_lookup.get(t["Name"])
+    cfg.current_alt_deg = t["max_alt_deg"]
+    cfg.current_mjd = (
+        Time(t["best_time_utc"]).mjd
+        if isinstance(t["best_time_utc"], (datetime, pd.Timestamp))
+        else None
+    )
+    now_mjd = Time(current_time_utc).mjd
+    cad_on = getattr(cfg, "cadence_enable", True) and getattr(
+        cfg, "cadence_per_filter", True
+    )
+    cad_tgt = getattr(cfg, "cadence_days_target", 3.0)
+    cad_jit = getattr(cfg, "cadence_jitter_days", 0.25)
+    cad_sig = getattr(cfg, "cadence_bonus_sigma_days", 0.5)
+    cad_wt = getattr(cfg, "cadence_bonus_weight", 0.25)
+    cad_first = getattr(cfg, "cadence_first_epoch_bonus_weight", 0.0)
+    if cad_on:
+        gated = [
+            f
+            for f in t["policy_allowed"]
+            if tracker.cadence_gate(t["Name"], f, now_mjd, cad_tgt, cad_jit)
+        ]
+        if not gated:
+            if allow_defer:
+                deferred.append(t)
+            return False, {}
+
+        def _bonus(f: str) -> float:
+            return tracker.cadence_bonus(
+                t["Name"],
+                f,
+                now_mjd,
+                cad_tgt,
+                cad_sig,
+                weight=cad_wt,
+                first_epoch_weight=cad_first,
+            )
+
+        first = (
+            t["first_filter"] if t["first_filter"] in gated else max(gated, key=_bonus)
+        )
+        rest = sorted([f for f in gated if f != first], key=_bonus, reverse=True)
+        filters_pref = ([first] + rest)[: int(cfg.max_filters_per_visit)]
+    else:
+        filters_pref = (
+            [t["first_filter"]] + [f for f in t["allowed"] if f != t["first_filter"]]
+        )[: int(cfg.max_filters_per_visit)]
+    filters_used, timing = choose_filters_with_cap(
+        filters_pref,
+        sep,
+        cfg.per_sn_cap_s,
+        cfg,
+        current_filter=state,
+        max_filters_per_visit=cfg.max_filters_per_visit,
+    )
+    if not filters_used:
+        return False, {}
+    natural_gap_first = max(timing["slew_s"], cfg.readout_s) + timing.get(
+        "cross_filter_change_s", 0.0
+    )
+    guard_first_s = (
+        0.0
+        if window_sum == 0.0
+        else max(0.0, cfg.inter_exposure_min_s - natural_gap_first)
+    )
+    internal_gap = cfg.readout_s + (
+        cfg.filter_change_s if len(filters_used) > 1 else 0.0
+    )
+    guard_internal_per = max(0.0, cfg.inter_exposure_min_s - internal_gap)
+    guard_internal_total = guard_internal_per * max(0, len(filters_used) - 1)
+    guard_s = guard_first_s + guard_internal_total
+    elapsed_overhead = (
+        max(timing["slew_s"], cfg.readout_s)
+        + timing.get("filter_changes_s", 0.0)
+        + timing.get("cross_filter_change_s", 0.0)
+    )
+    total_with_guard = elapsed_overhead + timing["exposure_s"] + guard_s
+    if window_sum + total_with_guard > cap_s:
+        return False, {}
+
+    timing["total_s"] = total_with_guard
+    timing["guard_s"] = guard_s
+    timing["elapsed_overhead_s"] = elapsed_overhead
+    timing["guard_first_s"] = guard_first_s
+    timing["guard_internal_s"] = guard_internal_total
+
+    preferred_utc = (
+        pd.Timestamp(t["best_time_utc"]).tz_convert("UTC")
+        if isinstance(t["best_time_utc"], pd.Timestamp)
+        else pd.Timestamp(t["best_time_utc"]).tz_localize("UTC")
+    )
+    sn_start_utc = current_time_utc
+    sn_end_utc = sn_start_utc + pd.to_timedelta(timing["total_s"], unit="s")
+    visit_mjd = Time(sn_start_utc).mjd
+
+    order = order_in_window + 1
+    sequence_row = {
+        "date": day.date().isoformat(),
+        "twilight_window": window_label_out,
+        "order_in_window": int(order),
+        "SN": t["Name"],
+        "RA_deg": round(t["RA_deg"], 6),
+        "Dec_deg": round(t["Dec_deg"], 6),
+        "filters_used_csv": ",".join(filters_used),
+        "preferred_best_utc": preferred_utc.isoformat(),
+        "sn_start_utc": sn_start_utc.isoformat(),
+        "sn_end_utc": sn_end_utc.isoformat(),
+        "total_time_s": round(timing.get("total_s", 0.0), 2),
+        "slew_s": round(timing.get("slew_s", 0.0), 2),
+        "readout_s": round(timing.get("readout_s", 0.0), 2),
+        "filter_changes_s": round(timing.get("filter_changes_s", 0.0), 2),
+        "cross_filter_change_s": round(timing.get("cross_filter_change_s", 0.0), 2),
+        "guard_s": round(timing.get("guard_s", 0.0), 2),
+        "elapsed_overhead_s": round(timing.get("elapsed_overhead_s", 0.0), 2),
+    }
+
+    pernight_rows: list[dict] = []
+    epochs: list[dict] = []
+    sky_mags: list[float] = []
+    air = 0.0
+    for f in filters_used:
+        exp_s = timing.get("exp_times", {}).get(f, cfg.exposure_by_filter.get(f, 0.0))
+        flags = timing.get("flags_by_filter", {}).get(f, set())
+        alt_deg = float(t["max_alt_deg"])
+        air = airmass_from_alt_deg(alt_deg)
+        mjd = visit_mjd
+        if sky_provider:
+            sky_mag = sky_provider.sky_mag(
+                mjd, t["RA_deg"], t["Dec_deg"], f, airmass_from_alt_deg(alt_deg)
+            )
+        else:
+            sky_mag = sky_mag_arcsec2(f, sky_cfg)
+        eph = compute_epoch_photom(f, exp_s, alt_deg, sky_mag, phot_cfg)
+        sky_mags.append(sky_mag)
+        if writer_or_none:
+            epochs.append(
+                {
+                    "mjd": mjd,
+                    "band": f,
+                    "gain": eph.GAIN,
+                    "rdnoise": eph.RDNOISE,
+                    "skysig": eph.SKYSIG,
+                    "nea": eph.NEA_pix,
+                    "zpavg": eph.ZPTAVG,
+                    "zperr": eph.ZPTERR,
+                    "mag": -99.0,
+                }
+            )
+        start_utc = sn_start_utc
+        total_s = round(timing["total_s"], 2)
+        end_utc = sn_end_utc
+        days_since = tracker.days_since(t["Name"], f, visit_mjd)
+        gate_passed = (
+            tracker.cadence_gate(t["Name"], f, visit_mjd, cad_tgt, cad_jit)
+            if cad_on
+            else True
+        )
+        best_start_utc = (
+            pd.Timestamp(t["best_time_utc"]).tz_convert("UTC")
+            if isinstance(t["best_time_utc"], pd.Timestamp)
+            else pd.Timestamp(t["best_time_utc"]).tz_localize("UTC")
+        )
+        row = {
+            "date": day.date().isoformat(),
+            "twilight_window": window_label_out,
+            "SN": t["Name"],
+            "RA_deg": round(t["RA_deg"], 6),
+            "Dec_deg": round(t["Dec_deg"], 6),
+            "best_twilight_time_utc": best_start_utc.isoformat(),
+            "visit_start_utc": start_utc.isoformat(),
+            "sn_end_utc": end_utc.isoformat(),
+            "filter": f,
+            "t_exp_s": round(exp_s, 1),
+            "airmass": round(air, 3),
+            "alt_deg": round(alt_deg, 2),
+            "sky_mag_arcsec2": round(sky_mag, 2),
+            "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
+            "ZPT": round(eph.ZPTAVG, 3),
+            "SKYSIG": round(eph.SKYSIG, 3),
+            "NEA_pix": round(eph.NEA_pix, 2),
+            "RDNOISE": round(eph.RDNOISE, 2),
+            "GAIN": round(eph.GAIN, 2),
+            "saturation_guard_applied": "sat_guard" in flags,
+            "warn_nonlinear": "warn_nonlinear" in flags,
+            "priority_score": round(float(t["priority_score"]), 2),
+            "cadence_days_since": (
+                round(days_since, 3) if days_since is not None else np.nan
+            ),
+            "cadence_target_d": cad_tgt,
+            "cadence_gate_passed": bool(gate_passed),
+            "slew_s": round(timing["slew_s"], 2) if f == filters_used[0] else 0.0,
+            "cross_filter_change_s": (
+                round(timing.get("cross_filter_change_s", 0.0), 2)
+                if f == filters_used[0]
+                else 0.0
+            ),
+            "filter_changes_s": (
+                round(timing.get("filter_changes_s", 0.0), 2)
+                if f == filters_used[0]
+                else 0.0
+            ),
+            "readout_s": round(timing["readout_s"], 2) if f == filters_used[0] else 0.0,
+            "exposure_s": (
+                round(timing["exposure_s"], 2) if f == filters_used[0] else 0.0
+            ),
+            "guard_s": (
+                round(timing.get("guard_s", 0.0), 2) if f == filters_used[0] else 0.0
+            ),
+            "inter_exposure_guard_enforced": (
+                bool(timing.get("guard_s", 0.0) > 0.0)
+                if f == filters_used[0]
+                else False
+            ),
+            "total_time_s": total_s if f == filters_used[0] else 0.0,
+            "elapsed_overhead_s": (
+                round(timing.get("elapsed_overhead_s", 0.0), 2)
+                if f == filters_used[0]
+                else 0.0
+            ),
+        }
+        pernight_rows.append(row)
+
+    swap_delta = 0
+    if filters_used:
+        if state is not None and filters_used[0] != state:
+            swap_delta = 1
+        state = filters_used[-1]
+
+    summary_updates = {
+        "window_filter_change_s_delta": timing.get("filter_changes_s", 0.0)
+        + timing.get("cross_filter_change_s", 0.0),
+        "internal_changes_delta": max(0, len(filters_used) - 1),
+        "slew_time": timing["slew_s"],
+        "airmass": air,
+        "sky_mags": sky_mags,
+    }
+    tracker.record_detection(
+        t["Name"], timing["exposure_s"], filters_used, mjd=visit_mjd
+    )
+
+    effects = {
+        "pernight_rows": pernight_rows,
+        "sequence_rows": [sequence_row],
+        "simlib_epochs": epochs,
+        "time_used_s": total_with_guard,
+        "state_updates": {
+            "current_time_utc": sn_end_utc,
+            "state_filter": state,
+            "prev_target": t,
+            "swap_count_delta": swap_delta,
+            "filters_used_set_delta": set(filters_used),
+            "order_in_window": order,
+            "summary_updates": summary_updates,
+        },
+    }
+
+    return True, effects
+
+
+def _build_window_summary_row(
+    day_iso,
+    window_label,
+    win,
+    idx_w,
+    ws_summary,
+    cap_s,
+    cap_source,
+    cfg,
+    site,
+    pernight_rows_for_window,
+) -> dict:
+    """Return summary metrics for a window with exact CSV keys."""
+
+    tz_local = _local_timezone_from_location(site)
+    window_str = _fmt_window(win["start"], win["end"], tz_local)
+    start_utc, _, after_arrow = window_str.partition(" \u2192 ")
+    end_utc, _, _ = after_arrow.partition(" ")
+    dur_s = (win["end"] - win["start"]).total_seconds()
+    mid = win["start"] + (win["end"] - win["start"]) / 2
+    mid_utc = pd.Timestamp(mid).tz_convert("UTC").isoformat()
+    sun_alt_mid = _mid_sun_alt_of_window(win, site)
+    policy_filters_mid_csv = ",".join(_policy_filters_mid(sun_alt_mid, cfg))
+    alts = [r["alt_deg"] for r in pernight_rows_for_window]
+    guard_s_total = float(sum(r.get("guard_s", 0.0) for r in pernight_rows_for_window))
+    guard_count = int(
+        sum(
+            1
+            for r in pernight_rows_for_window
+            if r.get("inter_exposure_guard_enforced")
+        )
+    )
+    if getattr(cfg, "cadence_enable", True) and getattr(
+        cfg, "cadence_per_filter", True
+    ):
+        cad_rows = [
+            r
+            for r in pernight_rows_for_window
+            if pd.notna(r.get("cadence_days_since"))
+            and r.get("cadence_gate_passed") is True
+        ]
+        cad_by_filter: Dict[str, List[float]] = {}
+        for r in cad_rows:
+            cad_by_filter.setdefault(r["filter"], []).append(
+                float(r["cadence_days_since"])
+            )
+        cad_median_abs_err_by_filter: Dict[str, float] = {}
+        cad_within_pct_by_filter: Dict[str, float] = {}
+        target = getattr(cfg, "cadence_days_target", 3.0)
+        tol = getattr(cfg, "cadence_days_tolerance", 0.5)
+        for filt, vals in cad_by_filter.items():
+            diffs = [abs(v - target) for v in vals]
+            if diffs:
+                cad_median_abs_err_by_filter[filt] = float(np.median(diffs))
+                within = [abs(v - target) <= tol for v in vals]
+                cad_within_pct_by_filter[filt] = 100.0 * (sum(within) / len(vals))
+        all_vals = [v for vals in cad_by_filter.values() for v in vals]
+        cad_median_abs_err_all = (
+            float(np.median([abs(v - target) for v in all_vals]))
+            if all_vals
+            else np.nan
+        )
+        cad_within_pct_all = (
+            100.0 * (sum(abs(v - target) <= tol for v in all_vals) / len(all_vals))
+            if all_vals
+            else np.nan
+        )
+        cad_median_abs_err_by_filter_csv = ",".join(
+            f"{k}:{round(v,2)}" for k, v in sorted(cad_median_abs_err_by_filter.items())
+        )
+        cad_within_pct_by_filter_csv = ",".join(
+            f"{k}:{round(v,1)}" for k, v in sorted(cad_within_pct_by_filter.items())
+        )
+    else:
+        cad_median_abs_err_by_filter_csv = ""
+        cad_within_pct_by_filter_csv = ""
+        cad_median_abs_err_all = np.nan
+        cad_within_pct_all = np.nan
+    return {
+        "date": day_iso,
+        "twilight_window": window_label,
+        "n_candidates": int(ws_summary["n_candidates"]),
+        "n_planned": int(len(pernight_rows_for_window)),
+        "sum_time_s": round(ws_summary["window_sum"], 1),
+        "window_cap_s": int(cap_s),
+        "swap_count": int(ws_summary.get("swap_count", 0)),
+        "internal_filter_changes": int(ws_summary["internal_changes"]),
+        "filter_change_s_total": round(ws_summary["window_filter_change_s"], 1),
+        "inter_exposure_guard_s": round(guard_s_total, 1),
+        "inter_exposure_guard_count": guard_count,
+        "mean_slew_s": (
+            float(np.mean(ws_summary["window_slew_times"]))
+            if ws_summary["window_slew_times"]
+            else 0.0
+        ),
+        "median_airmass": (
+            float(np.median(ws_summary["window_airmasses"]))
+            if ws_summary["window_airmasses"]
+            else 0.0
+        ),
+        "loaded_filters": ",".join(cfg.filters),
+        "filters_used_csv": ws_summary["used_filters_csv"],
+        "window_start_utc": start_utc,
+        "window_end_utc": end_utc,
+        "window_duration_s": int(dur_s),
+        "window_mid_utc": mid_utc,
+        "sun_alt_mid_deg": round(sun_alt_mid, 2),
+        "policy_filters_mid_csv": policy_filters_mid_csv,
+        "window_utilization": round(ws_summary["window_sum"] / max(1.0, dur_s), 4),
+        "cap_utilization": round(ws_summary["window_sum"] / max(1.0, cap_s), 4),
+        "cap_source": cap_source,
+        "median_sky_mag_arcsec2": (
+            float(np.median(ws_summary["window_skymags"]))
+            if ws_summary["window_skymags"]
+            else np.nan
+        ),
+        "median_alt_deg": float(np.median(alts)) if alts else np.nan,
+        "cad_median_abs_err_by_filter_csv": cad_median_abs_err_by_filter_csv,
+        "cad_within_pct_by_filter_csv": cad_within_pct_by_filter_csv,
+        "cad_median_abs_err_all_d": (
+            round(cad_median_abs_err_all, 3)
+            if not np.isnan(cad_median_abs_err_all)
+            else np.nan
+        ),
+        "cad_within_pct_all": (
+            round(cad_within_pct_all, 1) if not np.isnan(cad_within_pct_all) else np.nan
+        ),
+    }
+
+
 def plan_twilight_range_with_caps(
     csv_path: str,
     outdir: str,
@@ -81,7 +739,7 @@ def plan_twilight_range_with_caps(
     end_date: str,
     cfg: PlannerConfig,
     verbose: bool = True,
-):
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate a twilight observing plan over a date range with per-window time caps.
 
     Parameters
@@ -270,8 +928,18 @@ def plan_twilight_range_with_caps(
             & (df["discovery_datetime"] >= min_allowed_disc_each)
         ].copy()
         if subset.empty:
-            if verbose:
-                print(f"{day.date().isoformat()}: 0 eligible")
+            _log_day_status(
+                day.date().isoformat(),
+                0,
+                0,
+                0,
+                evening_start,
+                evening_end,
+                morning_start,
+                morning_end,
+                tz_local,
+                verbose,
+            )
             continue
 
         best_alts, best_times, best_winidx = [], [], []
@@ -315,8 +983,18 @@ def plan_twilight_range_with_caps(
             & (subset["best_window_index"] >= 0)
         ].copy()
         if visible.empty:
-            if verbose:
-                print(f"{day.date().isoformat()}: 0 visible")
+            _log_day_status(
+                day.date().isoformat(),
+                len(subset),
+                0,
+                0,
+                evening_start,
+                evening_end,
+                morning_start,
+                morning_end,
+                tz_local,
+                verbose,
+            )
             continue
 
         visible["priority_score"] = visible.apply(
@@ -339,27 +1017,8 @@ def plan_twilight_range_with_caps(
                 continue
 
             win = windows[idx_w]
-            # Track the true serialized start time within this window for cadence checks
-            current_time_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
-            mid = win["start"] + (win["end"] - win["start"]) / 2
             window_label = window_labels.get(idx_w)
             window_label_out = window_label if window_label else f"W{idx_w}"
-            sun_alt = (
-                get_sun(Time(mid))
-                .transform_to(AltAz(location=site, obstime=Time(mid)))
-                .alt.to(u.deg)
-                .value
-            )
-            # Apply exposure-time ladder: override baseline exposures if needed
-            original_exp = cfg.exposure_by_filter
-            override_exp: Dict[str, float] | None = None
-            for low, high, exp_dict in cfg.sun_alt_exposure_ladder:
-                if low < sun_alt <= high:
-                    override_exp = original_exp.copy()
-                    override_exp.update(exp_dict)
-                    cfg.exposure_by_filter = override_exp
-                    break
-
             cad_on = getattr(cfg, "cadence_enable", True) and getattr(
                 cfg, "cadence_per_filter", True
             )
@@ -369,81 +1028,24 @@ def plan_twilight_range_with_caps(
             cad_wt = getattr(cfg, "cadence_bonus_weight", 0.25)
             cad_first = getattr(cfg, "cadence_first_epoch_bonus_weight", 0.0)
 
-            candidates = []
-            for _, row in group.iterrows():
-                allowed = allowed_filters_for_window(
-                    mag_lookup.get(row["Name"], {}),
-                    sun_alt,
-                    row["_moon_alt"],
-                    row["_moon_phase"],
-                    row["_moon_sep"],
-                    airmass_from_alt_deg(row["max_alt_deg"]),
-                    cfg.fwhm_eff or 0.7,
-                )
-                allowed = [f for f in allowed if f in cfg.filters]
-                # Enforce sun_alt_policy: drop filters disallowed at this Sun altitude
-                allowed_policy = allowed_filters_for_sun_alt(sun_alt, cfg)
-                allowed = [f for f in allowed if f in allowed_policy]
-                moon_sep_ok = {
-                    f: row["_moon_sep"]
-                    >= effective_min_sep(
-                        f,
-                        row["_moon_alt"],
-                        row["_moon_phase"],
-                        cfg.min_moon_sep_by_filter,
-                    )
-                    for f in allowed
-                }
-                policy_allowed = [f for f in allowed if moon_sep_ok.get(f, False)]
-                if not policy_allowed:
-                    continue
-                first = pick_first_filter_for_target(
-                    row["Name"],
-                    row.get("SN_type_raw"),
-                    tracker,
-                    policy_allowed,
-                    cfg,
-                    sun_alt_deg=sun_alt,
-                    moon_sep_ok=moon_sep_ok,
-                    current_mag=mag_lookup.get(row["Name"]),
-                    current_filter=current_filter_by_window.get(idx_w),
-                )
-                if first is None:
-                    continue
-                now_mjd_for_bonus = Time(current_time_utc).mjd
-                if cad_on:
-                    rest = sorted(
-                        [f for f in policy_allowed if f != first],
-                        key=lambda f: tracker.cadence_bonus(
-                            row["Name"],
-                            f,
-                            now_mjd_for_bonus,
-                            cad_tgt,
-                            cad_sig,
-                            weight=cad_wt,
-                            first_epoch_weight=cad_first,
-                        ),
-                        reverse=True,
-                    )
-                else:
-                    rest = [f for f in policy_allowed if f != first]
-                cand = {
-                    "Name": row["Name"],
-                    "RA_deg": row["RA_deg"],
-                    "Dec_deg": row["Dec_deg"],
-                    "best_time_utc": row["best_time_utc"],
-                    "max_alt_deg": row["max_alt_deg"],
-                    "priority_score": row["priority_score"],
-                    "first_filter": first,
-                    "sn_type": row.get("SN_type_raw"),
-                    "allowed": [first] + rest,
-                    "policy_allowed": policy_allowed,
-                    "moon_sep_ok": moon_sep_ok,
-                    "moon_sep": float(row["_moon_sep"]),
-                }
-                candidates.append(cand)
+            original_exp = cfg.exposure_by_filter
+            candidates, override_applied = _prepare_window_candidates(
+                group,
+                win,
+                idx_w,
+                cfg,
+                site,
+                tracker,
+                mag_lookup,
+                current_filter_by_window,
+                cad_on,
+                cad_tgt,
+                cad_sig,
+                cad_wt,
+                cad_first,
+            )
             if not candidates:
-                if override_exp is not None:
+                if override_applied:
                     cfg.exposure_by_filter = original_exp
                 continue
 
@@ -474,285 +1076,58 @@ def plan_twilight_range_with_caps(
                 nonlocal window_sum, prev, internal_changes, window_filter_change_s
                 nonlocal state, window_slew_times, window_airmasses, window_skymags
                 nonlocal filters_used_set, current_time_utc, order_in_window, libid_counter
-                sep = (
-                    0.0
-                    if prev is None
-                    else great_circle_sep_deg(
-                        prev["RA_deg"], prev["Dec_deg"], t["RA_deg"], t["Dec_deg"]
-                    )
-                )
-                cfg.current_mag_by_filter = mag_lookup.get(t["Name"])
-                cfg.current_alt_deg = t["max_alt_deg"]
-                cfg.current_mjd = (
-                    Time(t["best_time_utc"]).mjd
-                    if isinstance(t["best_time_utc"], (datetime, pd.Timestamp))
-                    else None
-                )
-                now_mjd = Time(current_time_utc).mjd
-                if cad_on:
-                    gated = [
-                        f
-                        for f in t["policy_allowed"]
-                        if tracker.cadence_gate(t["Name"], f, now_mjd, cad_tgt, cad_jit)
-                    ]
-                    if not gated:
-                        if allow_defer:
-                            deferred.append(t)
-                        return False
-
-                    def _bonus(f: str) -> float:
-                        return tracker.cadence_bonus(
-                            t["Name"],
-                            f,
-                            now_mjd,
-                            cad_tgt,
-                            cad_sig,
-                            weight=cad_wt,
-                            first_epoch_weight=cad_first,
-                        )
-
-                    first = (
-                        t["first_filter"]
-                        if t["first_filter"] in gated
-                        else max(gated, key=_bonus)
-                    )
-                    rest = sorted(
-                        [f for f in gated if f != first], key=_bonus, reverse=True
-                    )
-                    filters_pref = ([first] + rest)[: int(cfg.max_filters_per_visit)]
-                else:
-                    filters_pref = (
-                        [t["first_filter"]]
-                        + [f for f in t["allowed"] if f != t["first_filter"]]
-                    )[: int(cfg.max_filters_per_visit)]
-                filters_used, timing = choose_filters_with_cap(
-                    filters_pref,
-                    sep,
-                    cfg.per_sn_cap_s,
+                window_state = {
+                    "allow_defer": allow_defer,
+                    "deferred": deferred,
+                    "window_sum": window_sum,
+                    "cap_s": cap_s,
+                    "state": state,
+                    "prev": prev,
+                    "current_time_utc": current_time_utc,
+                    "order_in_window": order_in_window,
+                    "day": day,
+                    "window_label_out": window_label_out,
+                    "mag_lookup": mag_lookup,
+                }
+                scheduled, effects = _attempt_schedule_one(
+                    t,
+                    window_state,
                     cfg,
-                    current_filter=state,
-                    max_filters_per_visit=cfg.max_filters_per_visit,
+                    site,
+                    tracker,
+                    phot_cfg,
+                    sky_cfg,
+                    sky_provider,
+                    writer,
                 )
-                if not filters_used:
+                if not scheduled:
                     return False
-                natural_gap_first = max(timing["slew_s"], cfg.readout_s) + timing.get(
-                    "cross_filter_change_s", 0.0
-                )
-                guard_first_s = (
-                    0.0
-                    if window_sum == 0.0
-                    else max(0.0, cfg.inter_exposure_min_s - natural_gap_first)
-                )
-                internal_gap = cfg.readout_s + (
-                    cfg.filter_change_s if len(filters_used) > 1 else 0.0
-                )
-                guard_internal_per = max(0.0, cfg.inter_exposure_min_s - internal_gap)
-                guard_internal_total = guard_internal_per * max(
-                    0, len(filters_used) - 1
-                )
-                guard_s = guard_first_s + guard_internal_total
-                elapsed_overhead = (
-                    max(timing["slew_s"], cfg.readout_s)
-                    + timing.get("filter_changes_s", 0.0)
-                    + timing.get("cross_filter_change_s", 0.0)
-                )
-                total_with_guard = elapsed_overhead + timing["exposure_s"] + guard_s
-                if window_sum + total_with_guard > cap_s:
-                    return False
-                window_sum += total_with_guard
-                window_filter_change_s += timing.get(
-                    "filter_changes_s", 0.0
-                ) + timing.get("cross_filter_change_s", 0.0)
-                timing["total_s"] = total_with_guard
-                timing["guard_s"] = guard_s
-                timing["elapsed_overhead_s"] = elapsed_overhead
-                timing["guard_first_s"] = guard_first_s
-                timing["guard_internal_s"] = guard_internal_total
-
-                preferred_utc = (
-                    pd.Timestamp(t["best_time_utc"]).tz_convert("UTC")
-                    if isinstance(t["best_time_utc"], pd.Timestamp)
-                    else pd.Timestamp(t["best_time_utc"]).tz_localize("UTC")
-                )
-                sn_start_utc = current_time_utc
-                sn_end_utc = sn_start_utc + pd.to_timedelta(timing["total_s"], unit="s")
-                visit_mjd = Time(sn_start_utc).mjd
-
-                current_time_utc = sn_end_utc
-                order_in_window += 1
-
-                sequence_rows.append(
-                    {
-                        "date": day.date().isoformat(),
-                        "twilight_window": window_label_out,
-                        "order_in_window": int(order_in_window),
-                        "SN": t["Name"],
-                        "RA_deg": round(t["RA_deg"], 6),
-                        "Dec_deg": round(t["Dec_deg"], 6),
-                        "filters_used_csv": ",".join(filters_used),
-                        "preferred_best_utc": preferred_utc.isoformat(),
-                        "sn_start_utc": sn_start_utc.isoformat(),
-                        "sn_end_utc": sn_end_utc.isoformat(),
-                        "total_time_s": round(timing.get("total_s", 0.0), 2),
-                        "slew_s": round(timing.get("slew_s", 0.0), 2),
-                        "readout_s": round(timing.get("readout_s", 0.0), 2),
-                        "filter_changes_s": round(
-                            timing.get("filter_changes_s", 0.0), 2
-                        ),
-                        "cross_filter_change_s": round(
-                            timing.get("cross_filter_change_s", 0.0), 2
-                        ),
-                        "guard_s": round(timing.get("guard_s", 0.0), 2),
-                        "elapsed_overhead_s": round(
-                            timing.get("elapsed_overhead_s", 0.0), 2
-                        ),
-                    }
-                )
-
-                epochs = []
-                air = 0.0
-                for f in filters_used:
-                    exp_s = timing.get("exp_times", {}).get(
-                        f, cfg.exposure_by_filter.get(f, 0.0)
-                    )
-                    flags = timing.get("flags_by_filter", {}).get(f, set())
-                    alt_deg = float(t["max_alt_deg"])
-                    air = airmass_from_alt_deg(alt_deg)
-                    mjd = visit_mjd
-                    if sky_provider:
-                        sky_mag = sky_provider.sky_mag(
-                            mjd,
-                            t["RA_deg"],
-                            t["Dec_deg"],
-                            f,
-                            airmass_from_alt_deg(alt_deg),
-                        )
-                    else:
-                        sky_mag = sky_mag_arcsec2(f, sky_cfg)
-                    eph = compute_epoch_photom(f, exp_s, alt_deg, sky_mag, phot_cfg)
-                    window_skymags.append(sky_mag)
-                    if writer:
-                        epochs.append(
-                            {
-                                "mjd": mjd,
-                                "band": f,
-                                "gain": eph.GAIN,
-                                "rdnoise": eph.RDNOISE,
-                                "skysig": eph.SKYSIG,
-                                "nea": eph.NEA_pix,
-                                "zpavg": eph.ZPTAVG,
-                                "zperr": eph.ZPTERR,
-                                "mag": -99.0,
-                            }
-                        )
-                    start_utc = sn_start_utc
-                    total_s = round(timing["total_s"], 2)
-                    end_utc = sn_end_utc
-                    days_since = tracker.days_since(t["Name"], f, visit_mjd)
-                    gate_passed = (
-                        tracker.cadence_gate(t["Name"], f, visit_mjd, cad_tgt, cad_jit)
-                        if cad_on
-                        else True
-                    )
-                    best_start_utc = (
-                        pd.Timestamp(t["best_time_utc"]).tz_convert("UTC")
-                        if isinstance(t["best_time_utc"], pd.Timestamp)
-                        else pd.Timestamp(t["best_time_utc"]).tz_localize("UTC")
-                    )
-                    row = {
-                        "date": day.date().isoformat(),
-                        "twilight_window": window_label_out,
-                        "SN": t["Name"],
-                        "RA_deg": round(t["RA_deg"], 6),
-                        "Dec_deg": round(t["Dec_deg"], 6),
-                        "best_twilight_time_utc": best_start_utc.isoformat(),
-                        "visit_start_utc": start_utc.isoformat(),
-                        "sn_end_utc": end_utc.isoformat(),
-                        "filter": f,
-                        "t_exp_s": round(exp_s, 1),
-                        "airmass": round(air, 3),
-                        "alt_deg": round(alt_deg, 2),
-                        "sky_mag_arcsec2": round(sky_mag, 2),
-                        "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
-                        "ZPT": round(eph.ZPTAVG, 3),
-                        "SKYSIG": round(eph.SKYSIG, 3),
-                        "NEA_pix": round(eph.NEA_pix, 2),
-                        "RDNOISE": round(eph.RDNOISE, 2),
-                        "GAIN": round(eph.GAIN, 2),
-                        "saturation_guard_applied": "sat_guard" in flags,
-                        "warn_nonlinear": "warn_nonlinear" in flags,
-                        "priority_score": round(float(t["priority_score"]), 2),
-                        "cadence_days_since": (
-                            round(days_since, 3) if days_since is not None else np.nan
-                        ),
-                        "cadence_target_d": cad_tgt,
-                        "cadence_gate_passed": bool(gate_passed),
-                        "slew_s": (
-                            round(timing["slew_s"], 2) if f == filters_used[0] else 0.0
-                        ),
-                        "cross_filter_change_s": (
-                            round(timing.get("cross_filter_change_s", 0.0), 2)
-                            if f == filters_used[0]
-                            else 0.0
-                        ),
-                        "filter_changes_s": (
-                            round(timing.get("filter_changes_s", 0.0), 2)
-                            if f == filters_used[0]
-                            else 0.0
-                        ),
-                        "readout_s": (
-                            round(timing["readout_s"], 2)
-                            if f == filters_used[0]
-                            else 0.0
-                        ),
-                        "exposure_s": (
-                            round(timing["exposure_s"], 2)
-                            if f == filters_used[0]
-                            else 0.0
-                        ),
-                        "guard_s": (
-                            round(timing.get("guard_s", 0.0), 2)
-                            if f == filters_used[0]
-                            else 0.0
-                        ),
-                        "inter_exposure_guard_enforced": (
-                            bool(timing.get("guard_s", 0.0) > 0.0)
-                            if f == filters_used[0]
-                            else False
-                        ),
-                        "total_time_s": (total_s if f == filters_used[0] else 0.0),
-                        "elapsed_overhead_s": (
-                            round(timing.get("elapsed_overhead_s", 0.0), 2)
-                            if f == filters_used[0]
-                            else 0.0
-                        ),
-                    }
-                    pernight_rows.append(row)
-                if writer and epochs:
-                    writer.start_libid(
+                window_sum += effects["time_used_s"]
+                updates = effects["state_updates"]
+                current_time_utc = updates["current_time_utc"]
+                state = updates["state_filter"]
+                prev = updates["prev_target"]
+                order_in_window = updates["order_in_window"]
+                swap_count_by_window[idx_w] += updates["swap_count_delta"]
+                current_filter_by_window[idx_w] = state
+                filters_used_set.update(updates["filters_used_set_delta"])
+                summary = updates["summary_updates"]
+                internal_changes += summary["internal_changes_delta"]
+                window_filter_change_s += summary["window_filter_change_s_delta"]
+                window_slew_times.append(summary["slew_time"])
+                window_airmasses.append(summary["airmass"])
+                window_skymags.extend(summary["sky_mags"])
+                pernight_rows.extend(effects["pernight_rows"])
+                sequence_rows.extend(effects["sequence_rows"])
+                if writer and effects["simlib_epochs"]:
+                    libid_counter = _emit_simlib(
+                        writer,
                         libid_counter,
+                        t["Name"],
                         t["RA_deg"],
                         t["Dec_deg"],
-                        nobs=len(epochs),
-                        comment=t["Name"],
+                        effects["simlib_epochs"],
                     )
-                    libid_counter += 1
-                    for epoch in epochs:
-                        writer.add_epoch(**epoch)
-                    writer.end_libid()
-                if filters_used:
-                    if state is not None and filters_used[0] != state:
-                        swap_count_by_window[idx_w] += 1
-                    state = filters_used[-1]
-                    current_filter_by_window[idx_w] = state
-                    filters_used_set.update(filters_used)
-                internal_changes += max(0, len(filters_used) - 1)
-                window_slew_times.append(timing["slew_s"])
-                window_airmasses.append(air)
-                prev = t
-                tracker.record_detection(
-                    t["Name"], timing["exposure_s"], filters_used, mjd=visit_mjd
-                )
                 return True
 
             for filt in batch_order:
@@ -824,204 +1199,68 @@ def plan_twilight_range_with_caps(
                     if _attempt_schedule(t, allow_defer=False):
                         deferred.remove(t)
                         progress = True
-
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]
-            start_utc = pd.Timestamp(win["start"]).tz_convert("UTC").isoformat()
-            end_utc = pd.Timestamp(win["end"]).tz_convert("UTC").isoformat()
-            dur_s = (win["end"] - win["start"]).total_seconds()
-            mid = win["start"] + (win["end"] - win["start"]) / 2
-            mid_utc = pd.Timestamp(mid).tz_convert("UTC").isoformat()
-            sun_alt_mid = float(
-                get_sun(Time(mid))
-                .transform_to(AltAz(location=site, obstime=Time(mid)))
-                .alt.to(u.deg)
-                .value
-            )
-            policy_filters_mid = ",".join(allowed_filters_for_sun_alt(sun_alt_mid, cfg))
-            cap_source = cap_source_by_window.get(idx_w, "none")
-            alts = [
-                r["alt_deg"]
-                for r in pernight_rows
-                if r["date"] == day.date().isoformat()
-                and r["twilight_window"] == window_label_out
-            ]
-            guard_rows = [
+            pernight_rows_for_window = [
                 r
                 for r in pernight_rows
                 if r["date"] == day.date().isoformat()
                 and r["twilight_window"] == window_label_out
             ]
-            guard_s_total = float(sum(r.get("guard_s", 0.0) for r in guard_rows))
-            guard_count = int(
-                sum(1 for r in guard_rows if r.get("inter_exposure_guard_enforced"))
-            )
-            if getattr(cfg, "cadence_enable", True) and getattr(
-                cfg, "cadence_per_filter", True
-            ):
-                cad_rows = [
-                    r
-                    for r in pernight_rows
-                    if r["date"] == day.date().isoformat()
-                    and r["twilight_window"] == window_label_out
-                    and pd.notna(r.get("cadence_days_since"))
-                    and r.get("cadence_gate_passed") is True
-                ]
-                cad_by_filter: Dict[str, List[float]] = {}
-                for r in cad_rows:
-                    cad_by_filter.setdefault(r["filter"], []).append(
-                        float(r["cadence_days_since"])
-                    )
-                cad_median_abs_err_by_filter: Dict[str, float] = {}
-                cad_within_pct_by_filter: Dict[str, float] = {}
-                target = getattr(cfg, "cadence_days_target", 3.0)
-                tol = getattr(cfg, "cadence_days_tolerance", 0.5)
-                for filt, vals in cad_by_filter.items():
-                    diffs = [abs(v - target) for v in vals]
-                    if diffs:
-                        cad_median_abs_err_by_filter[filt] = float(np.median(diffs))
-                        within = [abs(v - target) <= tol for v in vals]
-                        cad_within_pct_by_filter[filt] = 100.0 * (
-                            sum(within) / len(vals)
-                        )
-                all_vals = [v for vals in cad_by_filter.values() for v in vals]
-                cad_median_abs_err_all = (
-                    float(np.median([abs(v - target) for v in all_vals]))
-                    if all_vals
-                    else np.nan
-                )
-                cad_within_pct_all = (
-                    100.0
-                    * (sum(abs(v - target) <= tol for v in all_vals) / len(all_vals))
-                    if all_vals
-                    else np.nan
-                )
-                cad_median_abs_err_by_filter_csv = ",".join(
-                    f"{k}:{round(v,2)}"
-                    for k, v in sorted(cad_median_abs_err_by_filter.items())
-                )
-                cad_within_pct_by_filter_csv = ",".join(
-                    f"{k}:{round(v,1)}"
-                    for k, v in sorted(cad_within_pct_by_filter.items())
-                )
-            else:
-                cad_median_abs_err_by_filter_csv = ""
-                cad_within_pct_by_filter_csv = ""
-                cad_median_abs_err_all = np.nan
-                cad_within_pct_all = np.nan
+            ws_summary = {
+                "window_sum": window_sum,
+                "swap_count": swap_count_by_window.get(idx_w, 0),
+                "internal_changes": internal_changes,
+                "window_filter_change_s": window_filter_change_s,
+                "window_slew_times": window_slew_times,
+                "window_airmasses": window_airmasses,
+                "window_skymags": window_skymags,
+                "used_filters_csv": used_filters_csv,
+                "n_candidates": len(group),
+            }
+            cap_source = cap_source_by_window.get(idx_w, "none")
             nights_rows.append(
-                {
-                    "date": day.date().isoformat(),
-                    "twilight_window": window_label_out,
-                    "n_candidates": int(len(group)),
-                    "n_planned": int(
-                        len(
-                            [
-                                r
-                                for r in pernight_rows
-                                if (
-                                    r["date"] == day.date().isoformat()
-                                    and r["twilight_window"] == window_label_out
-                                )
-                            ]
-                        )
-                    ),
-                    "sum_time_s": round(window_sum, 1),
-                    "window_cap_s": int(cap_s),
-                    "swap_count": int(swap_count_by_window.get(idx_w, 0)),
-                    "internal_filter_changes": int(internal_changes),
-                    "filter_change_s_total": round(window_filter_change_s, 1),
-                    "inter_exposure_guard_s": round(guard_s_total, 1),
-                    "inter_exposure_guard_count": guard_count,
-                    "mean_slew_s": (
-                        float(np.mean(window_slew_times)) if window_slew_times else 0.0
-                    ),
-                    "median_airmass": (
-                        float(np.median(window_airmasses)) if window_airmasses else 0.0
-                    ),
-                    "loaded_filters": ",".join(cfg.filters),
-                    "filters_used_csv": used_filters_csv,
-                    "window_start_utc": start_utc,
-                    "window_end_utc": end_utc,
-                    "window_duration_s": int(dur_s),
-                    "window_mid_utc": mid_utc,
-                    "sun_alt_mid_deg": round(sun_alt_mid, 2),
-                    "policy_filters_mid_csv": policy_filters_mid,
-                    "window_utilization": round(window_sum / max(1.0, dur_s), 4),
-                    "cap_utilization": round(window_sum / max(1.0, cap_s), 4),
-                    "cap_source": cap_source,
-                    "median_sky_mag_arcsec2": (
-                        float(np.median(window_skymags)) if window_skymags else np.nan
-                    ),
-                    "median_alt_deg": (float(np.median(alts)) if alts else np.nan),
-                    "cad_median_abs_err_by_filter_csv": cad_median_abs_err_by_filter_csv,
-                    "cad_within_pct_by_filter_csv": cad_within_pct_by_filter_csv,
-                    "cad_median_abs_err_all_d": (
-                        round(cad_median_abs_err_all, 3)
-                        if not np.isnan(cad_median_abs_err_all)
-                        else np.nan
-                    ),
-                    "cad_within_pct_all": (
-                        round(cad_within_pct_all, 1)
-                        if not np.isnan(cad_within_pct_all)
-                        else np.nan
-                    ),
-                }
+                _build_window_summary_row(
+                    day.date().isoformat(),
+                    window_label_out,
+                    win,
+                    idx_w,
+                    ws_summary,
+                    cap_s,
+                    cap_source,
+                    cfg,
+                    site,
+                    pernight_rows_for_window,
+                )
             )
-            if override_exp is not None:
+            if override_applied:
                 cfg.exposure_by_filter = original_exp
 
-        if verbose:
-            planned_today = [
-                r for r in pernight_rows if r["date"] == day.date().isoformat()
-            ]
-
-            def _fmt_window(start: datetime | None, end: datetime | None) -> str:
-                if start is None or end is None:
-                    return "na"
-                start_utc = pd.Timestamp(start).tz_convert("UTC")
-                end_utc = pd.Timestamp(end).tz_convert("UTC")
-                start_local = start_utc.tz_convert(tz_local)
-                end_local = end_utc.tz_convert(tz_local)
-                offset_td = start_local.utcoffset() or timedelta(0)
-                sign = "+" if offset_td >= timedelta(0) else "-"
-                offset_td = abs(offset_td)
-                hours = int(offset_td.total_seconds() // 3600)
-                minutes = int((offset_td.total_seconds() % 3600) // 60)
-                offset_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
-                return (
-                    f"{start_utc.isoformat()} \u2192 {end_utc.isoformat()} "
-                    f"(local {start_local.strftime('%H:%M')} \u2192 {end_local.strftime('%H:%M')} {offset_str})"
-                )
-
-            eve_str = _fmt_window(evening_start, evening_end)
-            morn_str = _fmt_window(morning_start, morning_end)
-
-            print(
-                f"{day.date().isoformat()}: eligible={len(subset)} visible={len(visible)} "
-                f"planned_total={len(planned_today)}"
-            )
-            print(f"  evening_twilight: {eve_str}")
-            print(f"  morning_twilight: {morn_str}")
+        planned_today = [
+            r for r in pernight_rows if r["date"] == day.date().isoformat()
+        ]
+        _log_day_status(
+            day.date().isoformat(),
+            len(subset),
+            len(visible),
+            len(planned_today),
+            evening_start,
+            evening_end,
+            morning_start,
+            morning_end,
+            tz_local,
+            verbose,
+        )
 
     pernight_df = pd.DataFrame(pernight_rows)
     nights_df = pd.DataFrame(nights_rows)
-    pernight_path = (
-        Path(outdir)
-        / f"lsst_twilight_plan_{start.isoformat()}_to_{end.isoformat()}.csv"
-    )
-    nights_path = (
-        Path(outdir)
-        / f"lsst_twilight_summary_{start.isoformat()}_to_{end.isoformat()}.csv"
-    )
+    pernight_path = _path_plan(outdir, start, end)
+    nights_path = _path_summary(outdir, start, end)
     pernight_df.to_csv(pernight_path, index=False)
     nights_df.to_csv(nights_path, index=False)
     seq_df = pd.DataFrame(sequence_rows)
     if not seq_df.empty:
-        seq_path = (
-            Path(outdir)
-            / f"lsst_twilight_sequence_true_{start.isoformat()}_to_{end.isoformat()}.csv"
-        )
+        seq_path = _path_sequence(outdir, start, end)
         seq_df.to_csv(seq_path, index=False)
     if writer:
         writer.close()

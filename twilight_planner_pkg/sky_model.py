@@ -16,7 +16,7 @@ class SkyModelConfig:
     use_override: bool = False
     override_mag: Optional[float] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.dark_sky_mag is None:
             # Zenith dark-sky brightness from SMTN-002 (mag/arcsec^2)
             self.dark_sky_mag = {
