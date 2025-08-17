@@ -93,8 +93,13 @@ class PlannerConfig:
     per_sn_cap_s: float = 600.0
     morning_cap_s: float | Literal["auto"] = "auto"
     evening_cap_s: float | Literal["auto"] = "auto"
+
+# Optional manual overrides of twilight windows (local clock). If provided,
+# these take precedence over computed twilight. Example format: "HH:MM-HH:MM".
+# (They are pass-through strings; parsing/validation should happen where used.)
     morning_twilight: str | None = None
     evening_twilight: str | None = None
+
     twilight_step_min: int = 2
     max_sn_per_night: int = 20
 
