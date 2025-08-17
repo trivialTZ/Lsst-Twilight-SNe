@@ -20,7 +20,7 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --start 2024-01-01 --end 2024-01-07 \
     --lat -30.2446 --lon -70.7494 --height 2663 \
     --filters g,r,i,z --exp g:5,r:5,i:5,z:5 \
-    --min_alt 20 --evening_cap 600 --morning_cap 600 \
+    --min_alt 20 --evening_cap auto --morning_cap auto \
     --per_sn_cap 120 --max_sn 10 --strategy hybrid \
     --hybrid-detections 2 --hybrid-exposure 300 \
     --simlib-out results/night.SIMLIB --simlib-survey LSST_TWILIGHT
@@ -95,7 +95,7 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 - Rank visible SNe by need score (how far from meeting the current goal) and altitude
 - Keep the top `max_sn_per_night` globally; split by window (0=morning, 1=evening)
 - Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
-- Enforce window caps (`morning_cap_s`, `evening_cap_s`) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
+- Enforce window caps (`morning_cap_s`, `evening_cap_s`, default "auto" uses window duration) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
 
 > ### Prioritization strategy recap:
 >

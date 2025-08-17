@@ -201,17 +201,31 @@ def plan_twilight_range_with_caps(
         swap_count_by_window: Dict[int, int] = {}
         window_caps: Dict[int, float] = {}
         window_labels: Dict[int, str | None] = {}
+        cap_source_by_window: Dict[int, str] = {}
         for idx_w, w in enumerate(windows):
             current_filter_by_window[idx_w] = cfg.start_filter
             swap_count_by_window[idx_w] = 0
             label = w.get("label")
             window_labels[idx_w] = label
             if label == "morning":
-                window_caps[idx_w] = cfg.morning_cap_s
+                cap = cfg.morning_cap_s
+                if cap == "auto":
+                    cap = (w["end"] - w["start"]).total_seconds()
+                    cap_source_by_window[idx_w] = "window_duration"
+                else:
+                    cap_source_by_window[idx_w] = "morning_cap_s"
+                window_caps[idx_w] = float(cap)
             elif label == "evening":
-                window_caps[idx_w] = cfg.evening_cap_s
+                cap = cfg.evening_cap_s
+                if cap == "auto":
+                    cap = (w["end"] - w["start"]).total_seconds()
+                    cap_source_by_window[idx_w] = "window_duration"
+                else:
+                    cap_source_by_window[idx_w] = "evening_cap_s"
+                window_caps[idx_w] = float(cap)
             else:
                 window_caps[idx_w] = 0.0
+                cap_source_by_window[idx_w] = "none"
 
         # Discovery cutoff at 23:59:59 *local* on the night’s evening date
         cutoff_local = datetime(
@@ -587,13 +601,7 @@ def plan_twilight_range_with_caps(
                 .value
             )
             policy_filters_mid = ",".join(allowed_filters_for_sun_alt(sun_alt_mid, cfg))
-            cap_source = (
-                "morning_cap_s"
-                if window_labels.get(idx_w) == "morning"
-                else (
-                    "evening_cap_s" if window_labels.get(idx_w) == "evening" else "none"
-                )
-            )
+            cap_source = cap_source_by_window.get(idx_w, "none")
             alts = [
                 r["alt_deg"]
                 for r in pernight_rows
