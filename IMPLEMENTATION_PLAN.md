@@ -7,6 +7,7 @@ This plan tracks incremental, testable stages for the twilight planner and the s
 You’re right—cadence should be enforced per **filter**, not per-SN. Here’s a clean way to bolt that in without fighting your existing flow.
 
 # Revised Stage 4 (per-filter cadence)
+**Status**: Complete
 
 * Enforce spacing only for the **same filter**: require `days_since_last(filter) ≥ cadence_days_target - cadence_jitter_days`.
 * Allow different filters at the same epoch (so same-night g,r,i is fine).
