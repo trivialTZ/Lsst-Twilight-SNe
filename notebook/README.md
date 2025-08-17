@@ -11,10 +11,24 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 - **Science constraints**: target altitude, Moon separation (scaled by Moon altitude/phase), twilight sky brightness, and typical post-discovery visibility windows by SN type.
 - **Engineering constraints**: slew and settle times, readout, filter-change overheads, carousel capacity, and per-window time caps.
 - **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth), batching by the first filter, and greedy routing to minimize combined slew and filter-change cost.
+- **Guard spacing**: a minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If natural overheads are shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
+
+### Cadence constraint (per-filter)
+
+- Revisit spacing is enforced **per filter**, not per SN.
+- A same-band revisit is blocked until `cadence_days_target - cadence_jitter_days` days have
+  elapsed since that band was last observed.
+- First-time observations in a band always pass the gate, enabling quick colors.
+- A Gaussian “due-soon” bonus nudges bands whose last visit is near the target cadence
+  without hard-blocking other filters.
+- Nightly summaries report per-filter cadence compliance via
+  `cad_median_abs_err_by_filter_csv` and `cad_within_pct_by_filter_csv`, with overall
+  aggregates `cad_median_abs_err_all_d` and `cad_within_pct_all`.
 
 ### Outputs
 
-- Per-SN plan CSV (one row per scheduled visit).
+- Per-SN plan CSV (one row per scheduled visit). Represents the **best-in-theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on-sky order.
+- True sequence CSV `lsst_twilight_sequence_true_<start>_to_<end>.csv` — **true, non-overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); `preferred_best_utc` records the original preference. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi-filter visits are a single row).
 - Per-night summary CSV (morning/evening window statistics).
 - Optional SNANA SIMLIB file for simulations.
 
@@ -69,9 +83,11 @@ For each window index `idx_w` present that night:
 6. **Restore exposures if overridden**: if an exposure ladder was applied for this window, revert to the original `cfg.exposure_by_filter`.
 
 ### 4. Outputs
-- **Per-SN CSV**: `lsst_twilight_plan_<start>_to_<end>.csv`  
-  One row per scheduled visit with date, window, best time, filter, `t_exp_s`, airmass/altitude, sky brightness, photometric terms (`ZPT`, `SKYSIG`, `NEA`, `RDNOISE`, `GAIN`), saturation/non-linear flags, priority, and time breakdown (slew/readout/exposure/filter changes/total).
-- **Per-night summary CSV**: `lsst_twilight_summary_<start>_to_<end>.csv`  
+- **Per-SN CSV**: `lsst_twilight_plan_<start>_to_<end>.csv`
+  One row per scheduled visit with date, window, best time, filter, `t_exp_s`, airmass/altitude, sky brightness, photometric terms (`ZPT`, `SKYSIG`, `NEA`, `RDNOISE`, `GAIN`), saturation/non-linear flags, priority, and time breakdown (slew/readout/exposure/filter changes/total). Represents the **best-in-theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on-sky order.
+- **True sequence CSV**: `lsst_twilight_sequence_true_<start>_to_<end>.csv`
+  **True, non-overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is stored in `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi-filter visits are a single row).
+- **Per-night summary CSV**: `lsst_twilight_summary_<start>_to_<end>.csv`
   One row per window: candidate/planned counts, time usage vs. cap, swap counts, internal filter changes, mean slew, median airmass, loaded filters, actually used filters.
 - **SIMLIB (optional)**: if `SIMLIB_OUT` is set, a SNANA-compatible library with all `EPOCH`s is produced.
 

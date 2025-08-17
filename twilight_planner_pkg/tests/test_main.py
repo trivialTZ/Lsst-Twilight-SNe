@@ -1,11 +1,14 @@
-import pathlib, sys
+import pathlib
+import sys
 
 # Ensure package root is importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 import pytest
 
-from twilight_planner_pkg.main import build_parser, parse_exp_map, main as entry_main
+from twilight_planner_pkg.main import build_parser
+from twilight_planner_pkg.main import main as entry_main
+from twilight_planner_pkg.main import parse_exp_map, parse_filters
 
 
 def test_build_parser_required_args_present():
@@ -29,6 +32,11 @@ def test_parse_exp_map_malformed():
         parse_exp_map("g:five")
 
 
+def test_parse_filters_string_and_csv():
+    assert parse_filters("g,r") == ["g", "r"]
+    assert parse_filters("gr") == ["g", "r"]
+
+
 def test_main_smoke(tmp_path, monkeypatch):
     csv_file = tmp_path / "input.csv"
     csv_file.write_text("id\n1\n")
@@ -39,20 +47,39 @@ def test_main_smoke(tmp_path, monkeypatch):
     def fake_plan(csv_path, outdir, start_date, end_date, cfg, verbose=True):
         called["csv_path"] = csv_path
         called["outdir"] = outdir
+        called["cfg"] = cfg
         return None
 
-    monkeypatch.setattr("twilight_planner_pkg.main.plan_twilight_range_with_caps", fake_plan)
+    monkeypatch.setattr(
+        "twilight_planner_pkg.main.plan_twilight_range_with_caps", fake_plan
+    )
     args = [
-        "--csv", str(csv_file),
-        "--out", str(outdir),
-        "--start", "2024-01-01",
-        "--end", "2024-01-02",
-        "--lat", "0",
-        "--lon", "0",
-        "--height", "0",
+        "--csv",
+        str(csv_file),
+        "--out",
+        str(outdir),
+        "--start",
+        "2024-01-01",
+        "--end",
+        "2024-01-02",
+        "--lat",
+        "0",
+        "--lon",
+        "0",
+        "--height",
+        "0",
+        "--filters",
+        "xxx",
+        "--evening-twilight",
+        "18:00",
+        "--morning-twilight",
+        "05:00",
     ]
     monkeypatch.setattr(sys, "argv", ["prog"] + args)
     entry_main()
     assert called["csv_path"] == str(csv_file)
     assert called["outdir"] == str(outdir)
+    assert called["cfg"].filters == ["x", "x", "x"]
+    assert called["cfg"].evening_twilight == "18:00"
+    assert called["cfg"].morning_twilight == "05:00"
     assert outdir.exists()

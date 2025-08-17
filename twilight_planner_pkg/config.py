@@ -22,7 +22,9 @@ class PlannerConfig:
     bright twilight, overriding ``exposure_by_filter`` within the specified Sun
     altitude ranges.  The scheduler populates transient fields such as
     ``current_mag_by_filter``, ``current_alt_deg``, and ``current_mjd`` for
-    per-target exposure capping; users normally leave these as ``None``.
+    per-target exposure capping; users normally leave these as ``None``.  Minimum
+    required time between consecutive exposures (idle 'guard' time is inserted if
+    natural overhead < this value).
     """
 
     # -- Site ---------------------------------------------------------------
@@ -40,6 +42,7 @@ class PlannerConfig:
     carousel_capacity: int = 5
     filter_change_s: float = 120.0
     readout_s: float = 2.0
+    inter_exposure_min_s: float = 15.0
     # Legacy argument names supported via __post_init__
     filter_change_time_s: float | None = None
     readout_time_s: float | None = None
@@ -90,6 +93,13 @@ class PlannerConfig:
     per_sn_cap_s: float = 600.0
     morning_cap_s: float | Literal["auto"] = "auto"
     evening_cap_s: float | Literal["auto"] = "auto"
+
+# Optional manual overrides of twilight windows (local clock). If provided,
+# these take precedence over computed twilight. Example format: "HH:MM-HH:MM".
+# (They are pass-through strings; parsing/validation should happen where used.)
+    morning_twilight: str | None = None
+    evening_twilight: str | None = None
+
     twilight_step_min: int = 2
     max_sn_per_night: int = 20
 
@@ -99,6 +109,31 @@ class PlannerConfig:
     lc_detections: int = 5
     lc_exposure_s: float = 300.0
     priority_strategy: str = "hybrid"
+
+    # -- Cadence ----------------------------------------------------------
+    cadence_enable: bool = True
+    """Enable cadence gating and bonus calculations."""
+
+    cadence_per_filter: bool = True
+    """If ``True``, track cadence separately for each filter."""
+
+    cadence_days_target: float = 3.0
+    """Target days between revisits in a given filter."""
+
+    cadence_jitter_days: float = 0.25
+    """Early revisit allowance below target days."""
+
+    cadence_days_tolerance: float = 0.5
+    """Tolerance window for cadence KPI calculations."""
+
+    cadence_bonus_sigma_days: float = 0.5
+    """Gaussian width (days) for the due-soon bonus."""
+
+    cadence_bonus_weight: float = 0.25
+    """Weight applied to the cadence bonus when ordering filters."""
+
+    cadence_first_epoch_bonus_weight: float = 0.0
+    """Bonus for a never-before-seen filter in cadence_bonus (0.0 = none)."""
 
     # -- Photometry / sky --------------------------------------------------
     pixel_scale_arcsec: float = 0.2

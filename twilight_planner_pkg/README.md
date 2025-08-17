@@ -1,7 +1,7 @@
 # LSST Twilight Planner
 
 Modular planner for scheduling **Vera C. Rubin Observatory (LSST)** twilight observations of supernovae (SNe).
-Optimized for fast, shallow snaps in bright sky, with options to export **SNANA SIMLIBs** for downstream simulations.
+Optimized for fast, shallow snaps in bright sky, with options to export **SNANA SIMLIBs** for downstream simulations. A minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If that gap is shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
 
 ---
 
@@ -19,7 +19,8 @@ pip install -r requirements.txt
 python -m twilight_planner_pkg.main --csv your.csv --out results \
     --start 2024-01-01 --end 2024-01-07 \
     --lat -30.2446 --lon -70.7494 --height 2663 \
-    --filters g,r,i,z --exp g:5,r:5,i:5,z:5 \
+    --evening-twilight 18:00 --morning-twilight 05:00 \
+    --filters griz --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap auto --morning_cap auto \
     --per_sn_cap 120 --max_sn 10 --strategy hybrid \
     --hybrid-detections 2 --hybrid-exposure 300 \
@@ -44,6 +45,18 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
    - If Type Ia: escalate to the light‑curve goal
    - Else: drop priority (reallocate time)
 3. **LSST‑only light curves** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
+
+### Cadence constraint (per-filter)
+
+- Revisit spacing is enforced **per filter**, not per supernova.
+- A same-band revisit is blocked until `cadence_days_target - cadence_jitter_days` days have
+  elapsed since that band was last observed.
+- First-time observations in a band always pass the gate, enabling quick colors.
+- A Gaussian “due-soon” bonus nudges bands whose last visit is near the target cadence
+  without hard-blocking other filters.
+- Nightly summaries report per-filter cadence compliance via
+  `cad_median_abs_err_by_filter_csv` and `cad_within_pct_by_filter_csv`, with overall
+  aggregates `cad_median_abs_err_all_d` and `cad_within_pct_all`.
 
 ---
 
@@ -332,7 +345,8 @@ When `--simlib-out` is provided, the planner writes `S:` rows with the following
 ---
 
 ## Outputs
-- Per‑SN plan — CSV: date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change)
+- Per‑SN plan — CSV: date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change). Represents the **best‑in‑theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on‑sky order.
+- True sequence CSV — `lsst_twilight_sequence_true_<start>_to_<end>.csv`: **true, non‑overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is recorded as `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi‑filter visits are a single row).
 - Night summary — CSV: counts of visible vs planned targets, cumulative time per window
 - SIMLIB — optional SNANA SIMLIB for the planned visits
 
@@ -379,6 +393,7 @@ Below is a compact table summarizing key default values, with direct links to th
 | Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
 | Readout time | 2 s per exposure | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Filter change overhead | 120 s | [DMTN-065](https://dmtn-065.lsst.io) |
+| Inter-exposure minimum | `inter_exposure_min_s = 15 s` | thermal/operational margin |
 | Pixel scale | 0.2 arcsec/px | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Site location (lat, lon, alt) | −30.2446°, −70.7494°, 2663 m | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Shutter open/close time | 1 s | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
