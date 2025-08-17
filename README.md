@@ -46,6 +46,14 @@ Moon–target separations use Astropy's `get_body('moon')` in a shared AltAz
 frame.  If the Moon is below the horizon, the separation requirement is
 automatically waived.
 
+### Cadence constraint (per-filter)
+
+Each filter maintains its own last-observed MJD. Repeats in the same band are
+gated until `cadence_days_target - cadence_jitter_days` days have elapsed.
+Filters nearing their due date receive a Gaussian "due-soon" bonus so the
+scheduler prefers them. Different filters may still be taken within a single
+visit because cadence is tracked per filter.
+
 Airmass calculations adopt the "simple" formula of Kasten & Young (1989), and
 the overhead values above follow Rubin Observatory technical notes.
 
@@ -74,6 +82,8 @@ twilight timing and basic science metrics:
 - `sun_alt_mid_deg`, `policy_filters_mid_csv`
 - `window_utilization`, `cap_utilization`, `cap_source`
 - `median_sky_mag_arcsec2`, `median_alt_deg`
+- `cad_median_abs_err_by_filter_csv`, `cad_within_pct_by_filter_csv`
+- `cad_median_abs_err_all_d`, `cad_within_pct_all`
 
 `window_cap_s` records the effective limit on scheduled time in each twilight
 window. It comes from `PlannerConfig.morning_cap_s` or `PlannerConfig.evening_cap_s`.

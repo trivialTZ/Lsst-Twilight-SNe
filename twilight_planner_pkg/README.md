@@ -46,6 +46,18 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
    - Else: drop priority (reallocate time)
 3. **LSST‑only light curves** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
 
+### Cadence constraint (per-filter)
+
+- Revisit spacing is enforced **per filter**, not per supernova.
+- A same-band revisit is blocked until `cadence_days_target - cadence_jitter_days` days have
+  elapsed since that band was last observed.
+- First-time observations in a band always pass the gate, enabling quick colors.
+- A Gaussian “due-soon” bonus nudges bands whose last visit is near the target cadence
+  without hard-blocking other filters.
+- Nightly summaries report per-filter cadence compliance via
+  `cad_median_abs_err_by_filter_csv` and `cad_within_pct_by_filter_csv`, with overall
+  aggregates `cad_median_abs_err_all_d` and `cad_within_pct_all`.
+
 ---
 
 ## Notebook Example
