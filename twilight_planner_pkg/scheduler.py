@@ -164,6 +164,8 @@ def plan_twilight_range_with_caps(
 
     pernight_rows: List[Dict] = []
     nights_rows: List[Dict] = []
+    # ---- NEW: true sequential execution order collector (one row per SN visit) ----
+    sequence_rows: list[dict] = []
     nights = pd.date_range(start, end, freq="D")
     nights_iter = tqdm(nights, desc="Nights", unit="night", leave=True)
     tracker = PriorityTracker(
@@ -430,6 +432,10 @@ def plan_twilight_range_with_caps(
             filters_used_set: set[str] = set()
             state = current_filter_by_window.get(idx_w)
 
+            # ---- NEW: per-window running clock (UTC) for true order ----
+            current_time_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
+            order_in_window = 0
+
             for filt in batch_order:
                 batch = [c for c in candidates if c["first_filter"] == filt]
                 while batch:
@@ -518,19 +524,70 @@ def plan_twilight_range_with_caps(
                         0, len(filters_used) - 1
                     )
                     guard_s = guard_first_s + guard_internal_total
-                    elapsed_overhead = max(
-                        timing["slew_s"], cfg.readout_s
-                    ) + timing.get("filter_changes_s", 0.0)
+                    elapsed_overhead = (
+                        max(timing["slew_s"], cfg.readout_s)
+                        + timing.get("filter_changes_s", 0.0)
+                        + timing.get("cross_filter_change_s", 0.0)
+                    )
                     total_with_guard = elapsed_overhead + timing["exposure_s"] + guard_s
                     if window_sum + total_with_guard > cap_s:
                         continue
                     window_sum += total_with_guard
-                    window_filter_change_s += timing.get("filter_changes_s", 0.0)
+                    window_filter_change_s += timing.get(
+                        "filter_changes_s", 0.0
+                    ) + timing.get("cross_filter_change_s", 0.0)
                     timing["total_s"] = total_with_guard
                     timing["guard_s"] = guard_s
                     timing["elapsed_overhead_s"] = elapsed_overhead
                     timing["guard_first_s"] = guard_first_s
                     timing["guard_internal_s"] = guard_internal_total
+
+                    # ---- NEW: true sequential scheduling (no overlap) ----
+                    preferred_utc = (
+                        pd.Timestamp(t["best_time_utc"]).tz_convert("UTC")
+                        if isinstance(t["best_time_utc"], pd.Timestamp)
+                        else pd.Timestamp(t["best_time_utc"]).tz_localize("UTC")
+                    )
+                    sn_start_utc = current_time_utc
+                    sn_end_utc = sn_start_utc + pd.to_timedelta(
+                        timing["total_s"], unit="s"
+                    )
+
+                    # advance window clock and ordering index
+                    current_time_utc = sn_end_utc
+                    order_in_window += 1
+
+                    # ---- NEW: append a single true-order visit row ----
+                    sequence_rows.append(
+                        {
+                            "date": day.date().isoformat(),
+                            "twilight_window": window_label_out,
+                            "order_in_window": int(order_in_window),
+                            "SN": t["Name"],
+                            "RA_deg": round(t["RA_deg"], 6),
+                            "Dec_deg": round(t["Dec_deg"], 6),
+                            "filters_used_csv": ",".join(filters_used),
+                            # theoretical preference (for traceability; keep the old outputs as-is)
+                            "preferred_best_utc": preferred_utc.isoformat(),
+                            # true, serialized schedule (non-overlapping)
+                            "sn_start_utc": sn_start_utc.isoformat(),
+                            "sn_end_utc": sn_end_utc.isoformat(),
+                            # timing breakdown (optional but useful)
+                            "total_time_s": round(timing.get("total_s", 0.0), 2),
+                            "slew_s": round(timing.get("slew_s", 0.0), 2),
+                            "readout_s": round(timing.get("readout_s", 0.0), 2),
+                            "filter_changes_s": round(
+                                timing.get("filter_changes_s", 0.0), 2
+                            ),
+                            "cross_filter_change_s": round(
+                                timing.get("cross_filter_change_s", 0.0), 2
+                            ),
+                            "guard_s": round(timing.get("guard_s", 0.0), 2),
+                            "elapsed_overhead_s": round(
+                                timing.get("elapsed_overhead_s", 0.0), 2
+                            ),
+                        }
+                    )
 
                     epochs = []
                     for f in filters_used:
@@ -798,8 +855,23 @@ def plan_twilight_range_with_caps(
     )
     pernight_df.to_csv(pernight_path, index=False)
     nights_df.to_csv(nights_path, index=False)
+    seq_df = pd.DataFrame(sequence_rows)
+    if not seq_df.empty:
+        seq_path = (
+            Path(outdir)
+            / f"lsst_twilight_sequence_true_{start.isoformat()}_to_{end.isoformat()}.csv"
+        )
+        seq_df.to_csv(seq_path, index=False)
     if writer:
         writer.close()
-    print(f"Wrote:\n  {pernight_path}\n  {nights_path}")
+    print("Wrote:")
+    print(f"  {pernight_path}")
+    print(f"  {nights_path}")
+    if not seq_df.empty:
+        print(f"  true-sequence: {seq_path}")
+    print(
+        "NOTE: per-SN plan CSV is best-in-theory (keyed to best_time_utc), may overlap.\n"
+        "      Use lsst_twilight_sequence_true_*.csv for the serialized, on-sky order."
+    )
     print(f"Rows: per-SN={len(pernight_df)}, nights*windows={len(nights_df)}")
     return pernight_df, nights_df

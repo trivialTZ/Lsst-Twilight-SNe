@@ -333,7 +333,8 @@ When `--simlib-out` is provided, the planner writes `S:` rows with the following
 ---
 
 ## Outputs
-- Per‑SN plan — CSV: date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change)
+- Per‑SN plan — CSV: date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change). Represents the **best‑in‑theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on‑sky order.
+- True sequence CSV — `lsst_twilight_sequence_true_<start>_to_<end>.csv`: **true, non‑overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is recorded as `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi‑filter visits are a single row).
 - Night summary — CSV: counts of visible vs planned targets, cumulative time per window
 - SIMLIB — optional SNANA SIMLIB for the planned visits
 
