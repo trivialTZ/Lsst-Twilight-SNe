@@ -39,7 +39,7 @@ class PhotomConfig:
     npe_pixel_warn_nonlinear: int = 80_000
     sky_mag_override: Optional[float] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.zpt1s is None:
             self.zpt1s = {
                 "u": 26.52,
