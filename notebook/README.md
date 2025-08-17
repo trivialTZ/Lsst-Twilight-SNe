@@ -13,6 +13,18 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 - **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth), batching by the first filter, and greedy routing to minimize combined slew and filter-change cost.
 - **Guard spacing**: a minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If natural overheads are shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
 
+### Cadence constraint (per-filter)
+
+- Revisit spacing is enforced **per filter**, not per SN.
+- A same-band revisit is blocked until `cadence_days_target - cadence_jitter_days` days have
+  elapsed since that band was last observed.
+- First-time observations in a band always pass the gate, enabling quick colors.
+- A Gaussian “due-soon” bonus nudges bands whose last visit is near the target cadence
+  without hard-blocking other filters.
+- Nightly summaries report per-filter cadence compliance via
+  `cad_median_abs_err_by_filter_csv` and `cad_within_pct_by_filter_csv`, with overall
+  aggregates `cad_median_abs_err_all_d` and `cad_within_pct_all`.
+
 ### Outputs
 
 - Per-SN plan CSV (one row per scheduled visit). Represents the **best-in-theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on-sky order.

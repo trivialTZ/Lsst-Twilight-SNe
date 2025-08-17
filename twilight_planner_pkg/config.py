@@ -105,6 +105,31 @@ class PlannerConfig:
     lc_exposure_s: float = 300.0
     priority_strategy: str = "hybrid"
 
+    # -- Cadence ----------------------------------------------------------
+    cadence_enable: bool = True
+    """Enable cadence gating and bonus calculations."""
+
+    cadence_per_filter: bool = True
+    """If ``True``, track cadence separately for each filter."""
+
+    cadence_days_target: float = 3.0
+    """Target days between revisits in a given filter."""
+
+    cadence_jitter_days: float = 0.25
+    """Early revisit allowance below target days."""
+
+    cadence_days_tolerance: float = 0.5
+    """Tolerance window for cadence KPI calculations."""
+
+    cadence_bonus_sigma_days: float = 0.5
+    """Gaussian width (days) for the due-soon bonus."""
+
+    cadence_bonus_weight: float = 0.25
+    """Weight applied to the cadence bonus when ordering filters."""
+
+    cadence_first_epoch_bonus_weight: float = 0.0
+    """Bonus for a never-before-seen filter in cadence_bonus (0.0 = none)."""
+
     # -- Photometry / sky --------------------------------------------------
     pixel_scale_arcsec: float = 0.2
     zpt1s: Dict[str, float] | None = None

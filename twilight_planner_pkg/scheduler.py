@@ -339,6 +339,8 @@ def plan_twilight_range_with_caps(
                 continue
 
             win = windows[idx_w]
+            # Track the true serialized start time within this window for cadence checks
+            current_time_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
             mid = win["start"] + (win["end"] - win["start"]) / 2
             window_label = window_labels.get(idx_w)
             window_label_out = window_label if window_label else f"W{idx_w}"
@@ -383,6 +385,24 @@ def plan_twilight_range_with_caps(
                     )
                     for f in allowed
                 }
+                allowed = [f for f in allowed if moon_sep_ok.get(f, False)]
+                if getattr(cfg, "cadence_enable", True) and getattr(
+                    cfg, "cadence_per_filter", True
+                ):
+                    now_mjd_for_gate = Time(current_time_utc).mjd
+                    allowed = [
+                        f
+                        for f in allowed
+                        if tracker.cadence_gate(
+                            row["Name"],
+                            f,
+                            now_mjd_for_gate,
+                            getattr(cfg, "cadence_days_target", 3.0),
+                            getattr(cfg, "cadence_jitter_days", 0.25),
+                        )
+                    ]
+                if not allowed:
+                    continue
                 first = pick_first_filter_for_target(
                     row["Name"],
                     row.get("SN_type_raw"),
@@ -396,6 +416,23 @@ def plan_twilight_range_with_caps(
                 )
                 if first is None:
                     continue
+                if getattr(cfg, "cadence_enable", True) and getattr(
+                    cfg, "cadence_per_filter", True
+                ):
+                    rest = sorted(
+                        [f for f in allowed if f != first],
+                        key=lambda f: tracker.cadence_bonus(
+                            row["Name"],
+                            f,
+                            now_mjd_for_gate,
+                            getattr(cfg, "cadence_days_target", 3.0),
+                            getattr(cfg, "cadence_bonus_sigma_days", 0.5),
+                            getattr(cfg, "cadence_bonus_weight", 0.25),
+                        ),
+                        reverse=True,
+                    )
+                else:
+                    rest = [f for f in allowed if f != first]
                 cand = {
                     "Name": row["Name"],
                     "RA_deg": row["RA_deg"],
@@ -405,7 +442,7 @@ def plan_twilight_range_with_caps(
                     "priority_score": row["priority_score"],
                     "first_filter": first,
                     "sn_type": row.get("SN_type_raw"),
-                    "allowed": allowed,
+                    "allowed": [first] + rest,
                     "moon_sep_ok": moon_sep_ok,
                     "moon_sep": float(row["_moon_sep"]),
                 }
@@ -552,6 +589,30 @@ def plan_twilight_range_with_caps(
                     sn_end_utc = sn_start_utc + pd.to_timedelta(
                         timing["total_s"], unit="s"
                     )
+                    visit_mjd = Time(sn_start_utc).mjd
+
+                    # ---- RECHECK cadence at true visit start ----
+                    if getattr(cfg, "cadence_enable", True) and getattr(
+                        cfg, "cadence_per_filter", True
+                    ):
+                        gate_mjd = visit_mjd
+                        gated_now = [
+                            f
+                            for f in t["allowed"]
+                            if tracker.cadence_gate(
+                                t["Name"],
+                                f,
+                                gate_mjd,
+                                getattr(cfg, "cadence_days_target", 3.0),
+                                getattr(cfg, "cadence_jitter_days", 0.25),
+                            )
+                        ]
+                        if not gated_now:
+                            # nothing legal yet at this exact start time; skip this visit
+                            continue
+                        if t["allowed"][0] not in gated_now:
+                            # promote the next eligible filter; keep cadence-aware order
+                            t["allowed"] = gated_now
 
                     # advance window clock and ordering index
                     current_time_utc = sn_end_utc
@@ -597,11 +658,7 @@ def plan_twilight_range_with_caps(
                         flags = timing.get("flags_by_filter", {}).get(f, set())
                         alt_deg = float(t["max_alt_deg"])
                         air = airmass_from_alt_deg(alt_deg)
-                        mjd = (
-                            Time(t["best_time_utc"]).mjd
-                            if isinstance(t["best_time_utc"], (datetime, pd.Timestamp))
-                            else np.nan
-                        )
+                        mjd = visit_mjd
                         if sky_provider:
                             sky_mag = sky_provider.sky_mag(
                                 mjd,
@@ -629,20 +686,35 @@ def plan_twilight_range_with_caps(
                                 }
                             )
                         # Observation start and end times in UTC
-                        start_utc = pd.Timestamp(t["best_time_utc"])
-                        if start_utc.tzinfo is None:
-                            start_utc = start_utc.tz_localize("UTC")
-                        else:
-                            start_utc = start_utc.tz_convert("UTC")
+                        start_utc = sn_start_utc
                         total_s = round(timing["total_s"], 2)
-                        end_utc = start_utc + pd.to_timedelta(total_s, unit="s")
+                        end_utc = sn_end_utc
+                        days_since = tracker.days_since(t["Name"], f, visit_mjd)
+                        gate_passed = (
+                            tracker.cadence_gate(
+                                t["Name"],
+                                f,
+                                visit_mjd,
+                                getattr(cfg, "cadence_days_target", 3.0),
+                                getattr(cfg, "cadence_jitter_days", 0.25),
+                            )
+                            if getattr(cfg, "cadence_enable", True)
+                            and getattr(cfg, "cadence_per_filter", True)
+                            else True
+                        )
+                        best_start_utc = (
+                            pd.Timestamp(t["best_time_utc"]).tz_convert("UTC")
+                            if isinstance(t["best_time_utc"], pd.Timestamp)
+                            else pd.Timestamp(t["best_time_utc"]).tz_localize("UTC")
+                        )
                         row = {
                             "date": day.date().isoformat(),
                             "twilight_window": window_label_out,
                             "SN": t["Name"],
                             "RA_deg": round(t["RA_deg"], 6),
                             "Dec_deg": round(t["Dec_deg"], 6),
-                            "best_twilight_time_utc": start_utc.isoformat(),
+                            "best_twilight_time_utc": best_start_utc.isoformat(),
+                            "visit_start_utc": start_utc.isoformat(),
                             "sn_end_utc": end_utc.isoformat(),
                             "filter": f,
                             "t_exp_s": round(exp_s, 1),
@@ -658,6 +730,15 @@ def plan_twilight_range_with_caps(
                             "saturation_guard_applied": "sat_guard" in flags,
                             "warn_nonlinear": "warn_nonlinear" in flags,
                             "priority_score": round(float(t["priority_score"]), 2),
+                            "cadence_days_since": (
+                                round(days_since, 3)
+                                if days_since is not None
+                                else np.nan
+                            ),
+                            "cadence_target_d": getattr(
+                                cfg, "cadence_days_target", 3.0
+                            ),
+                            "cadence_gate_passed": gate_passed,
                             "slew_s": (
                                 round(timing["slew_s"], 2)
                                 if f == filters_used[0]
@@ -717,16 +798,15 @@ def plan_twilight_range_with_caps(
                     if filters_used:
                         if state is not None and filters_used[0] != state:
                             swap_count_by_window[idx_w] += 1
-                        current_filter_by_window[idx_w] = filters_used[0]
-                        current_filter_by_window[idx_w] = filters_used[-1]
-                        state = current_filter_by_window[idx_w]
+                        state = filters_used[-1]
+                        current_filter_by_window[idx_w] = state
                         filters_used_set.update(filters_used)
                     internal_changes += max(0, len(filters_used) - 1)
                     window_slew_times.append(timing["slew_s"])
                     window_airmasses.append(air)
                     prev = t
                     tracker.record_detection(
-                        t["Name"], timing["exposure_s"], filters_used
+                        t["Name"], timing["exposure_s"], filters_used, mjd=visit_mjd
                     )
 
             used_filters_csv = ",".join(sorted(filters_used_set))
@@ -760,6 +840,58 @@ def plan_twilight_range_with_caps(
             guard_count = int(
                 sum(1 for r in guard_rows if r.get("inter_exposure_guard_enforced"))
             )
+            if getattr(cfg, "cadence_enable", True) and getattr(
+                cfg, "cadence_per_filter", True
+            ):
+                cad_rows = [
+                    r
+                    for r in pernight_rows
+                    if r["date"] == day.date().isoformat()
+                    and r["twilight_window"] == window_label_out
+                    and pd.notna(r.get("cadence_days_since"))
+                ]
+                cad_by_filter: Dict[str, List[float]] = {}
+                for r in cad_rows:
+                    cad_by_filter.setdefault(r["filter"], []).append(
+                        float(r["cadence_days_since"])
+                    )
+                cad_median_abs_err_by_filter: Dict[str, float] = {}
+                cad_within_pct_by_filter: Dict[str, float] = {}
+                target = getattr(cfg, "cadence_days_target", 3.0)
+                tol = getattr(cfg, "cadence_days_tolerance", 0.5)
+                for filt, vals in cad_by_filter.items():
+                    diffs = [abs(v - target) for v in vals]
+                    if diffs:
+                        cad_median_abs_err_by_filter[filt] = float(np.median(diffs))
+                        within = [abs(v - target) <= tol for v in vals]
+                        cad_within_pct_by_filter[filt] = 100.0 * (
+                            sum(within) / len(vals)
+                        )
+                all_vals = [v for vals in cad_by_filter.values() for v in vals]
+                cad_median_abs_err_all = (
+                    float(np.median([abs(v - target) for v in all_vals]))
+                    if all_vals
+                    else np.nan
+                )
+                cad_within_pct_all = (
+                    100.0
+                    * (sum(abs(v - target) <= tol for v in all_vals) / len(all_vals))
+                    if all_vals
+                    else np.nan
+                )
+                cad_median_abs_err_by_filter_csv = ",".join(
+                    f"{k}:{round(v,2)}"
+                    for k, v in sorted(cad_median_abs_err_by_filter.items())
+                )
+                cad_within_pct_by_filter_csv = ",".join(
+                    f"{k}:{round(v,1)}"
+                    for k, v in sorted(cad_within_pct_by_filter.items())
+                )
+            else:
+                cad_median_abs_err_by_filter_csv = ""
+                cad_within_pct_by_filter_csv = ""
+                cad_median_abs_err_all = np.nan
+                cad_within_pct_all = np.nan
             nights_rows.append(
                 {
                     "date": day.date().isoformat(),
@@ -805,6 +937,18 @@ def plan_twilight_range_with_caps(
                         float(np.median(window_skymags)) if window_skymags else np.nan
                     ),
                     "median_alt_deg": (float(np.median(alts)) if alts else np.nan),
+                    "cad_median_abs_err_by_filter_csv": cad_median_abs_err_by_filter_csv,
+                    "cad_within_pct_by_filter_csv": cad_within_pct_by_filter_csv,
+                    "cad_median_abs_err_all_d": (
+                        round(cad_median_abs_err_all, 3)
+                        if not np.isnan(cad_median_abs_err_all)
+                        else np.nan
+                    ),
+                    "cad_within_pct_all": (
+                        round(cad_within_pct_all, 1)
+                        if not np.isnan(cad_within_pct_all)
+                        else np.nan
+                    ),
                 }
             )
             if override_exp is not None:
