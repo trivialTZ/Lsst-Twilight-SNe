@@ -3,37 +3,136 @@
 
 This plan tracks incremental, testable stages for the twilight planner and the saturation proof pipeline.
 ---
+## Stage 5: “Unique-First” nightly strategy (maximize distinct SNe; minimal code ripple)
 
-You’re right—cadence should be enforced per **filter**, not per-SN. Here’s a clean way to bolt that in without fighting your existing flow.
+**Goal**
+Provide a paper comparison cohort by prioritizing as many **distinct** SNe as possible in a night, under the same altitude/moon/filter/cap constraints, with **no extra files** and only small edits centered in `priority.py`.
 
-## Stage 5: Add “Unique-First” strategy (maximize distinct SNe per night)
-**Why**: Provide a comparison cohort for the paper by sampling as many unique targets as possible, contrasting with cadence-preserving default.
+**Design Principles**
 
-**Scope**:
-- New strategy flag `strategy="unique_first"`.
-- Greedy selection to maximize the number of distinct SNe seen in a night, subject to altitude, moon, filter policy, and window caps.
-- If time remains after covering unique SNe, optionally fill with second visits for color (configurable).
-- Nightly summary should report: `unique_targets_observed`, `repeat_fraction`, and compare against default strategy if both are run.
+* **No new modules.** Only touch: `twilight_planner_pkg/priority.py` (core), plus tiny, safe wiring in `scheduler.py` and `config.py`.
+* **First-class strategy token.** `"unique_first"` must be handled exactly like `"hybrid"` and `"lc"` (same call sites, same tracker object).
+* **Tiny scoring rule.** If an SN has **never been observed** in this run (or is beyond a configurable lookback), score = **1.0**; otherwise **0.0**. No other heuristics.
+* **Lookback default = 999 days.** Treats repeats as “off” for the duration of a typical run by default.
+* **No scheduler surgery.** Do not add passes or re-planners. Optional “fill with color” remains a configurable placeholder (default True) but **inert** until we explicitly add a second pass in a later stage.
 
-**Files/Interfaces**:
-- `twilight_planner_pkg/scheduler.py`: add a second prioritizer `prioritize_unique_first(...)`.
-- `twilight_planner_pkg/main.py`: CLI `--strategy [default|unique_first]`.
+---
 
-**Config**:
-- `cfg.unique_first_fill_with_color = True`
-- `cfg.unique_lookback_days = 7` (avoid re-picking the same SN within a week, if feasible)
+### Scope (what changes)
 
-**Success Criteria**:
-- On the same night and input list, `unique_first` yields a higher count of distinct SNe than the default strategy.
-- Report includes side-by-side counts when both are executed.
+1. **`priority.py` (primary)**
 
-**Tests**:
-- `pytest twilight_planner_pkg/tests/test_strategy_unique_first.py`
+   * Add a new strategy branch: `strategy == "unique_first"`.
+   * Extend `_SNHistory` with:
 
-**Docs**:
-- README: add “Strategies” table comparing `default` vs `unique_first`.
+     * `last_seen_mjd: Optional[float]` (set when any detection is recorded).
+   * Extend `PriorityTracker` with:
 
-**Status**: Planned ☐
+     * `unique_lookback_days: float = 999.0`.
+   * Update `record_detection(...)` to set `last_seen_mjd`.
+   * Implement scoring for `"unique_first"`:
+
+     * If `hist.detections == 0` → return `1.0`.
+     * Else (repeat within run) → return `0.0`.
+     * (If later we thread a `now_mjd`, allow: return `1.0` if `now_mjd - last_seen_mjd > unique_lookback_days`; otherwise `0.0`.)
+   * Leave `"hybrid"` and `"lc"` behavior unchanged (only docstring/typing consistency as needed).
+
+2. **`config.py` (tiny additions)**
+
+   * Add:
+
+     * `unique_first_fill_with_color: bool = True`  *(placeholder, currently no behavior change)*
+     * `unique_lookback_days: int = 999` *(requested default)*
+
+3. **`scheduler.py` (tiny wiring & summary only)**
+
+   * When constructing `PriorityTracker`, pass through `cfg.unique_lookback_days`.
+   * Keep planning flow identical; the changed priority scores naturally alter which SNe get picked.
+   * Enrich per-window summary (CSV row) with:
+
+     * `unique_targets_observed` = count of distinct SN IDs planned in the window.
+     * `repeat_fraction` = `(n_planned - unique_targets_observed) / n_planned` (0 if no plans).
+
+4. **CLI (if present already)**
+
+   * If `main.py` already maps `--strategy`→`cfg.priority_strategy`, no changes needed.
+   * Otherwise, add `--strategy [hybrid|lc|unique_first]` and set `cfg.priority_strategy` accordingly.
+
+---
+
+### Config (defaults)
+
+```python
+cfg.priority_strategy = "hybrid"              # unchanged default
+cfg.unique_first_fill_with_color = True       # placeholder; inert for now
+cfg.unique_lookback_days = 999                # your requested default
+```
+
+---
+
+### Behavior Summary
+
+* **unique\_first:**
+
+  * First pass greedily chooses SNe with `detections == 0` (or older than lookback once we thread time), maximizing **distinct** targets within each twilight window and time cap.
+  * No added scheduling passes; same cap, altitude, moon, filter, and overhead policies apply.
+
+* **hybrid / lc:**
+
+  * **Unchanged** in this stage. (If we later refine cadence or escalation, that’s a separate stage.)
+
+---
+
+### Success Criteria
+
+* On the **same night** and **same input list**, running with `priority_strategy="unique_first"` yields a **greater** or **equal** number of distinct SNe than `hybrid` or `lc`.
+* Nightly/Window summary includes `unique_targets_observed` and `repeat_fraction`.
+* Existing `hybrid`/`lc` tests and behavior remain **unchanged**.
+
+---
+
+### Tests
+
+Create `twilight_planner_pkg/tests/test_strategy_unique_first.py` with **small, deterministic** cases:
+
+1. **Scoring unit tests (no scheduler):**
+
+   * New SN → `score(..., "unique_first") == 1.0`.
+   * After one `record_detection`, same SN → `score(..., "unique_first") == 0.0`.
+   * Ensure `"hybrid"` and `"lc"` scores match previous expectations on the same histories.
+
+2. **Integration-lite (scheduler harness / fake window):**
+
+   * Inject a small set where 12 SNe are eligible but the cap limits to \~10 visits.
+   * With `unique_first`, confirm `unique_targets_observed == n_planned`.
+   * With `hybrid` or `lc`, confirm `unique_targets_observed <= n_planned` and typically **less than** the unique\_first run.
+
+3. **Summary fields:**
+
+   * Verify that the per-window summary row contains `unique_targets_observed` and `repeat_fraction` with correct values.
+
+---
+
+### Docs
+
+* **README:** Add a **Strategies** comparison row:
+
+  * **hybrid:** “Quick color/exposure, escalate Ia to LC.”
+  * **lc:** “Always pursue LC depth.”
+  * **unique\_first:** “Maximize distinct SNe per night; repeats suppressed (lookback default 999 d).”
+* Briefly note `unique_first_fill_with_color` as a future enhancement switch.
+
+---
+
+### Backward Compatibility & Risk
+
+* Default remains `hybrid`; no change unless users opt into `unique_first`.
+* Changes are **additive** and **localized**.
+* No data model migrations, no new files.
+
+---
+
+**Status:** Planned ☐
 
 ---
 
