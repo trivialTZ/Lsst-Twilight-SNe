@@ -94,9 +94,9 @@ class PlannerConfig:
     morning_cap_s: float | Literal["auto"] = "auto"
     evening_cap_s: float | Literal["auto"] = "auto"
 
-# Optional manual overrides of twilight windows (local clock). If provided,
-# these take precedence over computed twilight. Example format: "HH:MM-HH:MM".
-# (They are pass-through strings; parsing/validation should happen where used.)
+    # Optional manual overrides of twilight windows (local clock). If provided,
+    # these take precedence over computed twilight. Example format: "HH:MM-HH:MM".
+    # (They are pass-through strings; parsing/validation should happen where used.)
     morning_twilight: str | None = None
     evening_twilight: str | None = None
 
@@ -109,6 +109,8 @@ class PlannerConfig:
     lc_detections: int = 5
     lc_exposure_s: float = 300.0
     priority_strategy: str = "hybrid"
+    unique_first_fill_with_color: bool = True
+    unique_lookback_days: float = 999.0
 
     # -- Cadence ----------------------------------------------------------
     cadence_enable: bool = True

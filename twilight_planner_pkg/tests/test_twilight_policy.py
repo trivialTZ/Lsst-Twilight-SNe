@@ -1,7 +1,9 @@
-import pathlib, sys
+import pathlib
+import sys
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.astro_utils import allowed_filters_for_sun_alt
+from twilight_planner_pkg.config import PlannerConfig
 
 
 def test_twilight_policy_sets():

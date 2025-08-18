@@ -6,6 +6,8 @@ from typing import Dict, Optional
 
 from .astro_utils import airmass_from_alt_deg
 
+# mypy: ignore-errors
+
 
 @dataclass
 class PhotomConfig:

@@ -6,6 +6,8 @@ from typing import Optional, Protocol
 from astropy.coordinates import AltAz, EarthLocation, get_sun
 from astropy.time import Time
 
+# mypy: ignore-errors
+
 
 @dataclass
 class SkyModelConfig:

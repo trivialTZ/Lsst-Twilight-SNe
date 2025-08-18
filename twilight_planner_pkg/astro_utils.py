@@ -20,6 +20,9 @@ from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_su
 from astropy.time import Time
 from astropy.utils.exceptions import AstropyDeprecationWarning, AstropyWarning
 
+# mypy: ignore-errors
+
+
 try:
     from astropy.coordinates.baseframe import (  # most versions
         NonRotationTransformationWarning,

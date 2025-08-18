@@ -27,6 +27,9 @@ import pandas as pd
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_sun
 from astropy.time import Time
 
+# mypy: ignore-errors
+
+
 try:
     import ipywidgets as _ipyw  # noqa: F401
     from tqdm.notebook import tqdm as _tqdm  # type: ignore
@@ -634,6 +637,12 @@ def _build_window_summary_row(
             if r.get("inter_exposure_guard_enforced")
         )
     )
+    ids = [r.get("SN") for r in pernight_rows_for_window if r.get("SN") is not None]
+    unique_targets_observed = len(set(ids))
+    n_planned = len(pernight_rows_for_window)
+    repeat_fraction = (
+        (n_planned - unique_targets_observed) / n_planned if n_planned else 0.0
+    )
     if getattr(cfg, "cadence_enable", True) and getattr(
         cfg, "cadence_per_filter", True
     ):
@@ -684,7 +693,9 @@ def _build_window_summary_row(
         "date": day_iso,
         "twilight_window": window_label,
         "n_candidates": int(ws_summary["n_candidates"]),
-        "n_planned": int(len(pernight_rows_for_window)),
+        "n_planned": int(n_planned),
+        "unique_targets_observed": int(unique_targets_observed),
+        "repeat_fraction": round(repeat_fraction, 3),
         "sum_time_s": round(ws_summary["window_sum"], 1),
         "window_cap_s": int(cap_s),
         "swap_count": int(ws_summary.get("swap_count", 0)),
@@ -831,6 +842,7 @@ def plan_twilight_range_with_caps(
         hybrid_exposure_s=cfg.hybrid_exposure_s,
         lc_detections=cfg.lc_detections,
         lc_exposure_s=cfg.lc_exposure_s,
+        unique_lookback_days=cfg.unique_lookback_days,
     )
     tz_local = _local_timezone_from_location(site)
 

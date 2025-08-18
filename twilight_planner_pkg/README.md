@@ -45,6 +45,9 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
    - If Type Ia: escalate to the light‑curve goal
    - Else: drop priority (reallocate time)
 3. **LSST‑only light curves** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
+4. **`unique_first`** — maximize distinct SNe per night; repeats suppressed (lookback default 999 d)
+
+`unique_first_fill_with_color` is a placeholder knob for a future second pass that would add color to unique-first selections.
 
 ### Cadence constraint (per-filter)
 
@@ -72,7 +75,7 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 ```
 
 `PlannerConfig` highlights:
-- `priority_strategy`: "hybrid" (default) or "lc"
+- `priority_strategy`: "hybrid" (default), "lc", or "unique_first"
 - `hybrid_detections` / `hybrid_exposure_s`: quick‑color thresholds (defaults: ≥2 detections across ≥2 filters or ≥300 s total)
 - `lc_detections` / `lc_exposure_s`: LC thresholds (defaults: ≥5 detections or ≥300 s across ≥2 filters)
 - Default escalation: once hybrid is met, cached `SN_type_raw` from the CSV decides whether to escalate (Ia) or deprioritize (non‑Ia)
@@ -116,6 +119,7 @@ plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
 >  - Type Ia SNe escalate to the LSST-only light-curve goal (≥ 5 detections or ≥ 300 s across ≥ 2 filters).
 >  - Non-Ia SNe drop to zero priority, freeing time for other targets.
 > - LSST-only light curve strategy: Every SN is pursued until the LC goal is met.
+> - Unique-first strategy: Observe each SN at most once per night to maximize distinct targets.
 > - Candidates are ranked nightly first by need score (how far from meeting the active goal) and then by their maximum altitude within the twilight window.
 > - Scheduling within each window uses a greedy nearest-neighbor approach on sky position to minimize slew time, constrained by per-SN and per-window time caps.
 

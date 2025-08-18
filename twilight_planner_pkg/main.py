@@ -89,9 +89,9 @@ def build_parser():
     )
     p.add_argument(
         "--strategy",
-        choices=["hybrid", "lc"],
+        choices=["hybrid", "lc", "unique_first"],
         default="hybrid",
-        help="Priority strategy: 'hybrid' drops after quick color, 'lc' pursues full light curves",
+        help="Priority strategy: 'hybrid' drops after quick color, 'lc' pursues full light curves, 'unique_first' maximizes distinct SNe",
     )
     p.add_argument(
         "--hybrid-detections",
