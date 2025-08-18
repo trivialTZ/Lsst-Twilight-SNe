@@ -114,27 +114,45 @@ def _policy_filters_mid(sun_alt_deg: float, cfg: PlannerConfig) -> list[str]:
     return allowed_filters_for_sun_alt(sun_alt_deg, cfg)
 
 
-def _path_plan(outdir: str | Path, start: datetime, end: datetime) -> Path:
+def _path_plan(
+    outdir: str | Path,
+    start: datetime,
+    end: datetime,
+    run_label: str | None = None,
+) -> Path:
     """Return output path for the per-SN plan CSV."""
+    label = f"{run_label}_" if run_label else ""
     return (
         Path(outdir)
-        / f"lsst_twilight_plan_{start.isoformat()}_to_{end.isoformat()}.csv"
+        / f"lsst_twilight_plan_{label}{start.isoformat()}_to_{end.isoformat()}.csv"
     )
 
 
-def _path_summary(outdir: str | Path, start: datetime, end: datetime) -> Path:
+def _path_summary(
+    outdir: str | Path,
+    start: datetime,
+    end: datetime,
+    run_label: str | None = None,
+) -> Path:
     """Return output path for the nightly/window summary CSV."""
+    label = f"{run_label}_" if run_label else ""
     return (
         Path(outdir)
-        / f"lsst_twilight_summary_{start.isoformat()}_to_{end.isoformat()}.csv"
+        / f"lsst_twilight_summary_{label}{start.isoformat()}_to_{end.isoformat()}.csv"
     )
 
 
-def _path_sequence(outdir: str | Path, start: datetime, end: datetime) -> Path:
+def _path_sequence(
+    outdir: str | Path,
+    start: datetime,
+    end: datetime,
+    run_label: str | None = None,
+) -> Path:
     """Return output path for the true on-sky sequence CSV."""
+    label = f"{run_label}_" if run_label else ""
     return (
         Path(outdir)
-        / f"lsst_twilight_sequence_true_{start.isoformat()}_to_{end.isoformat()}.csv"
+        / f"lsst_twilight_sequence_true_{label}{start.isoformat()}_to_{end.isoformat()}.csv"
     )
 
 
@@ -749,6 +767,7 @@ def plan_twilight_range_with_caps(
     start_date: str,
     end_date: str,
     cfg: PlannerConfig,
+    run_label: str | None = None,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate a twilight observing plan over a date range with per-window time caps.
@@ -766,6 +785,10 @@ def plan_twilight_range_with_caps(
     cfg : PlannerConfig
         Configuration with site, filter, and timing parameters. Filters outside
         ``cfg.sun_alt_policy`` are excluded at disallowed Sun altitudes.
+    run_label : str, optional
+        Optional label inserted into output filenames. Defaults to ``"hybrid"``
+        (the standard priority strategy). Useful for differentiating multiple
+        runs over the same date range.
     verbose : bool, optional
         If ``True``, print progress messages.
 
@@ -1266,13 +1289,14 @@ def plan_twilight_range_with_caps(
 
     pernight_df = pd.DataFrame(pernight_rows)
     nights_df = pd.DataFrame(nights_rows)
-    pernight_path = _path_plan(outdir, start, end)
-    nights_path = _path_summary(outdir, start, end)
+    label = run_label or "hybrid"
+    pernight_path = _path_plan(outdir, start, end, label)
+    nights_path = _path_summary(outdir, start, end, label)
     pernight_df.to_csv(pernight_path, index=False)
     nights_df.to_csv(nights_path, index=False)
     seq_df = pd.DataFrame(sequence_rows)
     if not seq_df.empty:
-        seq_path = _path_sequence(outdir, start, end)
+        seq_path = _path_sequence(outdir, start, end, label)
         seq_df.to_csv(seq_path, index=False)
     if writer:
         writer.close()
@@ -1281,9 +1305,10 @@ def plan_twilight_range_with_caps(
     print(f"  {nights_path}")
     if not seq_df.empty:
         print(f"  true-sequence: {seq_path}")
+    label_hint = f"{label}_"
     print(
         "NOTE: per-SN plan CSV is best-in-theory (keyed to best_time_utc), may overlap.\n"
-        "      Use lsst_twilight_sequence_true_*.csv for the serialized, on-sky order."
+        f"      Use lsst_twilight_sequence_true_{label_hint}*.csv for the serialized, on-sky order."
     )
     print(f"Rows: per-SN={len(pernight_df)}, nights*windows={len(nights_df)}")
     return pernight_df, nights_df

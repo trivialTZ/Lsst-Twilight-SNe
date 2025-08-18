@@ -70,9 +70,18 @@ from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
 
 cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2663)
-plan_twilight_range_with_caps('/path/to/your.csv', '/tmp/out',
-                              '2024-01-01', '2024-01-07', cfg)
+plan_twilight_range_with_caps(
+    '/path/to/your.csv',
+    '/tmp/out',
+    '2024-01-01',
+    '2024-01-07',
+    cfg,
+    run_label='hybrid_strategy',
+)
 ```
+
+If ``run_label`` is omitted, ``"hybrid"`` (the default priority strategy) is
+used for the filename prefix.
 
 `PlannerConfig` highlights:
 - `priority_strategy`: "hybrid" (default), "lc", or "unique_first"
@@ -349,10 +358,13 @@ When `--simlib-out` is provided, the planner writes `S:` rows with the following
 ---
 
 ## Outputs
-- Per‑SN plan — CSV: date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change). Represents the **best‑in‑theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on‑sky order.
-- True sequence CSV — `lsst_twilight_sequence_true_<start>_to_<end>.csv`: **true, non‑overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is recorded as `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi‑filter visits are a single row).
-- Night summary — CSV: counts of visible vs planned targets, cumulative time per window
+- Per‑SN plan — CSV (`lsst_twilight_plan_<run_label>_<start>_to_<end>.csv`): date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change). Represents the **best‑in‑theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on‑sky order.
+- True sequence CSV — `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv`: **true, non‑overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is recorded as `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi‑filter visits are a single row).
+- Night summary — CSV (`lsst_twilight_summary_<run_label>_<start>_to_<end>.csv`): counts of visible vs planned targets, cumulative time per window
 - SIMLIB — optional SNANA SIMLIB for the planned visits
+
+In all filenames above, ``<run_label>`` defaults to ``hybrid`` to reflect the
+default priority strategy.
 
 ---
 
