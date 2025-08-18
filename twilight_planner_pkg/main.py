@@ -8,7 +8,7 @@ Usage (example):
         --lat -30.2446 --lon -70.7494 --height 2663 \
         --evening-twilight 18:00 --morning-twilight 05:00 \
         --filters g,r,i,z \
-        --strategy hybrid
+        --strategy hybrid --run-label hybrid_strategy
 """
 
 from __future__ import annotations
@@ -33,6 +33,11 @@ def build_parser():
     p.add_argument("--out", required=True, help="Output directory for CSV results")
     p.add_argument("--start", required=True, help="Start date (YYYY-MM-DD, UTC)")
     p.add_argument("--end", required=True, help="End date (YYYY-MM-DD, UTC)")
+    p.add_argument(
+        "--run-label",
+        default="hybrid",
+        help="Label inserted in output filenames (default: hybrid)",
+    )
     # Site
     p.add_argument("--lat", type=float, required=True, help="Geodetic latitude (deg)")
     p.add_argument("--lon", type=float, required=True, help="Geodetic longitude (deg)")
@@ -223,6 +228,7 @@ def main():
         start_date=args.start,
         end_date=args.end,
         cfg=cfg,
+        run_label=args.run_label,
         verbose=True,
     )
 

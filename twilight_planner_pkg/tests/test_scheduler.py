@@ -466,3 +466,153 @@ def test_exposure_ladder_applied(tmp_path, monkeypatch):
     )
 
     assert pernight_df["t_exp_s"].tolist() == [5.0]
+
+
+def test_run_label_in_output_paths(tmp_path, monkeypatch):
+    """Ensure run_label is inserted into output filenames."""
+
+    df = pd.DataFrame(
+        {
+            "ra": [0.0],
+            "dec": [0.0],
+            "discoverydate": ["2023-12-01T00:00:00Z"],
+            "name": ["SN1"],
+            "type": ["Ia"],
+        }
+    )
+    csv = tmp_path / "cat.csv"
+    df.to_csv(csv, index=False)
+
+    from twilight_planner_pkg import scheduler
+
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
+        start = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        return [
+            {
+                "start": start,
+                "end": start + timedelta(minutes=30),
+                "label": "evening",
+                "night_date": date_local,
+            }
+        ]
+
+    def mock_best_time_with_moon(
+        sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
+    ):
+        start, _ = window
+        return 50.0, start + timedelta(minutes=5), 0.0, 0.0, 180.0
+
+    monkeypatch.setattr(
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
+    )
+    monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    monkeypatch.setattr(scheduler, "great_circle_sep_deg", lambda *a, **k: 0.0)
+
+    cfg = PlannerConfig(
+        filters=["g"],
+        exposure_by_filter={"g": 10.0},
+        readout_s=1.0,
+        filter_change_s=1.0,
+        evening_cap_s=1000.0,
+        morning_cap_s=1000.0,
+        min_moon_sep_by_filter={"g": 0.0},
+        require_single_time_for_all_filters=False,
+        min_alt_deg=0.0,
+        twilight_step_min=1,
+        allow_filter_changes_in_twilight=True,
+    )
+
+    start = end = "2024-01-01"
+    run_label = "hybrid_strategy"
+    plan_twilight_range_with_caps(
+        csv_path=str(csv),
+        outdir=str(tmp_path),
+        start_date=start,
+        end_date=end,
+        cfg=cfg,
+        run_label=run_label,
+        verbose=False,
+    )
+
+    plan_path = tmp_path / f"lsst_twilight_plan_{run_label}_{start}_to_{end}.csv"
+    summary_path = tmp_path / f"lsst_twilight_summary_{run_label}_{start}_to_{end}.csv"
+    assert plan_path.exists()
+    assert summary_path.exists()
+
+
+def test_default_run_label_hybrid(tmp_path, monkeypatch):
+    """Default run label should be 'hybrid'."""
+
+    df = pd.DataFrame(
+        {
+            "ra": [0.0],
+            "dec": [0.0],
+            "discoverydate": ["2023-12-01T00:00:00Z"],
+            "name": ["SN1"],
+            "type": ["Ia"],
+        }
+    )
+    csv = tmp_path / "cat.csv"
+    df.to_csv(csv, index=False)
+
+    from twilight_planner_pkg import scheduler
+
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
+        start = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        return [
+            {
+                "start": start,
+                "end": start + timedelta(minutes=30),
+                "label": "evening",
+                "night_date": date_local,
+            }
+        ]
+
+    def mock_best_time_with_moon(
+        sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
+    ):
+        start, _ = window
+        return 50.0, start + timedelta(minutes=5), 0.0, 0.0, 180.0
+
+    monkeypatch.setattr(
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
+    )
+    monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    monkeypatch.setattr(scheduler, "great_circle_sep_deg", lambda *a, **k: 0.0)
+
+    cfg = PlannerConfig(
+        filters=["g"],
+        exposure_by_filter={"g": 10.0},
+        readout_s=1.0,
+        filter_change_s=1.0,
+        evening_cap_s=1000.0,
+        morning_cap_s=1000.0,
+        min_moon_sep_by_filter={"g": 0.0},
+        require_single_time_for_all_filters=False,
+        min_alt_deg=0.0,
+        twilight_step_min=1,
+        allow_filter_changes_in_twilight=True,
+    )
+
+    start = end = "2024-01-01"
+    plan_twilight_range_with_caps(
+        csv_path=str(csv),
+        outdir=str(tmp_path),
+        start_date=start,
+        end_date=end,
+        cfg=cfg,
+        verbose=False,
+    )
+
+    plan_path = tmp_path / f"lsst_twilight_plan_hybrid_{start}_to_{end}.csv"
+    summary_path = tmp_path / f"lsst_twilight_summary_hybrid_{start}_to_{end}.csv"
+    assert plan_path.exists()
+    assert summary_path.exists()

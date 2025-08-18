@@ -44,10 +44,13 @@ def test_main_smoke(tmp_path, monkeypatch):
 
     called = {}
 
-    def fake_plan(csv_path, outdir, start_date, end_date, cfg, verbose=True):
+    def fake_plan(
+        csv_path, outdir, start_date, end_date, cfg, run_label="hybrid", verbose=True
+    ):
         called["csv_path"] = csv_path
         called["outdir"] = outdir
         called["cfg"] = cfg
+        called["run_label"] = run_label
         return None
 
     monkeypatch.setattr(
@@ -82,4 +85,5 @@ def test_main_smoke(tmp_path, monkeypatch):
     assert called["cfg"].filters == ["x", "x", "x"]
     assert called["cfg"].evening_twilight == "18:00"
     assert called["cfg"].morning_twilight == "05:00"
+    assert called["run_label"] == "hybrid"
     assert outdir.exists()

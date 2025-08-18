@@ -64,11 +64,22 @@ from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
 
 cfg = PlannerConfig(filters=["i", "z"], start_filter="i")
-plan_twilight_range_with_caps("my_catalog.csv", "out", "2024-01-01", "2024-01-01", cfg)
+plan_twilight_range_with_caps(
+    "my_catalog.csv",
+    "out",
+    "2024-01-01",
+    "2024-01-01",
+    cfg,
+    run_label="hybrid_strategy",
+)
 ```
 
 The repository includes `data/demo_three_targets.csv` illustrating a simple
 three-target run.
+
+If ``run_label`` is omitted, the planner uses ``"hybrid"`` (the default
+priority strategy) and filenames like
+``lsst_twilight_plan_hybrid_<start>_to_<end>.csv`` are produced.
 
 ## Outputs
 

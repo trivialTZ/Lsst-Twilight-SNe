@@ -28,7 +28,7 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 ### Outputs
 
 - Per-SN plan CSV (one row per scheduled visit). Represents the **best-in-theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on-sky order.
-- True sequence CSV `lsst_twilight_sequence_true_<start>_to_<end>.csv` — **true, non-overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); `preferred_best_utc` records the original preference. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi-filter visits are a single row).
+- True sequence CSV `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv` — **true, non-overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); `preferred_best_utc` records the original preference. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi-filter visits are a single row).
 - Per-night summary CSV (morning/evening window statistics).
 - Optional SNANA SIMLIB file for simulations.
 
@@ -83,21 +83,26 @@ For each window index `idx_w` present that night:
 6. **Restore exposures if overridden**: if an exposure ladder was applied for this window, revert to the original `cfg.exposure_by_filter`.
 
 ### 4. Outputs
-- **Per-SN CSV**: `lsst_twilight_plan_<start>_to_<end>.csv`
+- **Per-SN CSV**: `lsst_twilight_plan_<run_label>_<start>_to_<end>.csv`
   One row per scheduled visit with date, window, best time, filter, `t_exp_s`, airmass/altitude, sky brightness, photometric terms (`ZPT`, `SKYSIG`, `NEA`, `RDNOISE`, `GAIN`), saturation/non-linear flags, priority, and time breakdown (slew/readout/exposure/filter changes/total). Represents the **best-in-theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on-sky order.
-- **True sequence CSV**: `lsst_twilight_sequence_true_<start>_to_<end>.csv`
+- **True sequence CSV**: `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv`
   **True, non-overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is stored in `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi-filter visits are a single row).
-- **Per-night summary CSV**: `lsst_twilight_summary_<start>_to_<end>.csv`
+- **Per-night summary CSV**: `lsst_twilight_summary_<run_label>_<start>_to_<end>.csv`
   One row per window: candidate/planned counts, time usage vs. cap, swap counts, internal filter changes, mean slew, median airmass, loaded filters, actually used filters.
 - **SIMLIB (optional)**: if `SIMLIB_OUT` is set, a SNANA-compatible library with all `EPOCH`s is produced.
+
+In all of the above, ``<run_label>`` defaults to ``hybrid`` matching the
+default priority strategy.
 
 ---
 
 ## Notebook Parameter Highlights
 
-- **Date range (UTC):**  
+- **Date range (UTC):**
   `START_DATE="2024-01-01"`, `END_DATE="2024-01-03"` — a short window for quick iteration and validation.
-- **Site:**  
+- **Run label:**
+  `RUN_LABEL=None` — optional tag inserted into output filenames (e.g., "hybrid_strategy").
+- **Site:**
   `LAT_DEG=-30.2446`, `LON_DEG=-70.7494`, `HEIGHT_M=2663` — Rubin site; required for correct twilight and airmass calculations.
 - **Visibility:**  
   `MIN_ALT_DEG=20.0` — avoids the worst airmass while keeping more sky accessible in twilight.
