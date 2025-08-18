@@ -1,4 +1,6 @@
-import pathlib, sys
+import pathlib
+import sys
+
 import pytest
 
 # ensure package root

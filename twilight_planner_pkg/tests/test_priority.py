@@ -1,4 +1,5 @@
-import pathlib, sys
+import pathlib
+import sys
 
 # Ensure package root is importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
@@ -7,8 +8,9 @@ from twilight_planner_pkg.priority import PriorityTracker
 
 
 def tracker():
-    return PriorityTracker(hybrid_detections=2, hybrid_exposure_s=300,
-                           lc_detections=5, lc_exposure_s=300)
+    return PriorityTracker(
+        hybrid_detections=2, hybrid_exposure_s=300, lc_detections=5, lc_exposure_s=300
+    )
 
 
 def test_non_ia_drops_after_hybrid():

@@ -1,14 +1,16 @@
-import pathlib, sys
+import pathlib
+import sys
+
 import pandas as pd
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from twilight_planner_pkg.filter_policy import allowed_filters_for_window
-from twilight_planner_pkg.constraints import effective_min_sep
-from twilight_planner_pkg.astro_utils import ra_delta_shortest_deg, great_circle_sep_deg
-from twilight_planner_pkg.io_utils import standardize_columns
+from twilight_planner_pkg.astro_utils import great_circle_sep_deg, ra_delta_shortest_deg
 from twilight_planner_pkg.config import PlannerConfig
+from twilight_planner_pkg.constraints import effective_min_sep
+from twilight_planner_pkg.filter_policy import allowed_filters_for_window
+from twilight_planner_pkg.io_utils import standardize_columns
 
 
 def test_sun_alt_monotonic():
@@ -37,7 +39,9 @@ def test_ra_wrap_shortest():
 
 
 def test_no_dec_clamp():
-    df = pd.DataFrame({"ra": [0.0], "dec": [93.0], "name": ["SNX"], "discoverydate": [60000.0]})
+    df = pd.DataFrame(
+        {"ra": [0.0], "dec": [93.0], "name": ["SNX"], "discoverydate": [60000.0]}
+    )
     with pytest.raises(ValueError):
         standardize_columns(df, PlannerConfig())
 

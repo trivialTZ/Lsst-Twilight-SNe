@@ -3,25 +3,23 @@ import sys
 
 import numpy as np
 import pandas as pd
-from astropy.time import Time
-from datetime import timezone
-import warnings
 import pytest
+from astropy.time import Time
 
 # Ensure package root is importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
+from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.io_utils import (
+    _infer_units,
+    _parse_dec_value,
+    _parse_discovery_to_datetime,
+    _parse_ra_value,
+    normalize_ra_dec_to_degrees,
     resolve_columns,
     standardize_columns,
-    _parse_ra_value,
-    _parse_dec_value,
-    normalize_ra_dec_to_degrees,
-    _infer_units,
     unit_report_from_df,
-    _parse_discovery_to_datetime,
 )
-from twilight_planner_pkg.config import PlannerConfig
 
 
 def cfg():
@@ -29,7 +27,11 @@ def cfg():
 
 
 def test_resolve_and_standardize_with_csv():
-    data_path = pathlib.Path(__file__).resolve().parents[2] / "data" / "ATLAS_2021_to25_cleaned.csv"
+    data_path = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "data"
+        / "ATLAS_2021_to25_cleaned.csv"
+    )
     df = pd.read_csv(data_path)
     ra_col, dec_col, disc_col, name_col, type_col = resolve_columns(df, cfg())
     assert (ra_col, dec_col, disc_col, name_col, type_col) == (
@@ -66,7 +68,9 @@ def test_normalize_ra_dec_to_degrees():
     assert np.allclose(out_hr["RA_deg"], [15.0, 30.0])
     assert np.allclose(out_hr["Dec_deg"], [-5.0, 5.0])
 
-    df_rad = pd.DataFrame({"ra": ["0.523 rad", "1.047 rad"], "dec": ["-0.523 rad", "0.523 rad"]})
+    df_rad = pd.DataFrame(
+        {"ra": ["0.523 rad", "1.047 rad"], "dec": ["-0.523 rad", "0.523 rad"]}
+    )
     out_rad = normalize_ra_dec_to_degrees(df_rad, "ra", "dec")
     assert np.allclose(out_rad["RA_deg"], [30.0, 60.0], atol=0.05)
     assert np.allclose(out_rad["Dec_deg"], [-30.0, 30.0], atol=0.05)
@@ -100,14 +104,20 @@ def test_parse_discovery_to_datetime():
     mjd_series = pd.Series([60000.0, 60001.0])
     orig_to_datetime = Time.to_datetime
     import datetime as datetime_module
+
     def _patched(self, timezone=None):
         if isinstance(timezone, str) and timezone.lower() == "utc":
             timezone = datetime_module.timezone.utc
         return orig_to_datetime(self, timezone=timezone)
+
     Time.to_datetime = _patched
     try:
         mjd_parsed = _parse_discovery_to_datetime(mjd_series)
-        expected_mjd = pd.Series(Time([60000.0, 60001.0], format="mjd").to_datetime(timezone=datetime_module.timezone.utc))
+        expected_mjd = pd.Series(
+            Time([60000.0, 60001.0], format="mjd").to_datetime(
+                timezone=datetime_module.timezone.utc
+            )
+        )
     finally:
         Time.to_datetime = orig_to_datetime
     mjd_parsed = pd.to_datetime(mjd_parsed, utc=True)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Literal, Optional, Set
 
 from .constraints import effective_min_sep
 
@@ -31,6 +31,8 @@ class _SNHistory:
     escalated : bool
         Flag indicating whether the target has progressed to the light-curve
         strategy stage.
+    last_seen_mjd : float or None
+        MJD of the most recent observation across all filters.
     """
 
     detections: int = 0
@@ -39,6 +41,8 @@ class _SNHistory:
     escalated: bool = False
     # Last observation MJD per filter for cadence enforcement
     last_mjd_by_filter: Dict[str, float] = field(default_factory=dict)
+    # Last observation regardless of filter for unique-first strategy
+    last_seen_mjd: Optional[float] = None
 
 
 @dataclass
@@ -47,15 +51,17 @@ class PriorityTracker:
 
     ``detections`` counts the number of individual filter exposures recorded
     for the SN.  The :meth:`score` method returns ``1.0`` when a supernova still
-    requires attention under the current strategy (Hybrid or light-curve) and
-    ``0.0`` once the respective goal has been satisfied.  :meth:`peek_score`
-    provides the same evaluation without mutating the internal state.
+    requires attention under the current strategy (Hybrid, light-curve, or
+    unique-first) and ``0.0`` once the respective goal has been satisfied.
+    :meth:`peek_score` provides the same evaluation without mutating the
+    internal state.
     """
 
     hybrid_detections: int = 2
     hybrid_exposure_s: float = 300.0
     lc_detections: int = 5
     lc_exposure_s: float = 300.0
+    unique_lookback_days: float = 999.0
     history: Dict[str, _SNHistory] = field(default_factory=dict)
 
     def record_detection(
@@ -94,6 +100,7 @@ class PriorityTracker:
         if mjd is not None:
             for f in filters:
                 hist.last_mjd_by_filter[f] = mjd
+            hist.last_seen_mjd = mjd
 
     # alias for clarity
     update = record_detection
@@ -168,7 +175,11 @@ class PriorityTracker:
         return float(weight * math.exp(-0.5 * ((delta - target_d) / sigma_d) ** 2))
 
     def _score(
-        self, hist: _SNHistory, sn_type: Optional[str], strategy: str, mutate: bool
+        self,
+        hist: _SNHistory,
+        sn_type: Optional[str],
+        strategy: Literal["hybrid", "lc", "unique_first"],
+        mutate: bool,
     ) -> float:
         """Internal helper implementing the priority scoring rules.
 
@@ -178,7 +189,7 @@ class PriorityTracker:
             Detection history for the supernova.
         sn_type : str or None
             Classification string (e.g., ``'Ia'``) used to decide escalation.
-        strategy : {'hybrid', 'lc'}
+        strategy : {'hybrid', 'lc', 'unique_first'}
             Current observing strategy.
         mutate : bool
             If ``True``, ``hist`` may be modified (e.g., ``escalated`` flag).
@@ -194,6 +205,11 @@ class PriorityTracker:
         When ``mutate`` is ``True`` the ``escalated`` field of ``hist`` can be
         updated as side effect.
         """
+
+        if strategy == "unique_first":
+            # TODO: when a current time is available, compare against
+            # ``last_seen_mjd`` and ``unique_lookback_days``.
+            return 1.0 if hist.detections == 0 else 0.0
 
         escalated = hist.escalated or strategy == "lc"
         if strategy == "lc" and mutate:
@@ -217,7 +233,10 @@ class PriorityTracker:
         return 0.0 if met_lc else 1.0
 
     def score(
-        self, name: str, sn_type: Optional[str] = None, strategy: str = "hybrid"
+        self,
+        name: str,
+        sn_type: Optional[str] = None,
+        strategy: Literal["hybrid", "lc", "unique_first"] = "hybrid",
     ) -> float:
         """Return the priority score for a supernova and update its state.
 
@@ -227,7 +246,7 @@ class PriorityTracker:
             Supernova identifier.
         sn_type : str, optional
             Classification string; used to determine escalation policy.
-        strategy : {'hybrid', 'lc'}, default 'hybrid'
+        strategy : {'hybrid', 'lc', 'unique_first'}, default 'hybrid'
             Observing strategy stage.
 
         Returns
@@ -243,7 +262,10 @@ class PriorityTracker:
         return self._score(hist, sn_type, strategy, mutate=True)
 
     def peek_score(
-        self, name: str, sn_type: Optional[str] = None, strategy: str = "hybrid"
+        self,
+        name: str,
+        sn_type: Optional[str] = None,
+        strategy: Literal["hybrid", "lc", "unique_first"] = "hybrid",
     ) -> float:
         """Compute the priority score without mutating state.
 
@@ -253,7 +275,7 @@ class PriorityTracker:
             Supernova identifier.
         sn_type : str, optional
             Classification string; used to determine escalation policy.
-        strategy : {'hybrid', 'lc'}, default 'hybrid'
+        strategy : {'hybrid', 'lc', 'unique_first'}, default 'hybrid'
             Observing strategy stage.
 
         Returns
@@ -269,7 +291,12 @@ class PriorityTracker:
         hist = self.history.setdefault(name, _SNHistory())
         # Work on a shallow copy so the caller does not see side effects
         tmp = _SNHistory(
-            hist.detections, hist.exposure_s, set(hist.filters), hist.escalated
+            hist.detections,
+            hist.exposure_s,
+            set(hist.filters),
+            hist.escalated,
+            dict(hist.last_mjd_by_filter),
+            hist.last_seen_mjd,
         )
         return self._score(tmp, sn_type, strategy, mutate=False)
 

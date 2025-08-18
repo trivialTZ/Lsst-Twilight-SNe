@@ -1,4 +1,5 @@
 """Filter selection policy driven by a simple m5/SNR model."""
+
 from __future__ import annotations
 
 from typing import Dict, List
@@ -52,8 +53,11 @@ def predict_m5(
     sun_term = max(0.0, sun_alt_deg + 12.0)
     factors = {"g": 0.35, "r": 0.30, "i": 0.15, "z": 0.10, "y": 0.05}
     sun_penalty = sun_term * factors.get(filt, 0.2)
-    moon_penalty = 3.0 * moon_phase * max(0.0, 1.0 - moon_sep_deg / 90.0) * moon_separation_factor(
-        moon_alt_deg, moon_phase
+    moon_penalty = (
+        3.0
+        * moon_phase
+        * max(0.0, 1.0 - moon_sep_deg / 90.0)
+        * moon_separation_factor(moon_alt_deg, moon_phase)
     )
     return BASE_M5.get(filt, 23.0) - sun_penalty - moon_penalty
 

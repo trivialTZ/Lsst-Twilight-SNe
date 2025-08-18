@@ -132,7 +132,7 @@ Create `twilight_planner_pkg/tests/test_strategy_unique_first.py` with **small, 
 
 ---
 
-**Status:** Planned ☐
+**Status:** Done ☑
 
 ---
 

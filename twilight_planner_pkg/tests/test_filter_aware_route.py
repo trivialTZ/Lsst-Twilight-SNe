@@ -1,34 +1,46 @@
-import pathlib, sys
+import pathlib
+import sys
+
 import numpy as np
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.astro_utils import (
-    slew_time_seconds,
-    great_circle_sep_deg,
     choose_filters_with_cap,
+    great_circle_sep_deg,
+    slew_time_seconds,
 )
+from twilight_planner_pkg.config import PlannerConfig
+
 
 def test_filter_aware_cost_prefers_same_filter():
     cfg = PlannerConfig()
     prev = {"RA_deg": 0.0, "Dec_deg": 0.0, "first_filter": "z"}
     target_diff = {"RA_deg": 1.0, "Dec_deg": 0.0, "first_filter": "i"}
     target_same = {"RA_deg": 1.5, "Dec_deg": 0.0, "first_filter": "z"}
-    sep_diff = great_circle_sep_deg(prev["RA_deg"], prev["Dec_deg"], target_diff["RA_deg"], target_diff["Dec_deg"])
-    sep_same = great_circle_sep_deg(prev["RA_deg"], prev["Dec_deg"], target_same["RA_deg"], target_same["Dec_deg"])
-    cost_diff = slew_time_seconds(
-        sep_diff,
+    sep_diff = great_circle_sep_deg(
+        prev["RA_deg"], prev["Dec_deg"], target_diff["RA_deg"], target_diff["Dec_deg"]
+    )
+    sep_same = great_circle_sep_deg(
+        prev["RA_deg"], prev["Dec_deg"], target_same["RA_deg"], target_same["Dec_deg"]
+    )
+    cost_diff = (
+        slew_time_seconds(
+            sep_diff,
+            small_deg=cfg.slew_small_deg,
+            small_time=cfg.slew_small_time_s,
+            rate_deg_per_s=cfg.slew_rate_deg_per_s,
+            settle_s=cfg.slew_settle_s,
+        )
+        + cfg.filter_change_s
+    )
+    cost_same = slew_time_seconds(
+        sep_same,
         small_deg=cfg.slew_small_deg,
         small_time=cfg.slew_small_time_s,
         rate_deg_per_s=cfg.slew_rate_deg_per_s,
         settle_s=cfg.slew_settle_s,
-    ) + cfg.filter_change_s
-    cost_same = slew_time_seconds(sep_same,
-                                  small_deg=cfg.slew_small_deg,
-                                  small_time=cfg.slew_small_time_s,
-                                  rate_deg_per_s=cfg.slew_rate_deg_per_s,
-                                  settle_s=cfg.slew_settle_s)
+    )
     assert cost_same < cost_diff
 
 
@@ -45,7 +57,9 @@ def test_routing_groups_same_filters_and_counts_swaps():
     order_naive = [current["Name"]]
     while remaining:
         dists = [
-            great_circle_sep_deg(current["RA_deg"], current["Dec_deg"], t["RA_deg"], t["Dec_deg"])
+            great_circle_sep_deg(
+                current["RA_deg"], current["Dec_deg"], t["RA_deg"], t["Dec_deg"]
+            )
             for t in remaining
         ]
         j = int(np.argmin(dists))
@@ -62,7 +76,9 @@ def test_routing_groups_same_filters_and_counts_swaps():
     while remaining:
         costs = []
         for t in remaining:
-            sep = great_circle_sep_deg(current["RA_deg"], current["Dec_deg"], t["RA_deg"], t["Dec_deg"])
+            sep = great_circle_sep_deg(
+                current["RA_deg"], current["Dec_deg"], t["RA_deg"], t["Dec_deg"]
+            )
             cost = slew_time_seconds(
                 sep,
                 small_deg=cfg.slew_small_deg,
@@ -75,8 +91,12 @@ def test_routing_groups_same_filters_and_counts_swaps():
             costs.append(cost)
         j = int(np.argmin(costs))
         t = remaining.pop(j)
-        sep = great_circle_sep_deg(current["RA_deg"], current["Dec_deg"], t["RA_deg"], t["Dec_deg"])
-        used, timing = choose_filters_with_cap([t["first_filter"]], sep, 1000.0, cfg, current_filter=state)
+        sep = great_circle_sep_deg(
+            current["RA_deg"], current["Dec_deg"], t["RA_deg"], t["Dec_deg"]
+        )
+        used, timing = choose_filters_with_cap(
+            [t["first_filter"]], sep, 1000.0, cfg, current_filter=state
+        )
         if state is not None and used[0] != state:
             swap_count += 1
         state = used[-1]

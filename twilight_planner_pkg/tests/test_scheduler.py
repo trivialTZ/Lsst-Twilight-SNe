@@ -164,6 +164,8 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         "twilight_window",
         "n_candidates",
         "n_planned",
+        "unique_targets_observed",
+        "repeat_fraction",
         "sum_time_s",
         "window_cap_s",
     }

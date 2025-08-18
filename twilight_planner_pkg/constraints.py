@@ -1,7 +1,9 @@
 """Observation constraint utilities."""
+
 from __future__ import annotations
 
 from typing import Dict
+
 import numpy as np
 
 BASE_MIN_SEP: Dict[str, float] = {"g": 30.0, "r": 25.0, "i": 20.0, "z": 15.0, "y": 10.0}

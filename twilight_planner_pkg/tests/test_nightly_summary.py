@@ -80,3 +80,5 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
     assert row["window_duration_s"] == 1800
     assert row["cap_source"] == "morning_cap_s"
     assert row["median_alt_deg"] == pytest.approx(pernight["alt_deg"].median())
+    assert row["unique_targets_observed"] == row["n_planned"]
+    assert row["repeat_fraction"] == 0.0
