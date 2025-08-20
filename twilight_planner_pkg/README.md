@@ -118,7 +118,11 @@ used for the filename prefix.
 > - Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
 
 ### Twilight Windows & Best Time
-- Twilight windows are spans with Sun altitude $h_\odot \in [\texttt{twilight\_sun\_alt\_min\_deg},\texttt{twilight\_sun\_alt\_max\_deg})$ (defaults −18° to 0°)
+- Twilight windows are spans with Sun altitude
+```math
+ h_\odot \in [\texttt{twilight\_sun\_alt\_min\_deg},\texttt{twilight\_sun\_alt\_max\_deg})]
+```
+(defaults −18° to 0°)
 - Sample each window every `twilight_step_min` minutes
 - For each SN, choose the time of maximum altitude that passes altitude and Moon constraints (below)
 
