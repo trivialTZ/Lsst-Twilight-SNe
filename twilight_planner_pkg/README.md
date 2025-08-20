@@ -22,10 +22,13 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --evening-twilight 18:00 --morning-twilight 05:00 \
     --filters griz --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap auto --morning_cap auto \
-    --per_sn_cap 120 --max_sn 10 --strategy hybrid \
+    --per_sn_cap 120 --max_sn inf --strategy hybrid \
     --hybrid-detections 2 --hybrid-exposure 300 \
     --simlib-out results/night.SIMLIB --simlib-survey LSST_TWILIGHT
 ```
+
+``--max_sn`` accepts numbers or "inf"/"none"/"unlimited"; the default is
+unlimited and lets per-window time caps govern the final count.
 
 To force LSST-only light curves for all SNe:
 
@@ -45,7 +48,10 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
    - If Type Ia: escalate to the light‑curve goal
    - Else: drop priority (reallocate time)
 3. **LSST‑only light curves** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
-4. **`unique_first`** — maximize distinct SNe per night; repeats suppressed (lookback default 999 d)
+4. **`unique_first`** — maximize distinct SNe per night; repeats get a negative
+   score after the first detection (dropped before capping). After
+   ``unique_lookback_days`` the optional ``unique_first_resume_score`` can revive
+   targets. Default lookback is 999 d.
 
 `unique_first_fill_with_color` is a placeholder knob for a future second pass that would add color to unique-first selections.
 
@@ -118,7 +124,9 @@ used for the filename prefix.
 
 ### Selection & Scheduling
 - Rank visible SNe by need score (how far from meeting the current goal) and altitude
-- Keep the top `max_sn_per_night` globally; split by window (0=morning, 1=evening)
+- Rank by priority/altitude, drop non‑positive scores for ``unique_first``, then
+- apply a stratified cap per twilight window based on ``max_sn_per_night``
+  (default infinity).
 - Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
 - Enforce window caps (`morning_cap_s`, `evening_cap_s`, default "auto" uses window duration) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
 

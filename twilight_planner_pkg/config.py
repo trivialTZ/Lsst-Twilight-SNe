@@ -8,6 +8,7 @@ at Cerro Pach\u00f3n and can be customised for testing purposes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import inf
 from typing import Dict, List, Literal, Optional, Tuple
 
 
@@ -101,7 +102,7 @@ class PlannerConfig:
     evening_twilight: str | None = None
 
     twilight_step_min: int = 2
-    max_sn_per_night: int = 20
+    max_sn_per_night: float | int = inf
 
     # -- Priority tracking -------------------------------------------------
     hybrid_detections: int = 2
@@ -111,6 +112,10 @@ class PlannerConfig:
     priority_strategy: str = "hybrid"
     unique_first_fill_with_color: bool = True
     unique_lookback_days: float = 999.0
+    unique_first_drop_threshold: float = 0.0
+    """Drop `unique_first` rows with score <= this threshold."""
+    unique_first_resume_score: float = 0.0
+    """Score used after lookback days if repeats are allowed again."""
 
     # -- Cadence ----------------------------------------------------------
     cadence_enable: bool = True

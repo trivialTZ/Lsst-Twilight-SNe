@@ -62,6 +62,7 @@ class PriorityTracker:
     lc_detections: int = 5
     lc_exposure_s: float = 300.0
     unique_lookback_days: float = 999.0
+    unique_first_resume_score: float = 0.0
     history: Dict[str, _SNHistory] = field(default_factory=dict)
 
     def record_detection(
@@ -180,8 +181,16 @@ class PriorityTracker:
         sn_type: Optional[str],
         strategy: Literal["hybrid", "lc", "unique_first"],
         mutate: bool,
+        now_mjd: Optional[float] = None,
     ) -> float:
         """Internal helper implementing the priority scoring rules.
+
+        For ``unique_first``, return ``1.0`` until the first successful
+        detection is recorded; thereafter return a negative score so the
+        scheduler can drop the supernova before applying any global caps. If
+        a current MJD is provided and the elapsed time since the last visit
+        exceeds ``unique_lookback_days``, ``unique_first_resume_score`` is
+        returned instead, allowing opt-in repeats.
 
         Parameters
         ----------
@@ -207,9 +216,17 @@ class PriorityTracker:
         """
 
         if strategy == "unique_first":
-            # TODO: when a current time is available, compare against
-            # ``last_seen_mjd`` and ``unique_lookback_days``.
-            return 1.0 if hist.detections == 0 else 0.0
+            # Unseen objects get a positive score so they can be scheduled.
+            if hist.detections == 0:
+                return 1.0
+            # Optionally allow repeats after a lookback interval.
+            if now_mjd is not None and self.unique_lookback_days is not None:
+                last = hist.last_seen_mjd
+                if last is not None and (now_mjd - last) > self.unique_lookback_days:
+                    return float(self.unique_first_resume_score)
+            # Otherwise return a negative score so the scheduler can drop it
+            # before applying any caps.
+            return -1.0
 
         escalated = hist.escalated or strategy == "lc"
         if strategy == "lc" and mutate:
@@ -237,6 +254,7 @@ class PriorityTracker:
         name: str,
         sn_type: Optional[str] = None,
         strategy: Literal["hybrid", "lc", "unique_first"] = "hybrid",
+        now_mjd: Optional[float] = None,
     ) -> float:
         """Return the priority score for a supernova and update its state.
 
@@ -248,6 +266,8 @@ class PriorityTracker:
             Classification string; used to determine escalation policy.
         strategy : {'hybrid', 'lc', 'unique_first'}, default 'hybrid'
             Observing strategy stage.
+        now_mjd : float, optional
+            Current MJD used for the ``unique_first`` lookback evaluation.
 
         Returns
         -------
@@ -259,13 +279,14 @@ class PriorityTracker:
         Calling this method mutates the internal history for ``name``.
         """
         hist = self.history.setdefault(name, _SNHistory())
-        return self._score(hist, sn_type, strategy, mutate=True)
+        return self._score(hist, sn_type, strategy, mutate=True, now_mjd=now_mjd)
 
     def peek_score(
         self,
         name: str,
         sn_type: Optional[str] = None,
         strategy: Literal["hybrid", "lc", "unique_first"] = "hybrid",
+        now_mjd: Optional[float] = None,
     ) -> float:
         """Compute the priority score without mutating state.
 
@@ -298,7 +319,7 @@ class PriorityTracker:
             dict(hist.last_mjd_by_filter),
             hist.last_seen_mjd,
         )
-        return self._score(tmp, sn_type, strategy, mutate=False)
+        return self._score(tmp, sn_type, strategy, mutate=False, now_mjd=now_mjd)
 
 
 def apply_moon_penalty(

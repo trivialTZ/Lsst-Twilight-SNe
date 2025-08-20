@@ -8,7 +8,10 @@ from pathlib import Path
 import pandas as pd
 
 from twilight_planner_pkg.config import PlannerConfig
-from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
+from twilight_planner_pkg.scheduler import (
+    _cap_candidates_per_window,
+    plan_twilight_range_with_caps,
+)
 
 
 def _make_subset_csv(src: Path, out: Path, n: int = 3) -> Path:
@@ -616,3 +619,82 @@ def test_default_run_label_hybrid(tmp_path, monkeypatch):
     summary_path = tmp_path / f"lsst_twilight_summary_hybrid_{start}_to_{end}.csv"
     assert plan_path.exists()
     assert summary_path.exists()
+
+
+def test_cap_candidates_per_window_quota_and_topup() -> None:
+    """Evening/morning quotas are respected with top-up."""
+
+    df = pd.DataFrame(
+        {
+            "best_window_index": [0, 0, 0, 1, 1, 1],
+            "priority_score": [6, 5, 4, 6, 5, 4],
+            "max_alt_deg": [80] * 6,
+        }
+    ).sort_values(["priority_score", "max_alt_deg"], ascending=[False, False])
+
+    class Cfg:
+        max_sn_per_night = 4
+
+    res, diag = _cap_candidates_per_window(df, Cfg(), 60.0, 30.0)
+    assert len(res) == 4
+    assert (res["best_window_index"] == 0).sum() == 3
+    assert (res["best_window_index"] == 1).sum() == 1
+    assert diag["quota_evening"] == 3
+    assert diag["quota_morning"] == 1
+
+    df2 = pd.DataFrame(
+        {
+            "best_window_index": [0, 1, 1, 1, 1],
+            "priority_score": [6, 6, 5, 4, 3],
+            "max_alt_deg": [80] * 5,
+        }
+    ).sort_values(["priority_score", "max_alt_deg"], ascending=[False, False])
+
+    res2, diag2 = _cap_candidates_per_window(df2, Cfg(), 60.0, 60.0)
+    assert len(res2) == 4
+    # evening has only one candidate; morning tops up
+    assert (res2["best_window_index"] == 1).sum() == 3
+    assert diag2["quota_evening"] == 2
+    assert diag2["quota_morning"] == 2
+
+
+def test_cap_candidates_per_window_unlimited() -> None:
+    """Infinity limit returns all rows."""
+
+    df = pd.DataFrame(
+        {
+            "best_window_index": [0, 1, 0],
+            "priority_score": [3, 2, 1],
+            "max_alt_deg": [80, 80, 80],
+        }
+    )
+
+    class Cfg:
+        max_sn_per_night = float("inf")
+
+    res, diag = _cap_candidates_per_window(df, Cfg(), 10.0, 10.0)
+    assert len(res) == len(df)
+    assert diag["post_total"] == len(df)
+
+
+def test_cap_candidates_per_window_single_window() -> None:
+    """When only one window is present, all quota goes to that window."""
+
+    df = pd.DataFrame(
+        {
+            "best_window_index": [1, 1, 1, 1, 1],
+            "priority_score": [5, 4, 3, 2, 1],
+            "max_alt_deg": [80] * 5,
+        }
+    ).sort_values(["priority_score", "max_alt_deg"], ascending=[False, False])
+
+    class Cfg:
+        max_sn_per_night = 3
+
+    out, diag = _cap_candidates_per_window(
+        df, Cfg(), evening_cap_s=0.0, morning_cap_s=120.0
+    )
+    assert len(out) == 3
+    assert (out["best_window_index"] == 1).all()
+    assert diag["quota_evening"] == 0
+    assert diag["quota_morning"] == 3
