@@ -27,23 +27,29 @@ module documentation.
 
 ## Twilight strategy highlights
 
-The planner follows a Sun-altitude policy inspired by twilight brightness:
+The planner follows a Sun-altitude policy inspired by twilight brightness.
+Redder filters cope better with bright twilight, while the ``g`` band is only
+considered in the darkest conditions:
 
-| Sun altitude (deg) | Allowed filters |
-|--------------------|-----------------|
-| -18 to -15         | y, z, i         |
-| -15 to -12         | z, i, r         |
-| -12 to 0           | i, z, y         |
+| Sun altitude (deg) | Allowed filters         |
+|--------------------|-------------------------|
+| -18 to -15         | g, r, i, z, y           |
+| -15 to -12         | r, i, z, y              |
+| -12 to 0           | i, r, z, y              |
 
-This mapping is configurable via `PlannerConfig.sun_alt_policy`.
+This mapping is configurable via `PlannerConfig.sun_alt_policy`, and
+`allowed_filters_for_window` adds a filter-specific 5σ/m₅ gate with extra
+headroom for ``g`` when the Sun is between −15° and −12°.
 
-LSST's filter carousel can host at most five filters per night.  Cross-target
-swaps incur a 120 s cost and additional in-visit filter changes add the same
-overhead.  Readout time is 2 s per exposure and slews follow a hybrid model
-(`3.5° in 4 s` plus `5.25°/s`).
+LSST's filter carousel can host at most five filters per night. Cross-target
+swaps incur a 120 s cost, amortized across same-filter batches and scaled down
+when the new filter supplies a missing color. Palette rotation (separate
+evening and morning cycles) and a per-window swap cap further discourage
+unnecessary filter changes. Readout time is 2 s per exposure and slews follow a
+hybrid model (``3.5° in 4 s`` plus ``5.25°/s``).
 
 Moon–target separations use Astropy's `get_body('moon')` in a shared AltAz
-frame.  If the Moon is below the horizon, the separation requirement is
+frame. If the Moon is below the horizon, the separation requirement is
 automatically waived.
 
 ### Cadence constraint (per-filter)

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Set
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
 from .constraints import effective_min_sep
 
@@ -43,6 +43,8 @@ class _SNHistory:
     last_mjd_by_filter: Dict[str, float] = field(default_factory=dict)
     # Last observation regardless of filter for unique-first strategy
     last_seen_mjd: Optional[float] = None
+    # Full visit log of (mjd, filter)
+    visits: List[Tuple[float, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -64,6 +66,104 @@ class PriorityTracker:
     unique_lookback_days: float = 999.0
     unique_first_resume_score: float = 0.0
     history: Dict[str, _SNHistory] = field(default_factory=dict)
+
+    BLUE = {"g", "r"}
+    RED = {"i", "z", "y"}
+
+    def color_counts(
+        self, name: str, now_mjd: float, window_days: float
+    ) -> tuple[int, int]:
+        """Return (#blue, #red) visits within ``[now - window_days, now]``."""
+        hist = self.history.get(name)
+        if not hist or not hist.visits:
+            return (0, 0)
+        start = now_mjd - window_days
+        blue = 0
+        red = 0
+        for mjd, filt in hist.visits:
+            if mjd < start or mjd > now_mjd:
+                continue
+            if filt in self.BLUE:
+                blue += 1
+            elif filt in self.RED:
+                red += 1
+        return (blue, red)
+
+    def color_deficit(
+        self, name: str, now_mjd: float, target_pairs: int, window_days: float
+    ) -> tuple[int, int]:
+        """Return deficits in (#blue, #red) pairs relative to ``target_pairs``."""
+        blue, red = self.color_counts(name, now_mjd, window_days)
+        return (target_pairs - blue, target_pairs - red)
+
+    def _has_only_blue_or_red(self, name: str) -> tuple[bool, Optional[str]]:
+        """Return flag and colour group if only blue or only red has been seen."""
+        hist = self.history.get(name)
+        if not hist or not hist.visits:
+            return (False, None)
+        colours = {
+            ("blue" if f in self.BLUE else "red")
+            for _, f in hist.visits
+            if f in (self.BLUE | self.RED)
+        }
+        if colours == {"blue"}:
+            return (True, "blue")
+        if colours == {"red"}:
+            return (True, "red")
+        return (False, None)
+
+    def cosmology_boost(
+        self,
+        name: str,
+        filt: str,
+        now_mjd: float,
+        target_pairs: int,
+        window_days: float,
+        alpha: float,
+    ) -> float:
+        """Return a multiplicative boost >=1.0 favouring the missing colour group."""
+        blue_def, red_def = self.color_deficit(name, now_mjd, target_pairs, window_days)
+        deficit = blue_def if filt in self.BLUE else red_def
+        return float(1.0 + alpha * max(deficit, 0))
+
+    def compute_filter_bonus(
+        self,
+        name: str,
+        filt: str,
+        now_mjd: float,
+        target_d: float,
+        sigma_d: float,
+        cadence_weight: float,
+        first_epoch_weight: float,
+        cosmo_weight_by_filter: Dict[str, float],
+        target_pairs: int,
+        window_days: float,
+        alpha: float,
+        first_epoch_color_boost: float,
+    ) -> float:
+        """Return combined cadence and cosmology bonus for ``filt``."""
+
+        base = self.cadence_bonus(
+            name,
+            filt,
+            now_mjd,
+            target_d,
+            sigma_d,
+            weight=cadence_weight,
+            first_epoch_weight=first_epoch_weight,
+        )
+        cosmo_w = cosmo_weight_by_filter.get(filt, 1.0)
+        boost = self.cosmology_boost(
+            name, filt, now_mjd, target_pairs, window_days, alpha
+        )
+        only_one, which = self._has_only_blue_or_red(name)
+        nudge = 1.0
+        if only_one:
+            if which == "blue" and filt in self.RED:
+                nudge = max(1.0, first_epoch_color_boost)
+            elif which == "red" and filt in self.BLUE:
+                nudge = max(1.0, first_epoch_color_boost)
+        return float(base * cosmo_w * boost * nudge)
 
     def record_detection(
         self,
@@ -101,6 +201,7 @@ class PriorityTracker:
         if mjd is not None:
             for f in filters:
                 hist.last_mjd_by_filter[f] = mjd
+                hist.visits.append((mjd, f))
             hist.last_seen_mjd = mjd
 
     # alias for clarity

@@ -76,10 +76,11 @@ def heuristic_filters_from_sun_alt(sun_alt_deg: float) -> List[str]:
         Filters sorted from most to least preferred under the heuristic
         assumption that redder filters cope better with twilight brightness.
     """
-    if sun_alt_deg > -8:
-        return ["i", "z", "y"]
+    # Redder filters cope better with bright twilight; allow g only when very dark.
+    if sun_alt_deg > -12:
+        return ["i", "r", "z", "y"]
     if sun_alt_deg > -15:
-        return ["r", "i", "z", "y"]
+        return ["r", "i", "z", "y"]  # g generally too bright here unless m5 gate passes
     return ["g", "r", "i", "z", "y"]
 
 
@@ -129,7 +130,13 @@ def allowed_filters_for_window(
             filt, sun_alt_deg, moon_alt_deg, moon_phase, moon_sep_deg, airmass, seeing
         )
         target_mag = target_mag_dict.get(filt, target_mag_dict.get("r", 21.5))
-        if m5 - target_mag >= MARGIN_MAG:
+        margin = MARGIN_MAG
+        if filt == "g":
+            if sun_alt_deg > -12:
+                continue  # never allow g here
+            if sun_alt_deg > -15:
+                margin += 0.3  # require extra headroom for g in brighter twilight
+        if m5 - target_mag >= margin:
             allowed.append(filt)
     if not allowed:
         allowed = heuristic_filters_from_sun_alt(sun_alt_deg)

@@ -358,14 +358,19 @@ def _prepare_window_candidates(
         if cad_on:
             rest = sorted(
                 [f for f in policy_allowed if f != first],
-                key=lambda f: tracker.cadence_bonus(
+                key=lambda f: tracker.compute_filter_bonus(
                     row["Name"],
                     f,
                     now_mjd_for_bonus,
                     cad_tgt,
                     cad_sig,
-                    weight=cad_wt,
-                    first_epoch_weight=cad_first,
+                    cad_wt,
+                    cad_first,
+                    cfg.cosmo_weight_by_filter,
+                    cfg.color_target_pairs,
+                    cfg.color_window_days,
+                    cfg.color_alpha,
+                    cfg.first_epoch_color_boost,
                 ),
                 reverse=True,
             )
@@ -469,25 +474,44 @@ def _attempt_schedule_one(
             return False, {}
 
         def _bonus(f: str) -> float:
-            return tracker.cadence_bonus(
+            return tracker.compute_filter_bonus(
                 t["Name"],
                 f,
                 now_mjd,
                 cad_tgt,
                 cad_sig,
-                weight=cad_wt,
-                first_epoch_weight=cad_first,
+                cad_wt,
+                cad_first,
+                cfg.cosmo_weight_by_filter,
+                cfg.color_target_pairs,
+                cfg.color_window_days,
+                cfg.color_alpha,
+                cfg.first_epoch_color_boost,
             )
 
         first = (
             t["first_filter"] if t["first_filter"] in gated else max(gated, key=_bonus)
         )
         rest = sorted([f for f in gated if f != first], key=_bonus, reverse=True)
-        filters_pref = ([first] + rest)[: int(cfg.max_filters_per_visit)]
+        filters_pref = [first]
+        if int(cfg.max_filters_per_visit) >= 2 and rest:
+            opp = tracker.RED if first in tracker.BLUE else tracker.BLUE
+            second = next((f for f in rest if f in opp), rest[0])
+            filters_pref.append(second)
+            rest = [f for f in rest if f != second]
+        filters_pref.extend(rest)
+        filters_pref = filters_pref[: int(cfg.max_filters_per_visit)]
     else:
-        filters_pref = (
-            [t["first_filter"]] + [f for f in t["allowed"] if f != t["first_filter"]]
-        )[: int(cfg.max_filters_per_visit)]
+        filters_pref = [t["first_filter"]] + [
+            f for f in t["allowed"] if f != t["first_filter"]
+        ]
+        if int(cfg.max_filters_per_visit) >= 2 and len(filters_pref) > 1:
+            first = filters_pref[0]
+            rest = filters_pref[1:]
+            opp = tracker.RED if first in tracker.BLUE else tracker.BLUE
+            second = next((f for f in rest if f in opp), rest[0])
+            filters_pref = [first, second] + [f for f in rest if f != second]
+        filters_pref = filters_pref[: int(cfg.max_filters_per_visit)]
     filters_used, timing = choose_filters_with_cap(
         filters_pref,
         sep,
@@ -663,10 +687,11 @@ def _attempt_schedule_one(
         }
         pernight_rows.append(row)
 
-    swap_delta = 0
+    swap_count_delta = 0
+    if state is not None and filters_used:
+        if state != filters_used[0]:
+            swap_count_delta = 1
     if filters_used:
-        if state is not None and filters_used[0] != state:
-            swap_delta = 1
         state = filters_used[-1]
 
     summary_updates = {
@@ -676,6 +701,7 @@ def _attempt_schedule_one(
         "slew_time": timing["slew_s"],
         "airmass": air,
         "sky_mags": sky_mags,
+        "swap_count_delta": swap_count_delta,
     }
     tracker.record_detection(
         t["Name"], timing["exposure_s"], filters_used, mjd=visit_mjd
@@ -690,7 +716,6 @@ def _attempt_schedule_one(
             "current_time_utc": sn_end_utc,
             "state_filter": state,
             "prev_target": t,
-            "swap_count_delta": swap_delta,
             "filters_used_set_delta": set(filters_used),
             "order_in_window": order,
             "summary_updates": summary_updates,
@@ -949,7 +974,7 @@ def plan_twilight_range_with_caps(
     )
     tz_local = _local_timezone_from_location(site)
 
-    for day in nights_iter:
+    for day_idx, day in enumerate(nights_iter):
         seen_ids: set[str] = set()
         # Here 'day' is interpreted as *local* civil date of the evening block
         windows = twilight_windows_for_local_night(
@@ -1194,10 +1219,19 @@ def plan_twilight_range_with_caps(
                     cfg.exposure_by_filter = original_exp
                 continue
 
-            batch_order = [
+            pal = (
+                cfg.palette_evening
+                if window_label_out.startswith("evening")
+                else cfg.palette_morning
+            )
+            rot = day_idx % max(cfg.palette_rotation_days, 1)
+            pal_rot = pal[rot:] + pal[:rot]
+            available = {c["first_filter"] for c in candidates}
+            batch_order = [f for f in pal_rot if f in available]
+            batch_order += [
                 f
                 for f in ["y", "z", "i", "r", "g", "u"]
-                if any(c["first_filter"] == f for c in candidates)
+                if f in available and f not in batch_order
             ]
 
             cap_s = window_caps.get(idx_w, 0.0)
@@ -1253,10 +1287,12 @@ def plan_twilight_range_with_caps(
                 state = updates["state_filter"]
                 prev = updates["prev_target"]
                 order_in_window = updates["order_in_window"]
-                swap_count_by_window[idx_w] += updates["swap_count_delta"]
                 current_filter_by_window[idx_w] = state
                 filters_used_set.update(updates["filters_used_set_delta"])
                 summary = updates["summary_updates"]
+                swap_count_by_window[idx_w] = swap_count_by_window.get(
+                    idx_w, 0
+                ) + summary.get("swap_count_delta", 0)
                 internal_changes += summary["internal_changes_delta"]
                 window_filter_change_s += summary["window_filter_change_s_delta"]
                 window_slew_times.append(summary["slew_time"])
@@ -1281,7 +1317,19 @@ def plan_twilight_range_with_caps(
                     for c in candidates
                     if c["first_filter"] == filt and c["Name"] not in seen_ids
                 ]
+                min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
                 while batch:
+                    time_left = float(cap_s - window_sum)
+                    exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
+                    # conservative per-visit wall time used for swap amortization
+                    est_visit_s = (
+                        max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
+                        + cfg.slew_small_time_s
+                        + cfg.slew_settle_s
+                    )
+                    k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
+                    k = max(1, min(len(batch), k_time))
+                    amortized_penalty = cfg.filter_change_s / k
                     # select next target based on filter-aware cost
                     costs: List[float] = []
                     for t in batch:
@@ -1297,14 +1345,19 @@ def plan_twilight_range_with_caps(
                         if gated_for_cost:
 
                             def _bonus_cost(f: str) -> float:
-                                return tracker.cadence_bonus(
+                                return tracker.compute_filter_bonus(
                                     t["Name"],
                                     f,
                                     now_mjd_cost,
                                     cad_tgt,
                                     cad_sig,
-                                    weight=cad_wt,
-                                    first_epoch_weight=cad_first,
+                                    cad_wt,
+                                    cad_first,
+                                    cfg.cosmo_weight_by_filter,
+                                    cfg.color_target_pairs,
+                                    cfg.color_window_days,
+                                    cfg.color_alpha,
+                                    cfg.first_epoch_color_boost,
                                 )
 
                             first_tmp = (
@@ -1334,7 +1387,26 @@ def plan_twilight_range_with_caps(
                         if first_tmp is None:
                             cost = 1e9
                         elif state is not None and state != first_tmp:
-                            cost += cfg.filter_change_s
+                            if swap_count_by_window.get(idx_w, 0) >= int(
+                                getattr(cfg, "max_swaps_per_window", 999)
+                            ):
+                                cost = 1e9
+                            else:
+                                scale = 1.0
+                                if (
+                                    tracker.cosmology_boost(
+                                        t["Name"],
+                                        first_tmp,
+                                        now_mjd_cost,
+                                        cfg.color_target_pairs,
+                                        cfg.color_window_days,
+                                        cfg.color_alpha,
+                                    )
+                                    > 1.0
+                                ):
+                                    scale = cfg.swap_cost_scale_color
+                                penalty = max(amortized_penalty, min_amort) * scale
+                                cost += penalty
                         costs.append(cost)
                     j = int(np.argmin(costs))
                     t = batch.pop(j)
@@ -1365,6 +1437,28 @@ def plan_twilight_range_with_caps(
                 if r["date"] == day.date().isoformat()
                 and r["twilight_window"] == window_label_out
             ]
+            start_mjd = Time(win["start"]).mjd if win["start"] else 0.0
+            end_mjd = Time(win["end"]).mjd if win["end"] else 0.0
+            color_pairs = 0
+            color_div = 0
+            multi_visit = 0
+            for name, hist in tracker.history.items():
+                vis = [
+                    (mjd, filt)
+                    for mjd, filt in hist.visits
+                    if start_mjd <= mjd <= end_mjd
+                ]
+                if not vis:
+                    continue
+                blues = sum(1 for _, f in vis if f in tracker.BLUE)
+                reds = sum(1 for _, f in vis if f in tracker.RED)
+                if len(vis) >= 2:
+                    multi_visit += 1
+                pairs = min(blues, reds)
+                if pairs > 0:
+                    color_div += 1
+                    color_pairs += pairs
+            pct_diff = 100.0 * color_div / max(multi_visit, 1)
             ws_summary = {
                 "window_sum": window_sum,
                 "swap_count": swap_count_by_window.get(idx_w, 0),
@@ -1382,6 +1476,9 @@ def plan_twilight_range_with_caps(
                 ),
                 "n_candidates_pre_cap": pre_counts.get(idx_w, 0),
                 "n_candidates_post_cap": post_counts.get(idx_w, 0),
+                "color_pairs": color_pairs,
+                "color_diversity": color_div,
+                "pct_sne_with_blue_red_pair": pct_diff,
             }
             cap_source = cap_source_by_window.get(idx_w, "none")
             nights_rows.append(

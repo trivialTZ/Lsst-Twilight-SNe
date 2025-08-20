@@ -132,6 +132,17 @@ def test_scheduler_passes_date_to_local_night(monkeypatch, tmp_path):
         sun_alt_policy=[],
         twilight_sun_alt_min_deg=-18.0,
         twilight_sun_alt_max_deg=0.0,
+        cosmo_weight_by_filter={"g": 1.25, "r": 1.10, "i": 1.0},
+        color_window_days=5.0,
+        color_target_pairs=2,
+        color_alpha=0.3,
+        swap_cost_scale_color=0.6,
+        swap_amortize_min=6,
+        palette_rotation_days=4,
+        palette_evening=["i", "r", "z", "i"],
+        palette_morning=["r", "g", "i", "r"],
+        max_swaps_per_window=99,
+        first_epoch_color_boost=1.5,
     )
 
     monkeypatch.setattr(sched, "RubinSkyProvider", lambda *a, **k: None)
@@ -218,6 +229,17 @@ def test_coarse_moon_gate_uses_min(monkeypatch, tmp_path):
         sun_alt_policy=[],
         twilight_sun_alt_min_deg=-18.0,
         twilight_sun_alt_max_deg=0.0,
+        cosmo_weight_by_filter={"g": 1.25, "i": 1.0},
+        color_window_days=5.0,
+        color_target_pairs=2,
+        color_alpha=0.3,
+        swap_cost_scale_color=0.6,
+        swap_amortize_min=6,
+        palette_rotation_days=4,
+        palette_evening=["i", "r", "z", "i"],
+        palette_morning=["r", "g", "i", "r"],
+        max_swaps_per_window=99,
+        first_epoch_color_boost=1.5,
     )
 
     def fake_local_night(date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0):

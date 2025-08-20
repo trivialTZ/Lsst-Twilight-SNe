@@ -142,6 +142,21 @@ class PlannerConfig:
     cadence_first_epoch_bonus_weight: float = 0.0
     """Bonus for a never-before-seen filter in cadence_bonus (0.0 = none)."""
 
+    # -- Cosmology / colour tracking --------------------------------------
+    cosmo_weight_by_filter: Dict[str, float] = field(
+        default_factory=lambda: {"g": 1.25, "r": 1.10, "i": 1.0, "z": 0.85, "y": 0.60}
+    )
+    color_window_days: float = 5.0
+    color_target_pairs: int = 2
+    color_alpha: float = 0.3
+    swap_cost_scale_color: float = 0.6
+    swap_amortize_min: int = 6
+    palette_rotation_days: int = 4
+    palette_evening: List[str] = field(default_factory=lambda: ["i", "r", "z", "i"])
+    palette_morning: List[str] = field(default_factory=lambda: ["r", "g", "i", "r"])
+    max_swaps_per_window: int = 2
+    first_epoch_color_boost: float = 1.5
+
     # -- Photometry / sky --------------------------------------------------
     pixel_scale_arcsec: float = 0.2
     zpt1s: Dict[str, float] | None = None
