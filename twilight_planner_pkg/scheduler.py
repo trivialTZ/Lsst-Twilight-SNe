@@ -16,6 +16,7 @@ formula.  Exposure times may be overridden by
 
 from __future__ import annotations
 
+import math
 import warnings
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -181,6 +182,82 @@ def _log_day_status(
     print(
         f"  morning_twilight: " f"{_fmt_window(morning_start, morning_end, tz_local)}"
     )
+
+
+def _cap_candidates_per_window(
+    df_sorted: pd.DataFrame,
+    cfg: PlannerConfig,
+    evening_cap_s: float,
+    morning_cap_s: float,
+) -> tuple[pd.DataFrame, dict]:
+    """Limit candidates per twilight window based on time caps.
+
+    Returns the capped DataFrame along with diagnostics describing the assigned
+    quotas and pre/post counts. If ``cfg.max_sn_per_night`` is ``inf`` or
+    ``None``, ``df_sorted`` is returned unchanged with diagnostics noting the
+    counts.
+    """
+
+    limit = getattr(cfg, "max_sn_per_night", None)
+    diag = {
+        "quota_evening": None,
+        "quota_morning": None,
+        "pre_total": int(len(df_sorted)),
+        "post_total": None,
+    }
+    if limit is None or (isinstance(limit, float) and math.isinf(limit)):
+        out = df_sorted
+        diag["post_total"] = int(len(out))
+        return out, diag
+
+    total_max = int(limit)
+    if total_max <= 0:
+        out = df_sorted.iloc[0:0].copy()
+        diag["quota_evening"] = 0
+        diag["quota_morning"] = 0
+        diag["post_total"] = 0
+        return out, diag
+
+    if "best_window_index" not in df_sorted.columns:
+        out = df_sorted.head(total_max).copy()
+        diag["post_total"] = int(len(out))
+        return out, diag
+
+    e_cap = max(float(evening_cap_s or 0.0), 0.0)
+    m_cap = max(float(morning_cap_s or 0.0), 0.0)
+    total_cap = e_cap + m_cap
+    if total_cap <= 0:
+        out = df_sorted.head(total_max).copy()
+        diag["post_total"] = int(len(out))
+        return out, diag
+
+    q_e = int(round(total_max * (e_cap / total_cap))) if e_cap > 0 else 0
+    q_m = total_max - q_e
+    diag["quota_evening"] = q_e
+    diag["quota_morning"] = q_m
+
+    df_e = df_sorted[df_sorted["best_window_index"] == 0].head(q_e)
+    df_m = df_sorted[df_sorted["best_window_index"] == 1].head(q_m)
+
+    short_e = q_e - len(df_e)
+    short_m = q_m - len(df_m)
+    if short_e > 0:
+        topup = df_sorted[df_sorted["best_window_index"] == 1].iloc[
+            len(df_m) : len(df_m) + short_e
+        ]
+        df_m = pd.concat([df_m, topup], ignore_index=True)
+    if short_m > 0:
+        topup = df_sorted[df_sorted["best_window_index"] == 0].iloc[
+            len(df_e) : len(df_e) + short_m
+        ]
+        df_e = pd.concat([df_e, topup], ignore_index=True)
+
+    capped = pd.concat([df_e, df_m], ignore_index=True)
+    capped = capped.sort_values(
+        by=["priority_score", "max_alt_deg"], ascending=[False, False], kind="stable"
+    )
+    diag["post_total"] = int(len(capped))
+    return capped, diag
 
 
 def _emit_simlib(
@@ -758,6 +835,9 @@ def _build_window_summary_row(
         "cad_within_pct_all": (
             round(cad_within_pct_all, 1) if not np.isnan(cad_within_pct_all) else np.nan
         ),
+        "quota_assigned": ws_summary.get("quota_assigned"),
+        "n_candidates_pre_cap": ws_summary.get("n_candidates_pre_cap"),
+        "n_candidates_post_cap": ws_summary.get("n_candidates_post_cap"),
     }
 
 
@@ -870,6 +950,7 @@ def plan_twilight_range_with_caps(
     tz_local = _local_timezone_from_location(site)
 
     for day in nights_iter:
+        seen_ids: set[str] = set()
         # Here 'day' is interpreted as *local* civil date of the evening block
         windows = twilight_windows_for_local_night(
             day.date(),
@@ -917,12 +998,15 @@ def plan_twilight_range_with_caps(
         window_caps: Dict[int, float] = {}
         window_labels: Dict[int, str | None] = {}
         cap_source_by_window: Dict[int, str] = {}
+        evening_idx: int | None = None
+        morning_idx: int | None = None
         for idx_w, w in enumerate(windows):
             current_filter_by_window[idx_w] = cfg.start_filter
             swap_count_by_window[idx_w] = 0
             label = w.get("label")
             window_labels[idx_w] = label
             if label == "morning":
+                morning_idx = idx_w
                 cap = cfg.morning_cap_s
                 if cap == "auto":
                     cap = (w["end"] - w["start"]).total_seconds()
@@ -931,6 +1015,7 @@ def plan_twilight_range_with_caps(
                     cap_source_by_window[idx_w] = "morning_cap_s"
                 window_caps[idx_w] = float(cap)
             elif label == "evening":
+                evening_idx = idx_w
                 cap = cfg.evening_cap_s
                 if cap == "auto":
                     cap = (w["end"] - w["start"]).total_seconds()
@@ -941,6 +1026,9 @@ def plan_twilight_range_with_caps(
             else:
                 window_caps[idx_w] = 0.0
                 cap_source_by_window[idx_w] = "none"
+
+        evening_cap_s_val = window_caps.get(evening_idx, 0.0)
+        morning_cap_s_val = window_caps.get(morning_idx, 0.0)
 
         # Discovery cutoff at 23:59:59 *local* on the night’s evening date
         cutoff_local = datetime(
@@ -1034,14 +1122,36 @@ def plan_twilight_range_with_caps(
 
         visible["priority_score"] = visible.apply(
             lambda r: tracker.score(
-                r["Name"], r.get("SN_type_raw"), cfg.priority_strategy
+                r["Name"],
+                r.get("SN_type_raw"),
+                cfg.priority_strategy,
+                now_mjd=(
+                    Time(r["best_time_utc"]).mjd
+                    if pd.notna(r.get("best_time_utc"))
+                    else None
+                ),
             ),
             axis=1,
         )
+        if cfg.priority_strategy == "unique_first":
+            thr = float(getattr(cfg, "unique_first_drop_threshold", 0.0))
+            visible = visible[visible["priority_score"] > thr].copy()
         visible.sort_values(
             ["priority_score", "max_alt_deg"], ascending=[False, False], inplace=True
         )
-        top_global = visible.head(int(cfg.max_sn_per_night)).copy()
+        pre_counts = (
+            visible.groupby("best_window_index").size().to_dict()
+            if "best_window_index" in visible.columns
+            else {}
+        )
+        top_global, cap_diag = _cap_candidates_per_window(
+            visible, cfg, evening_cap_s_val, morning_cap_s_val
+        )
+        post_counts = (
+            top_global.groupby("best_window_index").size().to_dict()
+            if "best_window_index" in top_global.columns
+            else {}
+        )
 
         for idx_w in sorted(set(top_global["best_window_index"].values)):
             group = top_global[top_global["best_window_index"] == idx_w].copy()
@@ -1166,7 +1276,11 @@ def plan_twilight_range_with_caps(
                 return True
 
             for filt in batch_order:
-                batch = [c for c in candidates if c["first_filter"] == filt]
+                batch = [
+                    c
+                    for c in candidates
+                    if c["first_filter"] == filt and c["Name"] not in seen_ids
+                ]
                 while batch:
                     # select next target based on filter-aware cost
                     costs: List[float] = []
@@ -1224,15 +1338,24 @@ def plan_twilight_range_with_caps(
                         costs.append(cost)
                     j = int(np.argmin(costs))
                     t = batch.pop(j)
-                    _attempt_schedule(t)
+                    sn_id = t["Name"]
+                    if sn_id in seen_ids:
+                        continue
+                    if _attempt_schedule(t):
+                        seen_ids.add(sn_id)
 
             progress = True
             while progress and deferred and window_sum < cap_s:
                 progress = False
                 # iterate over a snapshot so we can remove items during iteration
                 for t in list(deferred):
+                    sn_id = t["Name"]
+                    if sn_id in seen_ids:
+                        deferred.remove(t)
+                        continue
                     if _attempt_schedule(t, allow_defer=False):
                         deferred.remove(t)
+                        seen_ids.add(sn_id)
                         progress = True
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]
@@ -1252,6 +1375,13 @@ def plan_twilight_range_with_caps(
                 "window_skymags": window_skymags,
                 "used_filters_csv": used_filters_csv,
                 "n_candidates": len(group),
+                "quota_assigned": (
+                    cap_diag.get("quota_evening")
+                    if idx_w == evening_idx
+                    else cap_diag.get("quota_morning") if idx_w == morning_idx else None
+                ),
+                "n_candidates_pre_cap": pre_counts.get(idx_w, 0),
+                "n_candidates_post_cap": post_counts.get(idx_w, 0),
             }
             cap_source = cap_source_by_window.get(idx_w, "none")
             nights_rows.append(

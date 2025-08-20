@@ -20,6 +20,14 @@ from .config import PlannerConfig
 from .scheduler import plan_twilight_range_with_caps
 
 
+def _parse_float_or_inf(val: str) -> float:
+    """Parse a float but accept aliases for infinity."""
+    v = str(val).strip().lower()
+    if v in {"inf", "+inf", "infinity", "+infinity", "none", "unlimited", "unlimit"}:
+        return float("inf")
+    return float(val)
+
+
 def build_parser():
     """Construct the command-line argument parser.
 
@@ -77,7 +85,12 @@ def build_parser():
         help="Cap seconds in morning twilight; number or 'auto' to use window duration",
     )
     p.add_argument("--per_sn_cap", type=float, default=120.0)
-    p.add_argument("--max_sn", type=int, default=10)
+    p.add_argument(
+        "--max_sn",
+        type=_parse_float_or_inf,
+        default=float("inf"),
+        help="Global candidate cap before time packing. Use a number or 'inf'/'none'/'unlimited'.",
+    )
     p.add_argument("--twilight_step", type=int, default=2)
     p.add_argument(
         "--evening-twilight",

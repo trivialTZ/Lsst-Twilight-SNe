@@ -53,7 +53,7 @@ For each UTC date in `START_DATE` … `END_DATE`:
 4. **Filter eligible SNe by “lifetime”**: using discovery time and `TYPICAL_DAYS_BY_TYPE` (with a 1.2× safety factor via `parse_sn_type_to_window_days`), accept only SNe still in their typical observability window on this date.
 5. **Best time per SN (Moon‑aware)**: for each candidate, sample the two twilight windows at `TWILIGHT_STEP_MIN` minutes (here 2 min); call `_best_time_with_moon` to get the maximum altitude time that also honors Moon separation (scaled by Moon altitude/phase). Keep the better of the two windows.
 6. **Visible SN filter**: keep targets with a valid best time, max altitude ≥ `MIN_ALT_DEG` (here 20°), and a valid window index.
-7. **Priorities & global selection**: score with `PriorityTracker` (hybrid or LC). Sort by priority, then max altitude (descending) and take the top `MAX_SN_PER_NIGHT` (here 10) as the nightly candidate pool (still subject to per-window caps later).
+7. **Priorities & global selection**: score with `PriorityTracker` (hybrid or LC). Drop non‑positive scores under `unique_first`, sort by priority then max altitude, and cap per window using a stratified split of `MAX_SN_PER_NIGHT` (default infinity).
 
 ### 3. Scheduling Within Each Twilight Window
 For each window index `idx_w` present that night:
@@ -130,7 +130,7 @@ default priority strategy.
   `PER_SN_CAP_S=120` — bounds per-SN work (slew + readout + exposure + filter changes).  
   `MORNING_CAP_S=600`, `EVENING_CAP_S=600` — roughly 10 minutes each; ensures plans pack into tight twilight windows.  
   `TWILIGHT_STEP_MIN=2` — few-minute sampling captures altitude/Moon geometry changes without over-sampling.  
-  `MAX_SN_PER_NIGHT=10` — global nightly cap before window-level packing.
+  `MAX_SN_PER_NIGHT=float('inf')` — unlimited candidates; set finite for stress testing. If finite, cap is split between windows.
 - **Priority strategy:**  
   `PRIORITY_STRATEGY="hybrid"` with `HYBRID_DETECTIONS=2`, `HYBRID_EXPOSURE=300s`, `LC_DETECTIONS=5`, `LC_EXPOSURE=300s`.  
   Starts broad with quick detections; escalates to deeper coverage for promising SNe.
