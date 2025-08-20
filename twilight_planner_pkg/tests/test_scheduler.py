@@ -698,3 +698,82 @@ def test_cap_candidates_per_window_single_window() -> None:
     assert (out["best_window_index"] == 1).all()
     assert diag["quota_evening"] == 0
     assert diag["quota_morning"] == 3
+
+
+def test_swap_cap_zero_blocks_changes(tmp_path, monkeypatch):
+    """Planner should avoid carousel swaps when the cap is zero."""
+
+    df = pd.DataFrame(
+        {
+            "ra": [0.0, 1.0],
+            "dec": [0.0, 0.0],
+            "discoverydate": ["2024-01-01T00:00:00Z"] * 2,
+            "name": ["SN1", "SN2"],
+            "type": ["Ia", "Ia"],
+        }
+    )
+    csv = tmp_path / "cat.csv"
+    df.to_csv(csv, index=False)
+
+    cfg = PlannerConfig(
+        filters=["g", "r"],
+        exposure_by_filter={"g": 10.0, "r": 10.0},
+        readout_s=1.0,
+        filter_change_s=1000.0,
+        evening_cap_s=100.0,
+        morning_cap_s=0.0,
+        max_swaps_per_window=0,
+        allow_filter_changes_in_twilight=True,
+        start_filter="g",
+    )
+
+    from twilight_planner_pkg import scheduler
+
+    def mock_twilight_windows_for_local_night(
+        date_local, loc, min_sun_alt_deg=-18.0, max_sun_alt_deg=0.0
+    ):
+        start = datetime(
+            date_local.year,
+            date_local.month,
+            date_local.day,
+            18,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        )
+        end = start + timedelta(minutes=30)
+        return [
+            {"start": start, "end": end, "label": "evening", "night_date": date_local}
+        ]
+
+    def mock_best_time_with_moon(
+        sc, window, loc, step_min, min_alt_deg, min_moon_sep_deg
+    ):
+        start, _ = window
+        return 50.0, start + timedelta(minutes=5), 0.0, 0.0, 180.0
+
+    def mock_sep(ra1, dec1, ra2, dec2):
+        return 0.0
+
+    def mock_allowed_filters(*args, **kwargs):
+        return ["g", "r"]
+
+    def mock_pick_first(name, sn_type, tracker, allowed, cfg, **kwargs):
+        return "g" if name == "SN1" else "r"
+
+    monkeypatch.setattr(
+        scheduler,
+        "twilight_windows_for_local_night",
+        mock_twilight_windows_for_local_night,
+    )
+    monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)
+    monkeypatch.setattr(scheduler, "allowed_filters_for_window", mock_allowed_filters)
+    monkeypatch.setattr(scheduler, "pick_first_filter_for_target", mock_pick_first)
+
+    pernight, nights = plan_twilight_range_with_caps(
+        str(csv), str(tmp_path), "2024-01-01", "2024-01-01", cfg, verbose=False
+    )
+
+    assert len(pernight) >= 1
+    assert (nights["swap_count"] == 0).all()

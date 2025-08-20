@@ -65,10 +65,10 @@ For each window index `idx_w` present that night:
    - Enforce Sun‑alt policy via `allowed_filters_for_sun_alt(sun_alt, cfg)` (strict: anything outside policy is dropped).
    - For each allowed filter, check Moon separation with `effective_min_sep` (dynamic with Moon altitude/phase).
    - Choose the first filter for this target via `pick_first_filter_for_target(...)`, which accounts for priority stage, Moon OK flags, current carousel state, and (if available) the target’s current magnitudes. Discard the target if none qualifies.
-3. **Batch by first filter**: group targets by their chosen first filter. Execute batches in the order `y → z → i → r → g → u` (redder first to cope with brightening twilight).
+3. **Batch by first filter**: group targets by their chosen first filter. A rotating palette (`palette_evening`/`palette_morning` shifted by `palette_rotation_days`) sets the batch order; any remaining filters are appended by decreasing 5σ depth.
 4. **Greedy routing with time‑packing under the window cap**:
    - Maintain `window_sum`, previous target `prev`, and current loaded filter state.
-   - Within each batch, repeatedly pick the next target by minimizing slew time to it (`slew_time_seconds` from great-circle separation) plus a one-time cross-target filter-change penalty if its first filter ≠ state. (This “cost” is for ordering only; the booked time comes from the next step.)
+   - Within each batch, repeatedly pick the next target by minimizing slew time plus a cross-target filter-change penalty. The penalty is amortized over the batch size, scaled down if the new filter supplies a missing color, and skipped when the swap cap for the window is reached. (This “cost” is for ordering only; the booked time comes from the next step.)
    - For the chosen target:
      - Set `cfg.current_mag_by_filter`, `cfg.current_alt_deg`, `cfg.current_mjd` (context for saturation guard).
      - Build the visit’s filter list: `[first] +` other allowed (de-duplicated).
@@ -79,7 +79,7 @@ For each window index `idx_w` present that night:
        - Append a per-SN row with times, conditions, flags, priority, and time breakdown.
        - If SIMLIB is enabled, write `EPOCH` entries (MJD, band, `GAIN`, `RDNOISE`, `SKYSIG`, `NEA`, `ZP`, etc.).
        - Update state to the last used filter, bump internal filter-change counters, set `prev = target`, and record the detection/exposure to `PriorityTracker` (used for cross-night strategy).
-5. **Window summary row**: after finishing a window, write a per-window summary: number of candidates vs. planned, total time vs. cap, filter-swap counts, average slew time, median airmass, requested vs. actually used filters, etc.
+5. **Window summary row**: after finishing a window, write a per-window summary: number of candidates vs. planned, total time vs. cap, filter-swap counts, average slew time, median airmass, requested vs. actually used filters, and color metrics (`color_pairs`, `color_diversity`, `%pair_different_filters`).
 6. **Restore exposures if overridden**: if an exposure ladder was applied for this window, revert to the original `cfg.exposure_by_filter`.
 
 ### 4. Outputs
@@ -88,7 +88,7 @@ For each window index `idx_w` present that night:
 - **True sequence CSV**: `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv`
   **True, non-overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is stored in `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi-filter visits are a single row).
 - **Per-night summary CSV**: `lsst_twilight_summary_<run_label>_<start>_to_<end>.csv`
-  One row per window: candidate/planned counts, time usage vs. cap, swap counts, internal filter changes, mean slew, median airmass, loaded filters, actually used filters.
+  One row per window: candidate/planned counts, time usage vs. cap, swap counts, internal filter changes, color metrics, mean slew, median airmass, loaded filters, actually used filters.
 - **SIMLIB (optional)**: if `SIMLIB_OUT` is set, a SNANA-compatible library with all `EPOCH`s is produced.
 
 In all of the above, ``<run_label>`` defaults to ``hybrid`` matching the
@@ -114,12 +114,14 @@ default priority strategy.
 - **Sun-altitude policy:**
 
   ```
-  (-18,-15): ["y","z","i"]
-  (-15,-12): ["z","i","r"]
-  (-12,  0): ["i","z","y"]
+  (-18,-15): ["g","r","i","z","y"]
+  (-15,-12): ["r","i","z","y"]
+  (-12,  0): ["i","r","z","y"]
   ```
 
-  Only filters allowed by policy and present in `FILTERS` are considered (policy entries for unloaded bands like `y` are safely ignored).
+  Only filters allowed by policy and present in `FILTERS` are considered. ``g``
+  is only considered when the Sun is below −15° and the 5σ depth minus target
+  magnitude exceeds a stricter margin.
 
 - **Slew model:**  
   `SLEW_SMALL_DEG=3.5`, `SLEW_SMALL_TIME_S=4.0`, `SLEW_RATE_DEG_PER_S=5.25`, `SLEW_SETTLE_S=1.0` — a simple piecewise model with a constant small-slew time and a linear rate for larger moves.

@@ -49,6 +49,7 @@ def test_no_dec_clamp():
 def test_allowed_filters_extremes():
     mags = {}
     bright = allowed_filters_for_window(mags, -5.0, 5.0, 1.0, 20.0, 1.0, 0.7)
-    assert set(bright).issubset({"i", "z", "y"})
+    assert set(bright).issubset({"i", "r", "z", "y"})
+    assert "g" not in bright
     dark = allowed_filters_for_window(mags, -15.0, -20.0, 0.0, 120.0, 1.0, 0.7)
     assert {"g", "r", "i"}.issubset(set(dark))

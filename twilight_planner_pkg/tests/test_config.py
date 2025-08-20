@@ -13,6 +13,8 @@ def test_default_config_values():
     assert cfg.exposure_by_filter["g"] == 15.0
     assert cfg.evening_cap_s == "auto"
     assert cfg.morning_cap_s == "auto"
+    assert cfg.max_swaps_per_window == 2
+    assert cfg.first_epoch_color_boost == 1.5
 
 
 def test_custom_overrides():

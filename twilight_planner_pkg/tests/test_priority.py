@@ -66,3 +66,35 @@ def test_repeated_filter_usage_does_not_meet_hybrid():
     t = tracker()
     t.record_detection("SN7", 150, ["g", "g"])
     assert t.score("SN7", sn_type="II") == 1.0
+
+
+def test_color_counts_and_deficit():
+    t = tracker()
+    now = 10.0
+    t.record_detection("SN1", 30.0, ["g"], mjd=now - 1)
+    t.record_detection("SN1", 30.0, ["i"], mjd=now - 2)
+    assert t.color_counts("SN1", now, 5.0) == (1, 1)
+    assert t.color_deficit("SN1", now, 2, 5.0) == (1, 1)
+
+
+def test_cosmology_boost_and_compute_filter_bonus():
+    t = tracker()
+    now = 10.0
+    t.record_detection("SN1", 30.0, ["g"], mjd=now - 1)
+    boost = t.cosmology_boost("SN1", "i", now, 2, 5.0, 0.5)
+    assert boost > 1.0
+    bonus = t.compute_filter_bonus(
+        "SN1",
+        "i",
+        now,
+        3.0,
+        1.0,
+        0.5,
+        0.1,
+        {"i": 1.0},
+        2,
+        5.0,
+        0.5,
+        1.5,
+    )
+    assert bonus > 0.0

@@ -55,6 +55,10 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
 
 `unique_first_fill_with_color` is a placeholder knob for a future second pass that would add color to unique-first selections.
 
+The tracker records every visit's color group and computes a unified filter
+bonus blending cadence pressure, per-filter cosmology weights, and any
+blue/red deficit so missing colors are filled early.
+
 ### Cadence constraint (per-filter)
 
 - Revisit spacing is enforced **per filter**, not per supernova.
@@ -382,10 +386,10 @@ default priority strategy.
 
 ## Module Overview
 - `config.py` — `PlannerConfig` (site, filters, caps, overheads, photometry)
-- `priority.py` — state tracking & hybrid→LC escalation (Ia keep priority; non‑Ia drop after quick color)
-- `scheduler.py` — nightly visibility, scoring, per‑window scheduling, time accounting; applies `sun_alt_policy` and optional exposure ladder
+- `priority.py` — per‑SN visit logging with unified cadence/cosmology/color bonus; hybrid→LC escalation (Ia keep priority; non‑Ia drop after quick color)
+- `scheduler.py` — nightly visibility, scoring, per‑window scheduling, palette rotation, swap‑cost amortization, and time accounting; applies `sun_alt_policy` and optional exposure ladder
 - `astro_utils.py` — twilight windows, airmass, Sun/Moon geometry, slews
-- `filter_policy.py` — 5σ/m5 heuristic with Sun/Moon penalties and red‑band fallback
+- `filter_policy.py` — 5σ/m5 heuristic with Sun/Moon penalties; g‑band only in the darkest twilight with extra headroom
 - `photom_rubin.py` — Rubin‑tuned photometric kernel with source+sky saturation guard
 - `sky_model.py` — twilight/dark sky providers with Sun-altitude brightening; optional `rubin_sim.skybrightness`
 - `simlib_writer.py` — minimal SNANA SIMLIB exporter
