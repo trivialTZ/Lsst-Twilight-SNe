@@ -93,9 +93,11 @@ def nosat_mask_for_run(
             z = pd.to_numeric(row.get("z", np.nan), errors="coerce")
             pk = pd.to_numeric(row.get("PKMJD", np.nan), errors="coerce")
             if np.isfinite(z) and np.isfinite(pk):
-                t_rest = (phot_df.loc[a:b, "MJD"].to_numpy() - pk) / (1.0 + z)
+                mjd_col = phot_df.columns.get_loc("MJD")
+                t_rest = (phot_df.iloc[a:b, mjd_col].to_numpy() - pk) / (1.0 + z)
                 mwin = (t_rest >= rest_window[0]) & (t_rest <= rest_window[1])
-                if np.any(sat_epoch[a:b][mwin]):
+                sat_slice = sat_epoch[a:b]
+                if np.any(sat_slice & mwin):
                     ok.at[i] = False
                 continue
         if np.any(sat_epoch[a:b]):
