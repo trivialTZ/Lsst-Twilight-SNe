@@ -54,6 +54,102 @@ def show_fig_y1_nz(
     plt.show()
 
 
+def _bin_mask_for_range(
+    z_mid: np.ndarray,
+    z_min: float,
+    z_max: float,
+    *,
+    dz: float | None = None,
+    include_partial: bool = True,
+) -> np.ndarray:
+    """Boolean mask selecting bins within a redshift range.
+
+    If ``dz`` is provided, bins are treated as intervals of width ``dz``
+    centered at ``z_mid``. Otherwise, selection falls back to midpoint
+    inclusion: ``z_min <= z_mid < z_max``.
+
+    Parameters
+    ----------
+    z_mid : array-like
+        Midpoints of the redshift bins.
+    z_min, z_max : float
+        Redshift range to select.
+    dz : float or None, optional
+        Bin width. If provided, interval logic is used; otherwise midpoint logic.
+    include_partial : bool, optional
+        When using interval logic, include bins that partially overlap the range
+        if True; if False, only bins fully contained in the range are selected.
+
+    Returns
+    -------
+    numpy.ndarray (bool)
+        Mask over bins.
+    """
+    z_mid = np.asarray(z_mid, dtype=float)
+    if dz is None:
+        return (z_mid >= z_min) & (z_mid < z_max)
+    half = 0.5 * float(dz)
+    lo = z_mid - half
+    hi = z_mid + half
+    if include_partial:
+        return (hi > z_min) & (lo < z_max)
+    return (lo >= z_min) & (hi <= z_max)
+
+
+def summarize_y1_counts_in_range(
+    z_mid: np.ndarray,
+    N_det: np.ndarray,
+    N_cos: np.ndarray,
+    *,
+    N_cos_tw: np.ndarray | None = None,
+    z_min: float,
+    z_max: float,
+    dz: float | None = None,
+    include_partial: bool = True,
+) -> dict[str, int]:
+    """Summarize detection/cosmology counts within a redshift range.
+
+    Parameters
+    ----------
+    z_mid : array-like
+        Midpoints of the redshift bins.
+    N_det, N_cos : array-like
+        Counts per bin for detections and cosmology-quality SNe.
+    N_cos_tw : array-like or None, optional
+        Counts per bin for cosmology with Twilight promotion. If omitted,
+        this key is not included in the output.
+    z_min, z_max : float
+        Inclusive/exclusive selection bounds: ``[z_min, z_max)`` for midpoint
+        logic, or interval overlap when ``dz`` is provided.
+    dz : float or None, optional
+        Bin width. If provided, use interval logic via bin edges inferred from
+        ``z_mid`` and ``dz``. If omitted, use midpoint logic.
+    include_partial : bool, optional
+        When interval logic is used (``dz`` provided), include bins that
+        partially overlap the range if True; otherwise require full containment.
+
+    Returns
+    -------
+    dict
+        Dictionary with integer sums for keys: ``"N_det"``, ``"N_cos"``, and
+        optionally ``"N_cos_tw"`` if provided.
+
+    Examples
+    --------
+    >>> summarize_y1_counts_in_range(z_mid, N_det, N_cos, N_cos_tw=N_cos_tw,
+    ...                              z_min=0.02, z_max=0.14, dz=DZ)
+    {'N_det': 385, 'N_cos': 316, 'N_cos_tw': 385}
+    """
+    m = _bin_mask_for_range(z_mid, z_min, z_max, dz=dz, include_partial=include_partial)
+    out: dict[str, int] = {
+        "N_det": int(np.rint(np.asarray(N_det)[m].sum())),
+        "N_cos": int(np.rint(np.asarray(N_cos)[m].sum())),
+    }
+    if N_cos_tw is not None:
+        out["N_cos_tw"] = int(np.rint(np.asarray(N_cos_tw)[m].sum()))
+    return out
+
+
 def plot_lcdm_1d(
     res: dict, *, param: str = "Om", title: str = "ΛCDM Forecast Comparison"
 ):

@@ -22,6 +22,7 @@ from .tw_plots import (
     plot_lcdm_1d,
     plot_lcdm_1d_comparison,
     show_fig_y1_nz,
+    summarize_y1_counts_in_range,
 )
 from .tw_qc import densest_year_window, ross_qc_with_report
 

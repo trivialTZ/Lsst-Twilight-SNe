@@ -16,6 +16,22 @@ def nz_hist(z: np.ndarray, z_edges: np.ndarray) -> np.ndarray:
     return h
 
 
+def _num_series(df: pd.DataFrame, cols: list[str] | tuple[str, ...] | str, default: float) -> pd.Series:
+    """Return numeric Series for the first present column in `cols`, else a constant Series.
+
+    Ensures a Series is always returned (never a scalar), avoiding `.fillna` errors
+    when a column is absent.
+    """
+    if isinstance(cols, (str, bytes)):
+        cols = [str(cols)]
+    for c in cols:
+        if c in df.columns:
+            s = pd.to_numeric(df[c], errors="coerce")
+            return s.fillna(default)
+    # None of the requested columns exists: return constant default Series
+    return pd.Series(default, index=df.index, dtype=float)
+
+
 def sigma_mu_per_sn(
     df: pd.DataFrame,
     *,
@@ -24,14 +40,14 @@ def sigma_mu_per_sn(
     sigma_int: float = 0.08,
     sigma_vpec_kms: float = 300.0,
 ) -> pd.Series:
-    """Compute per-SN σ_μ robustly using SALT2 covariances.
+    """Compute per-SN σ_μ using full SALT2 covariances + lensing + vpec.
 
     Parameters
     ----------
     df : pandas.DataFrame
         FITRES-like table with SALT2 columns.
     alpha, beta : float, optional
-        Stretch/color coefficients.
+        Stretch/color coefficients (fallback if not present in df).
     sigma_int : float, optional
         Intrinsic scatter added in quadrature.
     sigma_vpec_kms : float, optional
@@ -42,30 +58,33 @@ def sigma_mu_per_sn(
     pandas.Series
         Per-SN distance-modulus uncertainty.
     """
-    alpha = pd.to_numeric(
-        df.get("SIM_alpha", df.get("alpha", alpha)), errors="coerce"
-    ).fillna(alpha)
-    beta = pd.to_numeric(
-        df.get("SIM_beta", df.get("beta", beta)), errors="coerce"
-    ).fillna(beta)
-    mBERR = pd.to_numeric(df.get("mBERR", np.nan), errors="coerce").fillna(0.12)
-    x1ERR = pd.to_numeric(df.get("x1ERR", np.nan), errors="coerce").fillna(0.9)
-    cERR = pd.to_numeric(df.get("cERR", np.nan), errors="coerce").fillna(0.04)
-    cov = pd.to_numeric(
-        df.get("COV_x1_c", df.get("COV_x1c", 0.0)), errors="coerce"
-    ).fillna(0.0)
-    z = pd.to_numeric(df.get("z", np.nan), errors="coerce").astype(float)
+    alpha = _num_series(df, ["SIM_alpha", "alpha"], alpha)
+    beta = _num_series(df, ["SIM_beta", "beta"], beta)
+    mBERR = _num_series(df, "mBERR", 0.12)
+    x1ERR = _num_series(df, "x1ERR", 0.9)
+    cERR = _num_series(df, "cERR", 0.04)
+    cov_x1_c = _num_series(df, ["COV_x1_c", "COV_x1c"], 0.0)
+    cov_mB_x1 = _num_series(df, "COV_mB_x1", 0.0)
+    cov_mB_c = _num_series(df, "COV_mB_c", 0.0)
+    z = _num_series(df, "z", np.nan).astype(float)
+
+    # SALT2 error propagation with full covariances
     mu2 = (
-        (mBERR**2)
+        (mBERR ** 2)
         + (alpha * x1ERR) ** 2
         + (beta * cERR) ** 2
-        - 2.0 * alpha * beta * cov
+        + 2.0 * alpha * cov_mB_x1
+        - 2.0 * beta * cov_mB_c
+        - 2.0 * alpha * beta * cov_x1_c
     )
+
+    # Lensing and peculiar-velocity terms
     sig_lens = 0.055 * z
     sig_vpec = (5.0 / np.log(10.0)) * (
         sigma_vpec_kms / (299792.458 * np.maximum(z, 1e-3))
     )
-    mu2 = mu2 + (sigma_int**2) + (sig_lens**2) + (sig_vpec**2)
+
+    mu2 = mu2 + (sigma_int ** 2) + (sig_lens ** 2) + (sig_vpec ** 2)
     return np.sqrt(np.maximum(mu2, 0.0))
 
 
@@ -77,6 +96,7 @@ def write_binned_catalogs(
     z_max: float = Z_MAX_DEFAULT,
     derived_dir: Path,
     base_label: str = "ep_lsst",
+    sigma_agg: str = "ivar",
 ) -> tuple[Path, Path]:
     """Build and write binned catalogs for WFD and WFD+Twilight.
 
@@ -97,7 +117,19 @@ def write_binned_catalogs(
     sigma_bin = np.full_like(z_mid, np.nan, dtype=float)
     for k in range(len(z_mid)):
         m = (fit_qc_y1["z"] >= z_edges[k]) & (fit_qc_y1["z"] < z_edges[k + 1])
-        if m.any():
+        if not m.any():
+            continue
+        if sigma_agg.lower() == "ivar":
+            sig = pd.to_numeric(fit_qc_y1.loc[m, "sigma_mu_sn"], errors="coerce").astype(float)
+            sig = sig.replace([np.inf, -np.inf], np.nan).dropna()
+            if len(sig) == 0:
+                continue
+            invvar_sum = np.sum(1.0 / (sig ** 2))
+            n_bin = float(len(sig))
+            if invvar_sum > 0:
+                sigma_bin[k] = float(np.sqrt(n_bin / invvar_sum))
+        else:
+            # Fallback: robust median within the bin (original behavior)
             sigma_bin[k] = float(fit_qc_y1.loc[m, "sigma_mu_sn"].median())
     if np.isnan(sigma_bin).any():
         s = pd.Series(sigma_bin).fillna(method="ffill").fillna(method="bfill")

@@ -65,7 +65,9 @@ def read_head_fits(path: str | Path) -> pd.DataFrame:
     """
     with fits.open(path) as hdul:
         arr = np.array(hdul[1].data)
-    df = pd.DataFrame(arr.byteswap().newbyteorder())
+    # NumPy 2.0: ndarray.newbyteorder removed; use view with dtype.newbyteorder()
+    arr_native = arr.byteswap().view(arr.dtype.newbyteorder())
+    df = pd.DataFrame(arr_native)
     _clean_chars_inplace(df)
     if "SNID" in df.columns:
         df["ID_int"] = pd.Series([_to_int64_safe(v) for v in df["SNID"]], dtype="Int64")
@@ -200,7 +202,9 @@ def read_phot_fits(path: str | Path) -> pd.DataFrame:
     """Read PHOT FITS and return a standardized DataFrame (epoch-level)."""
     with fits.open(path) as hdul:
         arr = np.array(hdul[1].data)
-    df = pd.DataFrame(arr.byteswap().newbyteorder())
+    # NumPy 2.0: ndarray.newbyteorder removed; use view with dtype.newbyteorder()
+    arr_native = arr.byteswap().view(arr.dtype.newbyteorder())
+    df = pd.DataFrame(arr_native)
     for c in ("MJD", "FLUXCAL", "FLUXCALERR", "FLUX", "FLUXERR", "PHOTFLAG"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")

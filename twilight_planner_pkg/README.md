@@ -317,39 +317,47 @@ so 1 s vs 15 s shifts the r‑band bright limit by $\approx 2.9$ mag, enab
 
 ### 6) Priority Scoring (Hybrid → LC)
 
-For each SN we track:
+The planner keeps a small per‑SN history (detections, total exposure, filters used,
+time of last visits per filter). Nightly ranking across SNe uses a binary need
+flag rather than a continuous progress score:
 
-- $N_{\rm det}$: number of detections
+- Hybrid stage: need = 1 until either (i) detections ≥ `hybrid_detections` with
+  ≥2 distinct filters, or (ii) `exposure_s` ≥ `hybrid_exposure_s`. Once met:
+  - If the SN is Type Ia (case‑insensitive match on `SN_type_raw`), it escalates
+    to the LC stage and keeps need = 1 there until the LC goal is met.
+  - Otherwise it drops to need = 0 (deprioritized for the night).
+- LC stage: need = 1 until either detections ≥ `lc_detections` or
+  (`exposure_s` ≥ `lc_exposure_s` and ≥2 distinct filters); then need = 0.
+- Unique‑first strategy: need = 1 until the first detection, then need = −1 so it
+  is dropped before caps. After `unique_lookback_days`, an optional
+  `unique_first_resume_score` can re‑enable repeats.
 
-- $T_{\rm exp}$: accumulated exposure time
+Across‑SN nightly sorting uses `(priority_score, max_alt_deg)` with need first.
 
-- $|\mathcal{F}|$: number of distinct filters used
+Filter choice within a visit is cadence‑ and band‑aware:
 
-Define goal progress for hybrid and LC stages:
+- Cadence gate (per filter): a same‑band revisit is allowed only if days since
+  last use ≥ `cadence_days_target − cadence_jitter_days`, or if that band has
+  never been observed for this SN. Bands failing the gate may defer the target.
+- Cadence bonus: among the gated bands, a Gaussian “due‑soon” bonus centered at
+  `cadence_days_target` with width `cadence_bonus_sigma_days` and weight
+  `cadence_bonus_weight` nudges selection; a never‑before‑seen band receives
+  `cadence_first_epoch_bonus_weight` instead of the Gaussian.
+- Cosmology and colour boost: bands are multiplied by `cosmo_weight_by_filter`
+  (default g>r>i>z>y) and by a colour‑balance boost
+  `1 + alpha × deficit`, where `alpha = color_alpha` and `deficit` counts how
+  many visits are missing in the relevant colour group within the last
+  `color_window_days` relative to `color_target_pairs`.
+  Colour groups are BLUE = {g, r} and RED = {i, z, y}. If only one colour group
+  has been seen so far, the first band from the other group can receive an extra
+  `first_epoch_color_boost`.
+- Two‑band visits: when `max_filters_per_visit ≥ 2`, the second band prefers the
+  opposite colour group to build quick colour.
 
-```math
-
-$$P_{\rm hybrid} = \max\left( \frac{N_{\rm det}}{2}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \right) \quad \mathrm{and} \quad P_{\rm LC} = \max\left( \frac{N_{\rm det}}{5}, \frac{T_{\rm exp}}{300\,\mathrm{s}} \right).$$
-
-```
-
-Clamp to $[0,1]$. The need score at a candidate time is
-
-```math
-
-S_{\rm need} = \begin{cases}
-
-1 - P_{\rm hybrid}, & \text{if strategy = hybrid and hybrid not met} \\
-
-\mathbf{1}_{\rm Ia}(1 - P_{\rm LC}), & \text{if hybrid met (Ia escalates)} \\
-
-0, & \text{if hybrid met and non-Ia}
-
-\end{cases}
-
-```
-
-and the overall sort key is $(S_{\rm need}, \sin h)$, i.e., need first, then altitude.
+If cadence is disabled, the first band is chosen to accelerate colour in Hybrid
+(prefer a band not yet used); once escalated, the reddest allowed band is
+preferred, with a small bias for the current carousel filter to avoid a swap.
+All choices respect `sun_alt_policy`, Moon‑separation checks, and per‑SN caps.
 
 ### 7) SIMLIB Export (SNANA)
 
