@@ -359,6 +359,99 @@ If cadence is disabled, the first band is chosen to accelerate colour in Hybrid
 preferred, with a small bias for the current carousel filter to avoid a swap.
 All choices respect `sun_alt_policy`, Moon‑separation checks, and per‑SN caps.
 
+#### Mathematical form
+
+Let thresholds be `H_det = hybrid_detections`, `H_exp = hybrid_exposure_s`,
+`L_det = lc_detections`, `L_exp = lc_exposure_s`. Let `F` be the set of filters
+used so far and `|F|` its size. Define
+
+```math
+\text{met}_\mathrm{H} := \mathbf{1}\Big( (N_{\rm det} \ge H_{\rm det} \wedge |\mathcal F| \ge 2) 
+\;\vee\; (T_{\rm exp} \ge H_{\rm exp}) \Big),\\
+\text{met}_\mathrm{L} := \mathbf{1}\Big( (N_{\rm det} \ge L_{\rm det}) 
+\;\vee\; (T_{\rm exp} \ge L_{\rm exp} \wedge |\mathcal F| \ge 2) \Big).
+```
+
+- Strategy = hybrid, with Ia escalation:
+
+```math
+S = \mathbf{1}\big(\neg\,\text{met}_\mathrm{H}\big)
+\;\vee\; \Big( \mathbf{1}(\text{Ia}) \wedge \mathbf{1}\big(\text{met}_\mathrm{H}\big) \wedge \mathbf{1}\big(\neg\,\text{met}_\mathrm{L}\big) \Big),
+```
+
+so `S ∈ {0,1}` and equals 1 if Hybrid not yet met, or if Hybrid is met and the
+SN is Ia but the LC goal is still unmet; otherwise `S=0`.
+
+- Strategy = lc (LSST‑only light curves):
+
+```math
+S = \mathbf{1}\big(\neg\,\text{met}_\mathrm{L}\big).
+```
+
+- Strategy = unique_first:
+
+```math
+S = \begin{cases}
+1, & N_{\rm det}=0,\\[4pt]
+S_{\rm resume}, & N_{\rm det}>0\ \wedge\ (\text{now}-t_{\rm last}) > D_{\rm lookback},\\[4pt]
+-1, & \text{otherwise,}
+\end{cases}
+```
+
+with `D_lookback = unique_lookback_days` and `S_resume = unique_first_resume_score`.
+Across SNe, sorting uses `(S, max_alt_deg)`.
+
+Filter selection uses a gated, cadence‑ and colour‑aware utility. For filter `f`
+let `Δ_f` be days since last observation in `f` (undefined if never observed).
+
+- Gate per filter:
+
+```math
+G_f = \mathbf{1}\Big( \Delta_f\ \text{undefined}\ \vee\ \Delta_f \ge \max\{0, D_\mathrm{tgt}-J\} \Big),
+```
+
+with `D_tgt = cadence_days_target` and `J = cadence_jitter_days`.
+
+- Cadence bonus:
+
+```math
+C_f = \begin{cases}
+w\,\exp\!\Big( -\tfrac12\big(\tfrac{\Delta_f-D_\mathrm{tgt}}{\sigma}\big)^2 \Big), & \Delta_f\ \text{defined},\\[6pt]
+w_{\rm first}, & \text{otherwise,}
+\end{cases}
+```
+
+with `w = cadence_bonus_weight`, `σ = cadence_bonus_sigma_days`, and
+`w_first = cadence_first_epoch_bonus_weight`.
+
+- Colour/cosmology boost. With BLUE = {g,r}, RED = {i,z,y}, define counts in the
+recent window `W = color_window_days`:
+
+```math
+V_\mathrm{blue}, V_\mathrm{red} := \#\;\text{visits in }[\text{now}-W,\,\text{now}]\ \text{by group}.
+```
+
+Let `T = color_target_pairs`. For a filter `f` in group `\mathcal G(f) \in \{\mathrm{blue},\mathrm{red}\}`,
+
+```math
+d(f) = \max\big(0,\, T - V_{\mathcal G(f)}\big),\qquad B_{\rm color}(f) = 1 + \alpha\, d(f),
+```
+
+with `α = color_alpha`. Let `w_f = cosmo_weight_by_filter[f]`. If only one
+colour group has been seen so far, the first band from the other group receives
+an additional nudge `n(f) = \max\{1,\,\texttt{first_epoch_color_boost}\}`; else `n(f)=1`.
+
+- Combined utility and choice:
+
+```math
+U(f) = C_f\; w_f\; B_{\rm color}(f)\; n(f),\qquad f^* = \underset{f\in\mathcal A\cap\{G_f=1\}}{\arg\max}\; U(f),
+```
+
+where `\mathcal A` is the allowed set after Sun/Moon and policy checks. If a
+preference `first_filter` is available and passes the gate, it is kept;
+otherwise `f*` is used. When `max_filters_per_visit ≥ 2`, the second band prefers
+the opposite colour group to `f*`; if none, the next‑best `U(f)` is used.
+
 ### 7) SIMLIB Export (SNANA)
 
 When `--simlib-out` is provided, the planner writes `S:` rows with the following fields per visit:
