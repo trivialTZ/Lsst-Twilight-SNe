@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from astropy.coordinates import Angle
 from astropy.time import Time
+from datetime import timezone as _dt_timezone
 
 from .astro_utils import parse_sn_type_to_window_days, validate_coords
 from .config import PlannerConfig
@@ -427,43 +428,94 @@ def normalize_ra_dec_to_degrees(
 
 
 def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
-    """Parse discovery date values into timezone-aware datetimes.
+    """Parse discovery date values into UTC, supporting mixed formats per-row.
 
-    Parameters
-    ----------
-    series : pandas.Series
-        Raw discovery timestamps or MJDs.
+    This function is tolerant to heterogeneous time encodings within the same
+    column. It recognizes:
+    - ISO-like strings (with or without timezone); tz-aware values are
+      converted to UTC, tz-naive are assumed to be UTC.
+    - Modified Julian Date (MJD) in days (roughly 30,000–90,000).
+    - Julian Date (JD) in days (2,400,000–2,500,000).
+    - Unix epoch timestamps in seconds, milliseconds, or microseconds. A
+      plausibility check retains only conversions yielding years in [1900, 2200].
+    - Digit-coded calendar numbers (e.g., YYYYMMDD or YYYYMMDDhhmmss) via a
+      string fallback.
 
-    Returns
-    -------
-    pandas.Series
-        Series of UTC datetimes (``datetime64[ns, UTC]``).
+    Returns a tz-aware ``datetime64[ns, UTC]`` series.
     """
+    # Prepare output (tz-aware) and numeric view for masks
+    out = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns, UTC]")
     numeric = pd.to_numeric(series, errors="coerce")
-    if numeric.notna().any():
-        out = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns, UTC]")
-        mask_mjd = (numeric >= 30000) & (numeric <= 90000)
-        if mask_mjd.any():
-            dt_mjd = pd.to_datetime(
-                Time(numeric[mask_mjd].values, format="mjd").to_datetime("utc")
-            )
-            out.loc[mask_mjd.index[mask_mjd]] = dt_mjd
-        mask_jd = (numeric >= 2400000) & (numeric <= 2500000)
-        if mask_jd.any():
-            dt_jd = pd.to_datetime(
-                Time(numeric[mask_jd].values, format="jd").to_datetime("utc")
-            )
-            out.loc[mask_jd.index[mask_jd]] = dt_jd
-        remaining = series[~(mask_mjd | mask_jd)]
-        if remaining.size:
-            out.loc[remaining.index] = pd.to_datetime(
-                remaining, utc=True, errors="coerce"
-            )
-        return out
-    dt = pd.to_datetime(series, utc=True, errors="coerce")
-    if dt.dt.tz is None:
-        dt = dt.dt.tz_localize("UTC")
-    return dt
+
+    # Helper: keep only dates within a reasonable human time span
+    def _in_bounds(dt: pd.Series) -> pd.Series:
+        try:
+            years = dt.dt.year
+        except Exception:
+            return pd.Series(False, index=dt.index)
+        return (years >= 1900) & (years <= 2200)
+
+    # 1) MJD (days)
+    mask_mjd = numeric.between(30000, 90000, inclusive="both")
+    if mask_mjd.any():
+        dt = pd.to_datetime(
+            Time(numeric[mask_mjd].values, format="mjd").to_datetime(_dt_timezone.utc)
+        )
+        out.loc[mask_mjd] = dt
+
+    # 2) JD (days)
+    mask_jd = numeric.between(2400000, 2500000, inclusive="both")
+    if mask_jd.any():
+        dt = pd.to_datetime(
+            Time(numeric[mask_jd].values, format="jd").to_datetime(_dt_timezone.utc)
+        )
+        out.loc[mask_jd] = dt
+
+    # 3) Unix epoch (seconds, milliseconds, microseconds)
+    mask_num_remaining = out.isna() & numeric.notna()
+    if mask_num_remaining.any():
+        nums = numeric[mask_num_remaining]
+        # seconds
+        try:
+            dt_s = pd.to_datetime(nums, unit="s", origin="unix", utc=True, errors="coerce")
+        except TypeError:
+            dt_s = pd.Series(pd.NaT, index=nums.index, dtype="datetime64[ns, UTC]")
+        ok_s = _in_bounds(dt_s) & dt_s.notna()
+        out.loc[ok_s.index[ok_s]] = dt_s[ok_s]
+
+        # milliseconds
+        mask_after_s = out.isna() & numeric.notna()
+        if mask_after_s.any():
+            nums_ms = numeric[mask_after_s]
+            try:
+                dt_ms = pd.to_datetime(nums_ms, unit="ms", origin="unix", utc=True, errors="coerce")
+            except TypeError:
+                dt_ms = pd.Series(pd.NaT, index=nums_ms.index, dtype="datetime64[ns, UTC]")
+            ok_ms = _in_bounds(dt_ms) & dt_ms.notna()
+            out.loc[ok_ms.index[ok_ms]] = dt_ms[ok_ms]
+
+        # microseconds
+        mask_after_ms = out.isna() & numeric.notna()
+        if mask_after_ms.any():
+            nums_us = numeric[mask_after_ms]
+            try:
+                dt_us = pd.to_datetime(nums_us, unit="us", origin="unix", utc=True, errors="coerce")
+            except TypeError:
+                dt_us = pd.Series(pd.NaT, index=nums_us.index, dtype="datetime64[ns, UTC]")
+            ok_us = _in_bounds(dt_us) & dt_us.notna()
+            out.loc[ok_us.index[ok_us]] = dt_us[ok_us]
+
+    # 4) Fallback: parse the rest via pandas (treat remaining numerics as strings)
+    mask_remaining = out.isna()
+    if mask_remaining.any():
+        # Convert numerics to strings so that values like 20240101 are read as calendar dates
+        remainder = series[mask_remaining]
+        as_str = remainder.astype(str)
+        dt_fallback = pd.to_datetime(as_str, utc=True, errors="coerce")
+        # If tz is missing, localize to UTC (pd.to_datetime with utc=True already does this)
+        out.loc[mask_remaining] = dt_fallback
+
+    return out
 
 
 def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
