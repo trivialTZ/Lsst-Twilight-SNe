@@ -610,6 +610,8 @@ def _best_time_with_moon(
     step_min: int,
     min_alt_deg: float,
     min_moon_sep_deg: float,
+    *,
+    precomputed: dict | None = None,
 ) -> Tuple[float, datetime | None, float, float, float]:
     """Sample a window and return the best observation time.
 
@@ -623,18 +625,30 @@ def _best_time_with_moon(
     t0, t1 = window
     if t1 <= t0:
         return -np.inf, None, float("nan"), float("nan"), float("nan")
-    n = 1 + int((t1 - t0).total_seconds() // (step_min * 60))
-    ts = Time([t0 + timedelta(minutes=step_min * i) for i in range(n)])
-    altaz = AltAz(obstime=ts, location=loc)
+    if precomputed is None:
+        n = 1 + int((t1 - t0).total_seconds() // (step_min * 60))
+        ts = Time([t0 + timedelta(minutes=step_min * i) for i in range(n)])
+        altaz = AltAz(obstime=ts, location=loc)
+        moon_altaz = get_body("moon", ts).transform_to(altaz)
+        sun_altaz = get_sun(ts).transform_to(altaz)
+        moon_alt = moon_altaz.alt.to(u.deg).value
+        phase = 0.5 * (1 - np.cos(np.deg2rad(moon_altaz.separation(sun_altaz).deg)))
+        precomputed = {
+            "ts": ts,
+            "altaz": altaz,
+            "moon_altaz": moon_altaz,
+            "moon_alt": moon_alt,
+            "phase": phase,
+        }
+    ts = precomputed["ts"]
+    altaz = precomputed["altaz"]
+    moon_altaz = precomputed["moon_altaz"]
+    moon_alt = precomputed["moon_alt"]
+    phase = precomputed["phase"]
 
     sc_altaz = sc.transform_to(altaz)
     alt = sc_altaz.alt.to(u.deg).value
-    moon_altaz = get_body("moon", ts).transform_to(altaz)
-    sun_altaz = get_sun(ts).transform_to(altaz)
-
-    moon_alt = moon_altaz.alt.to(u.deg).value
     sep_deg = sc_altaz.separation(moon_altaz).deg
-    phase = 0.5 * (1 - np.cos(np.deg2rad(moon_altaz.separation(sun_altaz).deg)))
 
     factor = moon_separation_factor(moon_alt, phase)
     eff = min_moon_sep_deg * factor
@@ -650,3 +664,32 @@ def _best_time_with_moon(
         float(phase[j]),
         float(sep_deg[j]),
     )
+
+
+def precompute_window_ephemerides(
+    window: Tuple[datetime, datetime],
+    loc: EarthLocation,
+    step_min: int,
+) -> dict:
+    """Precompute Moon/Sun ephemerides shared by all targets in a window.
+
+    Returns a dict suitable for the ``precomputed`` parameter of
+    :func:`_best_time_with_moon`.
+    """
+    t0, t1 = window
+    if t1 <= t0:
+        return {}
+    n = 1 + int((t1 - t0).total_seconds() // (step_min * 60))
+    ts = Time([t0 + timedelta(minutes=step_min * i) for i in range(n)])
+    altaz = AltAz(obstime=ts, location=loc)
+    moon_altaz = get_body("moon", ts).transform_to(altaz)
+    sun_altaz = get_sun(ts).transform_to(altaz)
+    moon_alt = moon_altaz.alt.to(u.deg).value
+    phase = 0.5 * (1 - np.cos(np.deg2rad(moon_altaz.separation(sun_altaz).deg)))
+    return {
+        "ts": ts,
+        "altaz": altaz,
+        "moon_altaz": moon_altaz,
+        "moon_alt": moon_alt,
+        "phase": phase,
+    }

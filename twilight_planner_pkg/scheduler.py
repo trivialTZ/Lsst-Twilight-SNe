@@ -44,6 +44,7 @@ from .astro_utils import (
     _local_timezone_from_location,
     airmass_from_alt_deg,
     allowed_filters_for_sun_alt,
+    precompute_window_ephemerides,
     choose_filters_with_cap,
     great_circle_sep_deg,
     parse_sn_type_to_window_days,
@@ -874,6 +875,9 @@ def plan_twilight_range_with_caps(
     cfg: PlannerConfig,
     run_label: str | None = None,
     verbose: bool = True,
+    *,
+    stream_per_sn: bool = False,
+    stream_sequence: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate a twilight observing plan over a date range with per-window time caps.
 
@@ -959,10 +963,20 @@ def plan_twilight_range_with_caps(
     start = pd.to_datetime(start_date, utc=True).date()
     end = pd.to_datetime(end_date, utc=True).date()
 
-    pernight_rows: List[Dict] = []
+    label = run_label or "hybrid"
+    pernight_path = _path_plan(outdir, pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True), label)
+    nights_path = _path_summary(outdir, pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True), label)
+    seq_path = _path_sequence(outdir, pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True), label)
+
+    pernight_rows: List[Dict] = [] if not stream_per_sn else []  # day-batched if streaming
     nights_rows: List[Dict] = []
     # ---- NEW: true sequential execution order collector (one row per SN visit) ----
-    sequence_rows: list[dict] = []
+    sequence_rows: list[dict] = [] if not stream_sequence else []  # day-batched if streaming
+    # Streaming state
+    per_sn_header_written = False
+    seq_header_written = False
+    per_sn_count = 0
+    seq_count = 0
     nights = pd.date_range(start, end, freq="D")
     nights_iter = tqdm(nights, desc="Nights", unit="night", leave=True)
     tracker = PriorityTracker(
@@ -975,6 +989,9 @@ def plan_twilight_range_with_caps(
     tz_local = _local_timezone_from_location(site)
 
     for day_idx, day in enumerate(nights_iter):
+        # day-batched collectors (used when streaming)
+        day_pernight_rows: List[Dict] = []
+        day_sequence_rows: List[Dict] = []
         seen_ids: set[str] = set()
         # Here 'day' is interpreted as *local* civil date of the evening block
         windows = twilight_windows_for_local_night(
@@ -1091,15 +1108,21 @@ def plan_twilight_range_with_caps(
             continue
 
         best_alts, best_times, best_winidx = [], [], []
+        # Precompute per-window ephemerides shared across all targets
+        labeled = [
+            (i, w)
+            for i, w in enumerate(windows)
+            if w.get("label") in ("morning", "evening")
+        ]
+        precomp_by_idx: dict[int, dict] = {}
+        for idx_w, w in labeled:
+            precomp_by_idx[idx_w] = precompute_window_ephemerides(
+                (w["start"], w["end"]), site, cfg.twilight_step_min
+            )
         for _, row in subset.iterrows():
             sc = SkyCoord(row["RA_deg"] * u.deg, row["Dec_deg"] * u.deg, frame="icrs")
             max_alt, max_time, max_idx = -999.0, None, None
             best_moon = (float("nan"), float("nan"), float("nan"))
-            labeled = [
-                (i, w)
-                for i, w in enumerate(windows)
-                if w.get("label") in ("morning", "evening")
-            ]
             for idx_w, w in labeled:
                 alt_deg, t_utc, moon_alt_deg, moon_phase, moon_sep_deg = (
                     _best_time_with_moon(
@@ -1109,6 +1132,7 @@ def plan_twilight_range_with_caps(
                         cfg.twilight_step_min,
                         cfg.min_alt_deg,
                         req_sep,
+                        precomputed=precomp_by_idx.get(idx_w),
                     )
                 )
                 if alt_deg > max_alt:
@@ -1247,6 +1271,10 @@ def plan_twilight_range_with_caps(
 
             deferred: list[dict] = []
 
+            # Collect rows only for this window (avoids scanning global history)
+            pernight_rows_window: List[Dict] = []
+            sequence_rows_window: List[Dict] = []
+
             # ---- NEW: per-window running clock (UTC) for true order ----
             current_time_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
             order_in_window = 0
@@ -1298,8 +1326,15 @@ def plan_twilight_range_with_caps(
                 window_slew_times.append(summary["slew_time"])
                 window_airmasses.append(summary["airmass"])
                 window_skymags.extend(summary["sky_mags"])
-                pernight_rows.extend(effects["pernight_rows"])
-                sequence_rows.extend(effects["sequence_rows"])
+                # Accumulate rows globally (for non-streaming) and per-window/day
+                if not stream_per_sn:
+                    pernight_rows.extend(effects["pernight_rows"])
+                pernight_rows_window.extend(effects["pernight_rows"])
+                day_pernight_rows.extend(effects["pernight_rows"])  # day batch
+                if not stream_sequence:
+                    sequence_rows.extend(effects["sequence_rows"])
+                sequence_rows_window.extend(effects["sequence_rows"])
+                day_sequence_rows.extend(effects["sequence_rows"])  # day batch
                 if writer and effects["simlib_epochs"]:
                     libid_counter = _emit_simlib(
                         writer,
@@ -1431,33 +1466,36 @@ def plan_twilight_range_with_caps(
                         progress = True
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]
-            pernight_rows_for_window = [
-                r
-                for r in pernight_rows
-                if r["date"] == day.date().isoformat()
-                and r["twilight_window"] == window_label_out
-            ]
+            # Build window-local rows without scanning full history
+            pernight_rows_for_window = pernight_rows_window
             start_mjd = Time(win["start"]).mjd if win["start"] else 0.0
             end_mjd = Time(win["end"]).mjd if win["end"] else 0.0
             color_pairs = 0
             color_div = 0
             multi_visit = 0
-            for name, hist in tracker.history.items():
-                vis = [
-                    (mjd, filt)
-                    for mjd, filt in hist.visits
-                    if start_mjd <= mjd <= end_mjd
-                ]
-                if not vis:
-                    continue
-                blues = sum(1 for _, f in vis if f in tracker.BLUE)
-                reds = sum(1 for _, f in vis if f in tracker.RED)
-                if len(vis) >= 2:
-                    multi_visit += 1
-                pairs = min(blues, reds)
-                if pairs > 0:
-                    color_div += 1
-                    color_pairs += pairs
+            if pernight_rows_for_window:
+                # Count per-SN blue/red visits using the rows scheduled in this window
+                by_sn: dict[str, dict] = {}
+                for r in pernight_rows_for_window:
+                    name = r.get("SN") or r.get("Name")
+                    if not name:
+                        continue
+                    filt = r.get("filter")
+                    if not filt:
+                        continue
+                    d = by_sn.setdefault(name, {"blue": 0, "red": 0, "n": 0})
+                    d["n"] += 1
+                    if filt in tracker.BLUE:
+                        d["blue"] += 1
+                    elif filt in tracker.RED:
+                        d["red"] += 1
+                for name, d in by_sn.items():
+                    if d["n"] >= 2:
+                        multi_visit += 1
+                    pairs = min(d["blue"], d["red"])
+                    if pairs > 0:
+                        color_div += 1
+                        color_pairs += pairs
             pct_diff = 100.0 * color_div / max(multi_visit, 1)
             ws_summary = {
                 "window_sum": window_sum,
@@ -1499,7 +1537,8 @@ def plan_twilight_range_with_caps(
                 cfg.exposure_by_filter = original_exp
 
         planned_today = [
-            r for r in pernight_rows if r["date"] == day.date().isoformat()
+            r for r in (pernight_rows if not stream_per_sn else day_pernight_rows)
+            if r["date"] == day.date().isoformat()
         ]
         _log_day_status(
             day.date().isoformat(),
@@ -1514,28 +1553,51 @@ def plan_twilight_range_with_caps(
             verbose,
         )
 
-    pernight_df = pd.DataFrame(pernight_rows)
+        # Stream to disk at end of day to cap memory
+        if stream_per_sn and day_pernight_rows:
+            df_day = pd.DataFrame(day_pernight_rows)
+            df_day.to_csv(
+                pernight_path,
+                mode="a",
+                header=not per_sn_header_written,
+                index=False,
+            )
+            per_sn_header_written = True
+            per_sn_count += len(df_day)
+            day_pernight_rows.clear()
+        if stream_sequence and day_sequence_rows:
+            df_seq_day = pd.DataFrame(day_sequence_rows)
+            df_seq_day.to_csv(
+                seq_path,
+                mode="a",
+                header=not seq_header_written,
+                index=False,
+            )
+            seq_header_written = True
+            seq_count += len(df_seq_day)
+            day_sequence_rows.clear()
+
+    pernight_df = pd.DataFrame(pernight_rows) if not stream_per_sn else pd.DataFrame()
     nights_df = pd.DataFrame(nights_rows)
-    label = run_label or "hybrid"
-    pernight_path = _path_plan(outdir, start, end, label)
-    nights_path = _path_summary(outdir, start, end, label)
-    pernight_df.to_csv(pernight_path, index=False)
+    # Write final outputs
+    if not stream_per_sn:
+        pernight_df.to_csv(pernight_path, index=False)
     nights_df.to_csv(nights_path, index=False)
-    seq_df = pd.DataFrame(sequence_rows)
+    seq_df = pd.DataFrame(sequence_rows) if not stream_sequence else pd.DataFrame()
     if not seq_df.empty:
-        seq_path = _path_sequence(outdir, start, end, label)
         seq_df.to_csv(seq_path, index=False)
     if writer:
         writer.close()
     print("Wrote:")
     print(f"  {pernight_path}")
     print(f"  {nights_path}")
-    if not seq_df.empty:
+    if (not seq_df.empty) or seq_header_written:
         print(f"  true-sequence: {seq_path}")
     label_hint = f"{label}_"
     print(
         "NOTE: per-SN plan CSV is best-in-theory (keyed to best_time_utc), may overlap.\n"
         f"      Use lsst_twilight_sequence_true_{label_hint}*.csv for the serialized, on-sky order."
     )
-    print(f"Rows: per-SN={len(pernight_df)}, nights*windows={len(nights_df)}")
+    rows_per_sn = len(pernight_df) if not stream_per_sn else per_sn_count
+    print(f"Rows: per-SN={rows_per_sn}, nights*windows={len(nights_df)}")
     return pernight_df, nights_df
