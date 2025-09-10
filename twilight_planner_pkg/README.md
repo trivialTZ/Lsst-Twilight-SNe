@@ -47,6 +47,8 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
 2. **Hybrid (default)** — quick color (≥2 detections in ≥2 filters or ≥300 s total).
    - If Type Ia: escalate to the light‑curve goal
    - Else: drop priority (reallocate time)
+   - Low‑z boost: among candidates still needing observations, lower‑redshift
+     SNe are gently favored as a tie‑breaker (configurable; on by default)
 3. **LSST‑only light curves** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
 4. **`unique_first`** — maximize distinct SNe per night; repeats get a negative
    score after the first detection (dropped before capping). After
@@ -58,6 +60,20 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
 The tracker records every visit's color group and computes a unified filter
 bonus blending cadence pressure, per-filter cosmology weights, and any
 blue/red deficit so missing colors are filled early.
+
+### Low‑Redshift Prioritization (Hybrid)
+
+- When running the default `hybrid` strategy, the planner applies a mild
+  multiplicative boost to positive priority scores based on redshift, favoring
+  lower‑z objects. If no redshift is available, there is no change.
+- Controlled by `PlannerConfig`:
+  - `redshift_boost_enable` (default: `True`)
+  - `redshift_low_ref` (default: `0.1`) — ramp ends here; z ≥ this gets no boost
+  - `redshift_boost_max` (default: `1.2`) — max ×1.2 at z≈0
+  - `redshift_column` (optional) — force the column name if auto‑detection fails
+
+Input catalogs with columns like `redshift`, `z`, `zspec`, `zphot`, `zbest`, or
+`host_z` are auto‑recognized; a normalized `redshift` column is created.
 
 ### Cadence constraint (per-filter)
 
@@ -80,6 +96,8 @@ from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
 
 cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2663)
+# Default hybrid mode includes a gentle low‑z boost; to disable:
+# cfg.redshift_boost_enable = False
 plan_twilight_range_with_caps(
     '/path/to/your.csv',
     '/tmp/out',
@@ -98,6 +116,8 @@ used for the filename prefix.
 - `hybrid_detections` / `hybrid_exposure_s`: quick‑color thresholds (defaults: ≥2 detections across ≥2 filters or ≥300 s total)
 - `lc_detections` / `lc_exposure_s`: LC thresholds (defaults: ≥5 detections or ≥300 s across ≥2 filters)
 - Default escalation: once hybrid is met, cached `SN_type_raw` from the CSV decides whether to escalate (Ia) or deprioritize (non‑Ia)
+- Low‑z boost (hybrid): `redshift_boost_enable=True` (default), `redshift_low_ref=0.1`,
+  `redshift_boost_max=1.2`, and optional `redshift_column`
 
 ---
 
@@ -106,7 +126,8 @@ used for the filename prefix.
 ### Inputs & Pre‑processing
 - **Inputs** — candidates CSV, output directory, UTC start/end dates, and a `PlannerConfig` (site, filters, caps, overheads)
 - **Columns** — RA, Dec, discovery date (ISO or MJD), name, and type are auto‑detected if not specified
-- **Derived** — `RA_deg`, `Dec_deg`, `discovery_datetime` (UTC), `Name`, `SN_type_raw` are normalized/added
+- **Derived** — `RA_deg`, `Dec_deg`, `discovery_datetime` (UTC), `Name`, `SN_type_raw`,
+  and (if present) a numeric `redshift` column are normalized/added
 
 ### Eligibility
 - A target must rise above `min_alt_deg` (default 20°) at some sampled time

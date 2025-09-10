@@ -87,6 +87,21 @@ _MAG_SYNONYMS = {
     "z": ["zmag", "mag_z", "atlas_zmag", "last_mag_z", "zmaglast"],
 }
 
+# Common redshift column synonyms (first match wins)
+_REDSHIFT_SYNONYMS = [
+    "redshift",
+    "z",
+    "zsn",
+    "zspec",
+    "z_spec",
+    "zphot",
+    "z_phot",
+    "zbest",
+    "z_best",
+    "hostz",
+    "host_z",
+]
+
 
 def _fuzzy_pick(df: pd.DataFrame, synonyms: List[str]) -> Optional[str]:
     """Select a column whose normalized name matches any synonym.
@@ -556,6 +571,16 @@ def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
     df["typical_lifetime_days"] = df["SN_type_raw"].apply(
         lambda t: parse_sn_type_to_window_days(t, cfg)
     )
+    # Normalized redshift column (best-effort): look for configured column first,
+    # else try common synonyms. Non-finite or negative values become NaN.
+    red_col = cfg.redshift_column if (cfg.redshift_column in df.columns) else _fuzzy_pick(df, _REDSHIFT_SYNONYMS)
+    if red_col and red_col in df.columns:
+        z_num = pd.to_numeric(df[red_col], errors="coerce")
+        # reject negatives and absurdly large values
+        z_num = z_num.where((z_num >= 0.0) & (z_num < 10.0))
+        df["redshift"] = z_num.astype(float)
+    else:
+        df["redshift"] = np.nan
     return df
 
 

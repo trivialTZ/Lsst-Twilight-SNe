@@ -157,6 +157,16 @@ class PlannerConfig:
     max_swaps_per_window: int = 2
     first_epoch_color_boost: float = 1.5
 
+    # -- Redshift prioritization -----------------------------------------
+    redshift_boost_enable: bool = True
+    """If True, apply a mild boost to low-redshift SNe in hybrid strategy."""
+    redshift_low_ref: float = 0.1
+    """Reference z below which boost ramps up linearly toward max."""
+    redshift_boost_max: float = 1.2
+    """Maximum multiplicative boost at z=0 (≥1)."""
+    redshift_column: Optional[str] = None
+    """Optional explicit column name for redshift in the input catalog."""
+
     # -- Photometry / sky --------------------------------------------------
     pixel_scale_arcsec: float = 0.2
     zpt1s: Dict[str, float] | None = None

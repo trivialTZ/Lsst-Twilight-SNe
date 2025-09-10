@@ -103,8 +103,9 @@ def test_simlib_output(tmp_path, monkeypatch):
     s_lines = [line for line in lines if line.startswith("S:")]
     assert len(s_lines) == len(pernight_df)
 
-    assert lines[0] == "BEGIN LIBGEN"
-    header_line = "#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR MAG"
+    # BEGIN LIBGEN should appear after the global header
+    assert any(line.strip() == "BEGIN LIBGEN" for line in lines[:50])
+    header_line = "#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR"
     libid_indices = [i for i, line in enumerate(lines) if line.startswith("LIBID:")]
     assert lines.count(header_line) == len(libid_indices)
 
@@ -133,8 +134,10 @@ def test_simlib_output(tmp_path, monkeypatch):
         assert nobs_val == s_count
         last_end_line = end_line
 
-    assert lines[-1] == last_end_line
-    assert any("SURVEY:" in line for line in lines[:10])
+    # Final terminator present and last END_LIBID appears just before it
+    assert lines[-1].strip() == "END_OF_SIMLIB:"
+    assert lines[-2] == last_end_line
+    assert any("SURVEY:" in line for line in lines[:30])
 
 
 def test_writer_groups_epochs(tmp_path):

@@ -268,6 +268,7 @@ def _emit_simlib(
     ra_deg: float,
     dec_deg: float,
     epochs: list[dict],
+    redshift: float | None = None,
 ) -> int:
     """Write one SIMLIB block and return the incremented libid counter."""
     writer.start_libid(
@@ -276,6 +277,7 @@ def _emit_simlib(
         dec_deg,
         nobs=len(epochs),
         comment=name,
+        redshift=redshift,
     )
     libid_counter += 1
     for epoch in epochs:
@@ -384,6 +386,7 @@ def _prepare_window_candidates(
             "best_time_utc": row["best_time_utc"],
             "max_alt_deg": row["max_alt_deg"],
             "priority_score": row["priority_score"],
+            "redshift": (float(row.get("redshift")) if pd.notna(row.get("redshift", np.nan)) else None),
             "first_filter": first,
             "sn_type": row.get("SN_type_raw"),
             "allowed": [first] + rest,
@@ -993,6 +996,15 @@ def plan_twilight_range_with_caps(
         day_pernight_rows: List[Dict] = []
         day_sequence_rows: List[Dict] = []
         seen_ids: set[str] = set()
+        # Optional finite nightly cap enforced during scheduling for backfill
+        nightly_cap: int | None = None
+        _lim = getattr(cfg, "max_sn_per_night", None)
+        try:
+            _lim_f = float(_lim) if _lim is not None else float("inf")
+        except Exception:
+            _lim_f = float("inf")
+        if math.isfinite(_lim_f):
+            nightly_cap = int(_lim_f)
         # Here 'day' is interpreted as *local* civil date of the evening block
         windows = twilight_windows_for_local_night(
             day.date(),
@@ -1124,17 +1136,31 @@ def plan_twilight_range_with_caps(
             max_alt, max_time, max_idx = -999.0, None, None
             best_moon = (float("nan"), float("nan"), float("nan"))
             for idx_w, w in labeled:
-                alt_deg, t_utc, moon_alt_deg, moon_phase, moon_sep_deg = (
-                    _best_time_with_moon(
-                        sc,
-                        (w["start"], w["end"]),
-                        site,
-                        cfg.twilight_step_min,
-                        cfg.min_alt_deg,
-                        req_sep,
-                        precomputed=precomp_by_idx.get(idx_w),
+                # Call _best_time_with_moon with backward-compatibility for tests
+                # that monkeypatch a version without the 'precomputed' kwarg.
+                try:
+                    alt_deg, t_utc, moon_alt_deg, moon_phase, moon_sep_deg = (
+                        _best_time_with_moon(
+                            sc,
+                            (w["start"], w["end"]),
+                            site,
+                            cfg.twilight_step_min,
+                            cfg.min_alt_deg,
+                            req_sep,
+                            precomputed=precomp_by_idx.get(idx_w),
+                        )
                     )
-                )
+                except TypeError:
+                    alt_deg, t_utc, moon_alt_deg, moon_phase, moon_sep_deg = (
+                        _best_time_with_moon(
+                            sc,
+                            (w["start"], w["end"]),
+                            site,
+                            cfg.twilight_step_min,
+                            cfg.min_alt_deg,
+                            req_sep,
+                        )
+                    )
                 if alt_deg > max_alt:
                     max_alt, max_time, max_idx = alt_deg, t_utc, idx_w
                     best_moon = (moon_alt_deg, moon_phase, moon_sep_deg)
@@ -1182,6 +1208,24 @@ def plan_twilight_range_with_caps(
             ),
             axis=1,
         )
+        # Optional low-redshift boost for tie-breaking under the default (hybrid) strategy
+        if (
+            getattr(cfg, "redshift_boost_enable", True)
+            and str(cfg.priority_strategy).lower() == "hybrid"
+            and "redshift" in visible.columns
+        ):
+            z_ref = float(getattr(cfg, "redshift_low_ref", 0.1))
+            z_max = float(getattr(cfg, "redshift_boost_max", 1.2))
+
+            def _apply_zboost(row):
+                base = float(row["priority_score"])
+                if base <= 0.0:
+                    return base
+                zval = row.get("redshift")
+                boost = tracker.redshift_boost(zval, z_ref=z_ref, max_boost=z_max)
+                return float(base * boost)
+
+            visible["priority_score"] = visible.apply(_apply_zboost, axis=1)
         if cfg.priority_strategy == "unique_first":
             thr = float(getattr(cfg, "unique_first_drop_threshold", 0.0))
             visible = visible[visible["priority_score"] > thr].copy()
@@ -1201,11 +1245,15 @@ def plan_twilight_range_with_caps(
             if "best_window_index" in top_global.columns
             else {}
         )
-
-        for idx_w in sorted(set(top_global["best_window_index"].values)):
+        # Build a backfill pool: visible candidates not in the capped set
+        # These are considered later if deferrals or cadence gates leave
+        # unused time in a window.
+        backfill_pool = visible[~visible.index.isin(top_global.index)].copy()
+        # Consider any window that has either primary or backfill candidates
+        _win_idxs_primary = set(top_global["best_window_index"].values)
+        _win_idxs_backfill = set(backfill_pool["best_window_index"].values)
+        for idx_w in sorted(_win_idxs_primary | _win_idxs_backfill):
             group = top_global[top_global["best_window_index"] == idx_w].copy()
-            if group.empty:
-                continue
             # Skip unlabeled (previous/next day) twilight windows entirely
             if window_labels.get(idx_w) is None:
                 continue
@@ -1223,6 +1271,7 @@ def plan_twilight_range_with_caps(
             cad_first = getattr(cfg, "cadence_first_epoch_bonus_weight", 0.0)
 
             original_exp = cfg.exposure_by_filter
+            # Primary candidates (subject to nightly cap pre-selection)
             candidates, override_applied = _prepare_window_candidates(
                 group,
                 win,
@@ -1238,7 +1287,30 @@ def plan_twilight_range_with_caps(
                 cad_wt,
                 cad_first,
             )
-            if not candidates:
+            # Backfill pool for this window (lower-priority visibles)
+            backfill_group = backfill_pool[
+                backfill_pool["best_window_index"] == idx_w
+            ].copy()
+            backfill_candidates: list[dict] = []
+            if not backfill_group.empty:
+                bfill_list, _ov2 = _prepare_window_candidates(
+                    backfill_group,
+                    win,
+                    idx_w,
+                    cfg,
+                    site,
+                    tracker,
+                    mag_lookup,
+                    current_filter_by_window,
+                    cad_on,
+                    cad_tgt,
+                    cad_sig,
+                    cad_wt,
+                    cad_first,
+                )
+                backfill_candidates = bfill_list
+            # If both are empty, skip this window
+            if not candidates and not backfill_candidates:
                 if override_applied:
                     cfg.exposure_by_filter = original_exp
                 continue
@@ -1270,6 +1342,13 @@ def plan_twilight_range_with_caps(
             state = current_filter_by_window.get(idx_w)
 
             deferred: list[dict] = []
+            # Allow a single extra carousel swap during backfill if otherwise
+            # we'd leave time unused because no backfill candidates match the
+            # current carousel filter. Keeps change minimal and scoped.
+            backfill_extra_swap_used = False
+            # Track per-window revisits so each SN is at most scheduled twice
+            # (primary + one repeat) in this window when using leftover time.
+            revisited_ids: set[str] = set()
 
             # Collect rows only for this window (avoids scanning global history)
             pernight_rows_window: List[Dict] = []
@@ -1343,10 +1422,13 @@ def plan_twilight_range_with_caps(
                         t["RA_deg"],
                         t["Dec_deg"],
                         effects["simlib_epochs"],
+                        redshift=float(t.get("redshift")) if t.get("redshift") is not None else None,
                     )
                 return True
 
             for filt in batch_order:
+                if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                    break
                 batch = [
                     c
                     for c in candidates
@@ -1354,6 +1436,8 @@ def plan_twilight_range_with_caps(
                 ]
                 min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
                 while batch:
+                    if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                        break
                     time_left = float(cap_s - window_sum)
                     exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
                     # conservative per-visit wall time used for swap amortization
@@ -1452,7 +1536,12 @@ def plan_twilight_range_with_caps(
                         seen_ids.add(sn_id)
 
             progress = True
-            while progress and deferred and window_sum < cap_s:
+            while (
+                progress
+                and deferred
+                and window_sum < cap_s
+                and (nightly_cap is None or len(seen_ids) < nightly_cap)
+            ):
                 progress = False
                 # iterate over a snapshot so we can remove items during iteration
                 for t in list(deferred):
@@ -1464,6 +1553,332 @@ def plan_twilight_range_with_caps(
                         deferred.remove(t)
                         seen_ids.add(sn_id)
                         progress = True
+
+            # If time remains and the nightly cap allows, try backfilling with
+            # additional visible candidates not in the primary capped set.
+            if (
+                window_sum < cap_s
+                and (nightly_cap is None or len(seen_ids) < nightly_cap)
+                and backfill_candidates
+            ):
+                # Rebuild palette for backfill candidates (can differ from primary)
+                available_bf = {c["first_filter"] for c in backfill_candidates}
+                batch_order_bf = [f for f in pal_rot if f in available_bf]
+                batch_order_bf += [
+                    f
+                    for f in ["y", "z", "i", "r", "g", "u"]
+                    if f in available_bf and f not in batch_order_bf
+                ]
+
+                # Check if any backfill candidate can run without a swap under
+                # current cadence gating and carousel state. If none, we permit
+                # one extra swap beyond max_swaps_per_window to utilize time.
+                try:
+                    now_mjd_bf = Time(current_time_utc).mjd
+                except Exception:
+                    now_mjd_bf = None
+                def _passes_cad(t: dict) -> bool:
+                    if not cad_on or now_mjd_bf is None:
+                        return True
+                    for f in t.get("policy_allowed", t["allowed"]):
+                        if tracker.cadence_gate(t["Name"], f, now_mjd_bf, cad_tgt, cad_jit):
+                            return True
+                    return False
+                has_state_backfill = False
+                if state is not None:
+                    for t in backfill_candidates:
+                        if t["Name"] in seen_ids:
+                            continue
+                        if t.get("first_filter") == state and _passes_cad(t):
+                            has_state_backfill = True
+                            break
+                # If state is None we don't count this as requiring a swap; be conservative
+                allow_extra_swap = state is not None and (not has_state_backfill)
+
+                for filt in batch_order_bf:
+                    if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                        break
+                    batch = [
+                        c
+                        for c in backfill_candidates
+                        if c["first_filter"] == filt and c["Name"] not in seen_ids
+                    ]
+                    min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
+                    while batch and window_sum < cap_s:
+                        if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                            break
+                        time_left = float(cap_s - window_sum)
+                        exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
+                        est_visit_s = (
+                            max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
+                            + cfg.slew_small_time_s
+                            + cfg.slew_settle_s
+                        )
+                        k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
+                        k = max(1, min(len(batch), k_time))
+                        amortized_penalty = cfg.filter_change_s / k
+                        costs: List[float] = []
+                        for t in batch:
+                            now_mjd_cost = Time(current_time_utc).mjd
+                            gated_for_cost = [
+                                f
+                                for f in t.get("policy_allowed", t["allowed"])
+                                if (not cad_on)
+                                or tracker.cadence_gate(
+                                    t["Name"], f, now_mjd_cost, cad_tgt, cad_jit
+                                )
+                            ]
+                            if gated_for_cost:
+
+                                def _bonus_cost(f: str) -> float:
+                                    return tracker.compute_filter_bonus(
+                                        t["Name"],
+                                        f,
+                                        now_mjd_cost,
+                                        cad_tgt,
+                                        cad_sig,
+                                        cad_wt,
+                                        cad_first,
+                                        cfg.cosmo_weight_by_filter,
+                                        cfg.color_target_pairs,
+                                        cfg.color_window_days,
+                                        cfg.color_alpha,
+                                        cfg.first_epoch_color_boost,
+                                    )
+
+                                first_tmp = (
+                                    t["first_filter"]
+                                    if t["first_filter"] in gated_for_cost
+                                    else max(gated_for_cost, key=_bonus_cost)
+                                )
+                            else:
+                                first_tmp = None
+                            sep = (
+                                0.0
+                                if prev is None
+                                else great_circle_sep_deg(
+                                    prev["RA_deg"],
+                                    prev["Dec_deg"],
+                                    t["RA_deg"],
+                                    t["Dec_deg"],
+                                )
+                            )
+                            cost = slew_time_seconds(
+                                sep,
+                                small_deg=cfg.slew_small_deg,
+                                small_time=cfg.slew_small_time_s,
+                                rate_deg_per_s=cfg.slew_rate_deg_per_s,
+                                settle_s=cfg.slew_settle_s,
+                            )
+                            if first_tmp is None:
+                                cost = 1e9
+                            elif state is not None and state != first_tmp:
+                                limit = int(getattr(cfg, "max_swaps_per_window", 999))
+                                if swap_count_by_window.get(idx_w, 0) >= limit and not (
+                                    allow_extra_swap and not backfill_extra_swap_used
+                                ):
+                                    cost = 1e9
+                                else:
+                                    scale = 1.0
+                                    if (
+                                        tracker.cosmology_boost(
+                                            t["Name"],
+                                            first_tmp,
+                                            now_mjd_cost,
+                                            cfg.color_target_pairs,
+                                            cfg.color_window_days,
+                                            cfg.color_alpha,
+                                        )
+                                        > 1.0
+                                    ):
+                                        scale = cfg.swap_cost_scale_color
+                                    penalty = max(amortized_penalty, min_amort) * scale
+                                    cost += penalty
+                            costs.append(cost)
+                        j = int(np.argmin(costs))
+                        t = batch.pop(j)
+                        sn_id = t["Name"]
+                        if sn_id in seen_ids:
+                            continue
+                        if _attempt_schedule(t):
+                            seen_ids.add(sn_id)
+                            # Mark that we've consumed the one-time extra swap allowance
+                            # if the swap counter moved beyond the nominal limit.
+                            limit = int(getattr(cfg, "max_swaps_per_window", 999))
+                            if swap_count_by_window.get(idx_w, 0) > limit:
+                                backfill_extra_swap_used = True
+
+                # Final attempt to flush any deferred items created while
+                # backfilling, as long as time and the nightly cap allow.
+                progress = True
+                while (
+                    progress
+                    and deferred
+                    and window_sum < cap_s
+                    and (nightly_cap is None or len(seen_ids) < nightly_cap)
+                ):
+                    progress = False
+                    for t in list(deferred):
+                        sn_id = t["Name"]
+                        if sn_id in seen_ids:
+                            deferred.remove(t)
+                            continue
+                        if _attempt_schedule(t, allow_defer=False):
+                            deferred.remove(t)
+                            seen_ids.add(sn_id)
+                            progress = True
+
+            # If time still remains, allow a limited second visit to targets
+            # already observed earlier tonight (e.g., to take a complementary
+            # color in a different filter). This considers both primary and
+            # backfill pools and uses the same cadence and cost logic.
+            if (
+                window_sum < cap_s
+                and (nightly_cap is None or len(seen_ids) < nightly_cap)
+                and (candidates or backfill_candidates)
+            ):
+                repeat_candidates = [
+                    c
+                    for c in (candidates + backfill_candidates)
+                    if c["Name"] in seen_ids and c["Name"] not in revisited_ids
+                ]
+                if repeat_candidates:
+                    available_rep = {c["first_filter"] for c in repeat_candidates}
+                    batch_order_rep = [f for f in pal_rot if f in available_rep]
+                    batch_order_rep += [
+                        f
+                        for f in ["y", "z", "i", "r", "g", "u"]
+                        if f in available_rep and f not in batch_order_rep
+                    ]
+                    # Determine if a swap is unavoidable for repeats under current state
+                    try:
+                        now_mjd_rep = Time(current_time_utc).mjd
+                    except Exception:
+                        now_mjd_rep = None
+                    def _passes_cad_rep(t: dict) -> bool:
+                        if not cad_on or now_mjd_rep is None:
+                            return True
+                        for f in t.get("policy_allowed", t["allowed"]):
+                            if tracker.cadence_gate(t["Name"], f, now_mjd_rep, cad_tgt, cad_jit):
+                                return True
+                        return False
+                    has_state_repeat = False
+                    if state is not None:
+                        for t in repeat_candidates:
+                            if t.get("first_filter") == state and _passes_cad_rep(t):
+                                has_state_repeat = True
+                                break
+                    allow_extra_swap_rep = state is not None and (not has_state_repeat)
+
+                    for filt in batch_order_rep:
+                        if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                            break
+                        batch = [
+                            c
+                            for c in repeat_candidates
+                            if c["first_filter"] == filt and c["Name"] not in revisited_ids
+                        ]
+                        min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
+                        while batch and window_sum < cap_s:
+                            if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                                break
+                            time_left = float(cap_s - window_sum)
+                            exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
+                            est_visit_s = (
+                                max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
+                                + cfg.slew_small_time_s
+                                + cfg.slew_settle_s
+                            )
+                            k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
+                            k = max(1, min(len(batch), k_time))
+                            amortized_penalty = cfg.filter_change_s / k
+                            costs: List[float] = []
+                            for t in batch:
+                                now_mjd_cost = Time(current_time_utc).mjd
+                                gated_for_cost = [
+                                    f
+                                    for f in t.get("policy_allowed", t["allowed"])
+                                    if (not cad_on)
+                                    or tracker.cadence_gate(
+                                        t["Name"], f, now_mjd_cost, cad_tgt, cad_jit
+                                    )
+                                ]
+                                if gated_for_cost:
+                                    def _bonus_cost_rep(f: str) -> float:
+                                        return tracker.compute_filter_bonus(
+                                            t["Name"],
+                                            f,
+                                            now_mjd_cost,
+                                            cad_tgt,
+                                            cad_sig,
+                                            cad_wt,
+                                            cad_first,
+                                            cfg.cosmo_weight_by_filter,
+                                            cfg.color_target_pairs,
+                                            cfg.color_window_days,
+                                            cfg.color_alpha,
+                                            cfg.first_epoch_color_boost,
+                                        )
+                                    first_tmp = (
+                                        t["first_filter"]
+                                        if t["first_filter"] in gated_for_cost
+                                        else max(gated_for_cost, key=_bonus_cost_rep)
+                                    )
+                                else:
+                                    first_tmp = None
+                                sep = (
+                                    0.0
+                                    if prev is None
+                                    else great_circle_sep_deg(
+                                        prev["RA_deg"],
+                                        prev["Dec_deg"],
+                                        t["RA_deg"],
+                                        t["Dec_deg"],
+                                    )
+                                )
+                                cost = slew_time_seconds(
+                                    sep,
+                                    small_deg=cfg.slew_small_deg,
+                                    small_time=cfg.slew_small_time_s,
+                                    rate_deg_per_s=cfg.slew_rate_deg_per_s,
+                                    settle_s=cfg.slew_settle_s,
+                                )
+                                if first_tmp is None:
+                                    cost = 1e9
+                                elif state is not None and state != first_tmp:
+                                    limit = int(getattr(cfg, "max_swaps_per_window", 999))
+                                    if swap_count_by_window.get(idx_w, 0) >= limit and not (
+                                        allow_extra_swap_rep and not backfill_extra_swap_used
+                                    ):
+                                        cost = 1e9
+                                    else:
+                                        scale = 1.0
+                                        if (
+                                            tracker.cosmology_boost(
+                                                t["Name"],
+                                                first_tmp,
+                                                now_mjd_cost,
+                                                cfg.color_target_pairs,
+                                                cfg.color_window_days,
+                                                cfg.color_alpha,
+                                            )
+                                            > 1.0
+                                        ):
+                                            scale = cfg.swap_cost_scale_color
+                                        penalty = max(amortized_penalty, min_amort) * scale
+                                        cost += penalty
+                                costs.append(cost)
+                            j = int(np.argmin(costs))
+                            t = batch.pop(j)
+                            sn_id = t["Name"]
+                            if sn_id in revisited_ids:
+                                continue
+                            if _attempt_schedule(t):
+                                revisited_ids.add(sn_id)
+                                # Reuse the same one-time extra swap allowance across backfill/repeats
+                                limit = int(getattr(cfg, "max_swaps_per_window", 999))
+                                if swap_count_by_window.get(idx_w, 0) > limit:
+                                    backfill_extra_swap_used = True
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]
             # Build window-local rows without scanning full history

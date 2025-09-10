@@ -165,6 +165,44 @@ class PriorityTracker:
                 nudge = max(1.0, first_epoch_color_boost)
         return float(base * cosmo_w * boost * nudge)
 
+    def redshift_boost(
+        self,
+        z: Optional[float],
+        z_ref: float = 0.08,
+        max_boost: float = 1.7,
+    ) -> float:
+        """Return a multiplicative boost favouring low-redshift SNe.
+
+        Parameters
+        ----------
+        z : float or None
+            Redshift value for the supernova. If ``None`` or not finite,
+            returns ``1.0`` (no boost).
+        z_ref : float, default 0.08
+            Reference redshift. Objects at ``z_ref`` or higher receive
+            no boost; lower redshift objects are boosted linearly toward
+            ``max_boost`` as ``z``→0.
+        max_boost : float, default 1.7
+            Maximum multiplicative boost applied at ``z=0``.
+
+        Returns
+        -------
+        float
+            Boost factor ≥ 1.0.
+        """
+        try:
+            if z is None:
+                return 1.0
+            z_val = float(z)
+        except Exception:
+            return 1.0
+        if not math.isfinite(z_val) or z_ref <= 0.0 or max_boost <= 1.0:
+            return 1.0
+        if z_val >= z_ref:
+            return 1.0
+        frac = max(0.0, (z_ref - z_val) / z_ref)
+        return float(1.0 + (max_boost - 1.0) * frac)
+
     def record_detection(
         self,
         name: str,
