@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 twilight_outputs/*
 !twilight_outputs/.gitkeep
+*.gz
+*.tar
+*.zip

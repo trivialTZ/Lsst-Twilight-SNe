@@ -55,12 +55,16 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
         mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    # Ensure deterministic first-filter choice and avoid extra swaps/repeats
+    monkeypatch.setattr(scheduler, "pick_first_filter_for_target", lambda *a, **k: "z")
+    monkeypatch.setattr(scheduler, "allowed_filters_for_window", lambda *a, **k: ["z"]) 
 
     # Set start_filter to match the likely first-choice filter ('z') so
     # the initial target does not count as a swap.
     cfg = PlannerConfig(
         filters=["i", "z"],
         start_filter="z",
+        max_sn_per_night=1,
         morning_cap_s=1000.0,
         evening_cap_s=1000.0,
     )
