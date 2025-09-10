@@ -56,7 +56,14 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
 
-    cfg = PlannerConfig(filters=["i", "z"], morning_cap_s=1000.0, evening_cap_s=1000.0)
+    # Set start_filter to match the likely first-choice filter ('z') so
+    # the initial target does not count as a swap.
+    cfg = PlannerConfig(
+        filters=["i", "z"],
+        start_filter="z",
+        morning_cap_s=1000.0,
+        evening_cap_s=1000.0,
+    )
     pernight, nights = plan_twilight_range_with_caps(
         str(csv), tmp_path, "2024-01-01", "2024-01-01", cfg, verbose=False
     )
