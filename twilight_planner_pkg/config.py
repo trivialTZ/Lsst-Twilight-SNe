@@ -71,6 +71,11 @@ class PlannerConfig:
         default_factory=list
     )
 
+    # Whether to evaluate filter viability using Sun altitude at each target's
+    # best_time_utc (more permissive early/late in the window) instead of the
+    # window midpoint Sun altitude. Defaults to midpoint for backwards-compat.
+    filter_policy_use_best_time_alt: bool = False
+
     # -- Slew model --------------------------------------------------------
     slew_small_deg: float = 3.5
     slew_small_time_s: float = 4.0
@@ -166,6 +171,38 @@ class PlannerConfig:
     """Maximum multiplicative boost at z=0 (≥1)."""
     redshift_column: Optional[str] = None
     """Optional explicit column name for redshift in the input catalog."""
+
+    # -- Low-z Ia special handling ----------------------------------------
+    # Disabled by default to preserve baseline/test behaviour; set these to
+    # enable stronger preference and tailored cadence/repeat policy for
+    # Ia-like objects at very low redshift.
+    low_z_ia_markers: List[str] = field(default_factory=lambda: ["ia", "1", "101"])
+    """Case-insensitive markers identifying Type Ia (e.g., 'Ia', '1', '101')."""
+    low_z_ia_z_threshold: float = 0.05
+    """Redshift threshold defining "low-z" for special Ia handling."""
+    low_z_ia_priority_multiplier: float = 1.0
+    """Multiply base priority for low-z Ia (1.0 = disabled)."""
+    low_z_ia_cadence_days_target: Optional[float] = None
+    """Optional per-target cadence target (days) for low-z Ia; None = global."""
+    low_z_ia_repeats_per_window: Optional[int] = None
+    """Optional max repeats per twilight window for low-z Ia (default 1)."""
+
+    # -- Backfill relax cadence -------------------------------------------
+    backfill_relax_cadence: bool = False
+    """If True, allow a last-resort backfill that ignores cadence gating
+    when time would otherwise go unused in a window. Swap and other
+    constraints still apply; only triggered after normal backfill/repeats.
+    """
+
+    # -- Catalog pre-filtering --------------------------------------------
+    only_ia: bool = False
+    """If True, restrict the input catalog to Ia-like types only.
+
+    Matching is case-insensitive and uses a simple substring rule for 'Ia':
+    any SN type whose normalized string contains 'ia' (e.g., 'SN Ia',
+    'Ia-91bg', 'Iax', 'SNIa?') is kept. Other types like 'II', 'Ib', 'Ic',
+    'IIn' are excluded.
+    """
 
     # -- Photometry / sky --------------------------------------------------
     pixel_scale_arcsec: float = 0.2

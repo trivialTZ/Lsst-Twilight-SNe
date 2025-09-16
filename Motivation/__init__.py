@@ -21,6 +21,7 @@ from .tw_plots import (
     plot_corner_comparison,
     plot_lcdm_1d,
     plot_lcdm_1d_comparison,
+    plot_fs8_scan,
     show_fig_y1_nz,
     summarize_y1_counts_in_range,
 )

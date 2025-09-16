@@ -145,6 +145,11 @@ def build_parser():
     p.add_argument("--gain", type=float, default=1.6)
     p.add_argument("--read-noise-e", type=float, default=9.0)
     p.add_argument("--allow-filter-changes-in-twilight", action="store_true")
+    p.add_argument(
+        "--only-ia",
+        action="store_true",
+        help="Restrict the input catalog to Ia-like types only (case-insensitive substring match)",
+    )
     return p
 
 
@@ -233,6 +238,7 @@ def main():
         gain_e_per_adu=args.gain,
         read_noise_e=args.read_noise_e,
         allow_filter_changes_in_twilight=args.allow_filter_changes_in_twilight,
+        only_ia=args.only_ia,
     )
     Path(args.out).mkdir(parents=True, exist_ok=True)
     plan_twilight_range_with_caps(

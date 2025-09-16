@@ -39,6 +39,14 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --strategy lc --lc-detections 5 --lc-exposure 300
 ```
 
+To restrict the input catalog to Type Ia-like objects, add `--only-ia`:
+
+```bash
+python -m twilight_planner_pkg.main --csv your.csv --out results \
+    --start 2024-01-01 --end 2024-01-07 --lat -30.2446 --lon -70.7494 --height 2663 \
+    --filters griz --exp g:5,r:5,i:5,z:5 --only-ia
+```
+
 ---
 
 ## Priority Modes
@@ -106,6 +114,12 @@ plan_twilight_range_with_caps(
     cfg,
     run_label='hybrid_strategy',
 )
+```
+
+To select only Type Ia-like objects programmatically:
+
+```python
+cfg.only_ia = True
 ```
 
 If ``run_label`` is omitted, ``"hybrid"`` (the default priority strategy) is

@@ -325,3 +325,176 @@ def plot_corner_comparison(
     fig.suptitle(title, y=0.93)
     fig.tight_layout()
     plt.show()
+
+
+def plot_fs8_scan(
+    flow_df,
+    *,
+    power_spectrum_dict: dict | None = None,
+    sig_floor_list: np.ndarray | None = None,
+    zlim_list: np.ndarray | None = None,
+    fisher_properties: dict | None = None,
+    parameter_dict: dict | None = None,
+    size_batch: int = 10_000,
+    number_worker: int = 20,
+    zmin: float = 0.02,
+    quiet: bool = True,
+    title: str = "fσ8 forecast vs error floor and zmax",
+) -> np.ndarray:
+    """Scan σ(fσ8) vs. added error floor and zmax using FLIP.
+
+    Parameters
+    ----------
+    flow_df : pandas.DataFrame
+        Table containing at least the FLIP-required columns:
+        ``ra`` (rad), ``dec`` (rad), ``zobs``, ``rcom_zobs``,
+        ``hubble_norm``, and ``dmu_error`` (mag). If ``dmu_error_base``
+        is not present, it will be set equal to ``dmu_error``.
+    power_spectrum_dict : dict, optional
+        Precomputed dict for FLIP covariance, e.g.,
+        ``{"vv": [[k, Pvv(k)]]}``. If None, a default will be computed
+        with CLASS using Planck-like values and growth-rate normalization.
+    sig_floor_list : array-like, optional
+        Values to add to ``dmu_error_base`` when scanning. Default is
+        linspace(0.035, 0.10, 6).
+    zlim_list : array-like, optional
+        Upper redshift limits to include in the scan (lower bound is ``zmin``).
+        Default is [0.04, 0.05, 0.06, 0.08, 0.10].
+    fisher_properties : dict, optional
+        Fisher options; defaults to ``{"inversion_method": "inverse"}``.
+    parameter_dict : dict, optional
+        Free parameters for FLIP Fisher; defaults to
+        ``{"fs8": 1.0, "sigv": 300.0, "sigma_M": 0.0}``.
+    size_batch : int, optional
+        FLIP covariance batch size.
+    number_worker : int, optional
+        Number of workers for FLIP covariance.
+    zmin : float, optional
+        Lower redshift cut for the scan.
+    title : str, optional
+        Plot title.
+
+    Returns
+    -------
+    numpy.ndarray
+        2D array of shape (len(zlim_list), len(sig_floor_list)) with σ(fσ8).
+    """
+    import os as _os
+    import logging as _logging
+    import numpy as _np
+    import matplotlib.pyplot as _plt
+
+    # Prefer CPU to avoid TPU/CUDA backend noise in logs
+    _os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    _os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
+    _os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+    # If possible, set JAX platform explicitly before flip/jax import
+    try:  # pragma: no cover
+        from jax import config as _jax_config  # type: ignore
+        _jax_config.update("jax_platform_name", "cpu")
+    except Exception:
+        pass
+
+    if quiet:
+        # Reduce INFO chatter from libraries
+        _logging.getLogger().setLevel(_logging.WARNING)
+        _logging.getLogger("jax._src.xla_bridge").setLevel(_logging.ERROR)
+        _logging.getLogger("root").setLevel(_logging.WARNING)
+
+    try:
+        import flip  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "flip is required for plot_fs8_scan; install flip-peculiar-velocity"
+        ) from e
+
+    df = flow_df.copy()
+    if "dmu_error_base" not in df.columns:
+        df["dmu_error_base"] = df["dmu_error"]
+
+    if sig_floor_list is None:
+        sig_floor_list = _np.linspace(0.035, 0.10, 6)
+    else:
+        sig_floor_list = _np.asarray(sig_floor_list, dtype=float)
+
+    if zlim_list is None:
+        zlim_list = _np.array([0.04, 0.05, 0.06, 0.08, 0.10], dtype=float)
+    else:
+        zlim_list = _np.asarray(zlim_list, dtype=float)
+
+    if fisher_properties is None:
+        fisher_properties = {"inversion_method": "inverse"}
+    if parameter_dict is None:
+        parameter_dict = {"fs8": 1.0, "sigv": 300.0, "sigma_M": 0.0}
+
+    # Power spectrum if not provided
+    if power_spectrum_dict is None:
+        # Default to CLASS growth-rate normalization with Planck-like params
+        kh, _, _, ptt, _ = flip.power_spectra.compute_power_spectra(
+            "class_engine",
+            {
+                "h": 0.6766,
+                "sigma8": 0.8102,
+                "n_s": 0.9665,
+                "omega_b": 0.02242,
+                "omega_cdm": 0.11933,
+            },
+            0,
+            1e-5,
+            0.2,
+            1500,
+            normalization_power_spectrum="growth_rate",
+        )
+        sigmau_fiducial = 21.0
+        power_spectrum_dict = {
+            "vv": [[kh, ptt * flip.utils.Du(kh, sigmau_fiducial) ** 2]]
+        }
+
+    fs8_grid = _np.full((len(zlim_list), len(sig_floor_list)), _np.nan, dtype=float)
+
+    for ii, zl in enumerate(zlim_list):
+        m = (df["zobs"] >= float(zmin)) & (df["zobs"] <= float(zl))
+        sub = df.loc[m].copy()
+        if sub.empty:
+            continue
+        for jj, sf in enumerate(sig_floor_list):
+            # Floors correspond to additional uncorrelated noise, so combine in quadrature
+            sub["dmu_error"] = _np.sqrt(sub["dmu_error_base"] ** 2 + float(sf) ** 2)
+            DF = flip.data_vector.FisherVelFromHDres(sub.to_dict(orient="list"))
+            Cfit = DF.compute_covariance(
+                "carreres23",
+                power_spectrum_dict,
+                size_batch=size_batch,
+                number_worker=number_worker,
+            )
+            FF = flip.fisher.FisherMatrix.init_from_covariance(
+                Cfit, DF, parameter_dict, fisher_properties=fisher_properties
+            )
+            names, Fm = FF.compute_fisher_matrix()
+            try:
+                idx = list(names).index("fs8")
+            except ValueError:
+                idx = 0
+            Covm = _np.linalg.pinv(Fm)
+            fs8_grid[ii, jj] = float(_np.sqrt(Covm[idx, idx]))
+
+    # Plot
+    _plt.figure(figsize=(7, 5), dpi=150)
+    for ii, zl in enumerate(zlim_list):
+        _plt.plot(
+            sig_floor_list,
+            fs8_grid[ii],
+            marker="o",
+            label=f"z≤{float(zl):.3f}",
+        )
+    _plt.xlabel("added floor to dμ_error [mag]")
+    _plt.ylabel("$\\sigma_{f\\sigma_8}$")
+    _plt.legend(frameon=False)
+    if title:
+        _plt.title(title)
+    _plt.grid(alpha=0.2)
+    _plt.tight_layout()
+    _plt.show()
+
+    return fs8_grid
