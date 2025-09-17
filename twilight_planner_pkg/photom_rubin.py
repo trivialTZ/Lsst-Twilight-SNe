@@ -4,6 +4,8 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import warnings
+
 from .astro_utils import airmass_from_alt_deg
 
 # mypy: ignore-errors
@@ -35,7 +37,7 @@ class PhotomConfig:
     k_m: Dict[str, float] | None = None
     fwhm_eff: Dict[str, float] | None = None
     read_noise_e: float = 6.0
-    gain_e_per_adu: float = 1.0
+    gain_e_per_adu: float = 1.6
     zpt_err_mag: float = 0.005
     # Pixel full-well thresholds (electrons)
     npe_pixel_saturate: int = 100_000
@@ -72,6 +74,23 @@ class PhotomConfig:
                 "z": 0.85,
                 "y": 0.90,
             }
+        # Soft configuration sanity checks: warn when values look unexpected.
+        if abs(float(self.pixel_scale_arcsec) - 0.2) > 1e-3:
+            warnings.warn(
+                (
+                    f"PhotomConfig.pixel_scale_arcsec={self.pixel_scale_arcsec} "
+                    "(Rubin design is ~0.2 arcsec/pix); verify the input."
+                ),
+                UserWarning,
+            )
+        if not (1.4 <= float(self.gain_e_per_adu) <= 1.8):
+            warnings.warn(
+                (
+                    f"PhotomConfig.gain_e_per_adu={self.gain_e_per_adu} "
+                    "(expected within ~1.5-1.7 e/ADU); saturation diagnostics may be off."
+                ),
+                UserWarning,
+            )
 
 
 @dataclass

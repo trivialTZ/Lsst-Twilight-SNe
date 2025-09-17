@@ -215,6 +215,31 @@ warning band are evaluated against the maximum of source and sky electrons.
 Any configured `sun_alt_exposure_ladder` sets an initial guess; the capping
 logic then enforces detector safety.
 
+#### Discovery-magnitude fallback (default enabled)
+
+When explicit per-band source magnitudes are missing in the input catalog, the
+planner now falls back to the catalog's discovery magnitude to drive saturation
+guard. This prevents overly long exposures in twilight even without per-band
+photometry.
+
+- If the catalog contains a `discoverymag` column, the scheduler builds a
+  per-band map as follows (configurable via `PlannerConfig`):
+  - `discovery_policy = "atlas_transform"` (default): if `discmagfilter` is
+    ATLAS `cyan`/`orange` (`c`/`o`), convert to r-band using a simple
+    color relation (assumed `g-r`, default 0.0). Copy that r to other bands with
+    a small safety margin (default 0.2 mag). If `discmagfilter` is `r`/`g`, use
+    it directly (with `g→r` using the same assumed color). Unknown filters fall
+    back to a conservative copy with margin.
+  - `discovery_policy = "copy"`: copy `discoverymag` to all planned bands with
+    the safety margin.
+- Knobs:
+  - `use_discovery_fallback` (default `True`)
+  - `discovery_assumed_gr` (default `0.0`)
+  - `discovery_margin_mag` (default `0.2`)
+
+This fallback is applied only when a discovery-magnitude column exists in the
+input. Otherwise the behavior is unchanged.
+
 ---
 
 ## Part 3: Science Formalism Implemented
@@ -363,6 +388,77 @@ If only rest‑frame host surface brightness is available, we apply Tolman dimmi
 An optional compact host knot can be included as an extra point‑like component with its own central‑pixel fraction.
 
 Default host SB (when per‑target host inputs are absent): the planner can apply a conservative r‑band typical value of \(\mu_{\rm host}\approx22\,\mathrm{mag/arcsec^2}\) (reflecting the 21–23 range seen in SDSS target selection and Freeman’s disk central SB after band conversion). This fallback is enabled by default and can be customized or disabled via `PlannerConfig.use_default_host_sb` and `PlannerConfig.default_host_mu_arcsec2_by_filter`.
+
+### Discovery‑Magnitude Fallback (ATLAS c/o to r with Color Priors)
+
+When per-band source magnitudes are missing, the planner can estimate them from
+the catalog discovery magnitude to drive saturation capping. The default policy
+(`discovery_policy = "atlas_priors"`) implements a conservative, physics-guided
+fallback using ATLAS `cyan`/`orange` color terms and SN color priors.
+
+1) Field‑star linear color terms (per field/night, if available):
+
+```
+(r - c)_star = alpha_c + beta_c * (g - r)_star,
+(r - o)_star = alpha_o + beta_o * (g - r)_star.
+```
+
+Defaults (if no per‑field fit): `alpha_c=0, beta_c=-0.47`, `alpha_o=0, beta_o=+0.26`.
+
+2) Discovery band → r band (SN): with discovery filter `f_disc in {c,o,g,r}`
+
+```
+r_SN ≈ m_disc +
+  { alpha_c + beta_c*(g-r)_SN,  if f_disc=c
+    alpha_o + beta_o*(g-r)_SN,  if f_disc=o
+    - (g-r)_SN,                 if f_disc=g
+    0,                          if f_disc=r }
+```
+
+To avoid saturation we choose the endpoint of `(g-r)_SN` that minimizes
+`r_SN` given the coefficient sign: if the coefficient in front of `(g-r)` is
+positive, choose the lower bound; if negative, the upper bound. Unknown
+`f_disc` falls back to a conservative copy with a small safety margin.
+
+3) Extrapolate from r to other bands using color‑prior intervals:
+
+```
+g_SN ≈ r_SN + (g - r)_prior,
+i_SN ≈ r_SN - (r - i)_prior,
+z_SN ≈ i_SN - (i - z)_prior,
+y_SN ≈ z_SN - (z - y)_prior - Δy.
+```
+
+For saturation safety, the endpoint of each color prior is chosen to minimize
+the target‑band magnitude (i.e., brighten the band). An extra y‑band safety
+margin `Δy` (default 0.25 mag) addresses larger uncertainty.
+
+4) Color priors (Ia‑like near peak; AB magnitudes):
+
+```
+(u - g) ∈ [0.3, 1.0],
+(g - r) ∈ [-0.25, +0.15],
+(r - i) ∈ [-0.15, +0.25],
+(i - z) ∈ [-0.10, +0.20],
+(z - y) ∈ [-0.05, +0.30].
+```
+
+For unknown type or non‑Ia, the chosen endpoint is widened by
+`discovery_non_ia_widen_mag` (default 0.1 mag) in the brightening direction.
+Priors and margins are configurable via `PlannerConfig`:
+
+- `discovery_color_priors_min`, `discovery_color_priors_max`
+- `discovery_non_ia_widen_mag`
+- `discovery_y_extra_margin_mag`
+
+This fallback only affects the saturation guard; science photometry is
+unchanged. Per‑band magnitudes in the input take precedence when present.
+
+By default, if a `discoverymag` column exists but per‑band magnitudes cannot be
+inferred for any target, the planner raises a `ValueError`
+(`discovery_error_on_missing=True`). This ensures the saturation guard is never
+silently bypassed. Set this flag to `False` only if you explicitly want to
+allow baseline exposures in rare cases where discovery metadata are unusable.
 
 ### 6) Priority Scoring (Hybrid → LC)
 

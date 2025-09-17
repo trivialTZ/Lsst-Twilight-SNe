@@ -8,4 +8,5 @@ __all__ = [
     "photom_rubin",
     "simlib_writer",
     "sky_model",
+    "examine",
 ]

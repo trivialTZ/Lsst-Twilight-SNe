@@ -210,10 +210,21 @@ class PlannerConfig:
     k_m: Dict[str, float] | None = None
     fwhm_eff: Dict[str, float] | None = None
     read_noise_e: float = 6.0
-    gain_e_per_adu: float = 1.0
+    gain_e_per_adu: float = 1.6
     zpt_err_mag: float = 0.01
     dark_sky_mag: Dict[str, float] | None = None
     twilight_delta_mag: float = 2.5
+
+    # -- Cosmology / peak-magnitude guardrails ----------------------------
+    H0_km_s_Mpc: float = 70.0
+    Omega_m: float = 0.3
+    Omega_L: float = 0.7
+    MB_absolute: float = -19.36
+    SALT2_alpha: float = 0.14
+    SALT2_beta: float = 3.1
+    Kcorr_approx_mag: float = 0.0
+    Kcorr_approx_mag_by_filter: Dict[str, float] = field(default_factory=dict)
+    peak_extra_bright_margin_mag: float = 0.3
 
     # -- SIMLIB ------------------------------------------------------------
     simlib_out: str | None = None
@@ -248,6 +259,7 @@ class PlannerConfig:
     current_mag_by_filter: Optional[Dict[str, float]] = None
     current_alt_deg: Optional[float] = None
     current_mjd: Optional[float] = None  # populated by scheduler for exposure capping
+    current_redshift: Optional[float] = None
     sky_provider: Optional[object] = None
 
     # Optional per-target host galaxy context (used in saturation capping)
@@ -271,6 +283,66 @@ class PlannerConfig:
 
     # Backwards-compatibility options
     allow_filter_changes_in_twilight: bool = False
+
+    # -- Discovery magnitude fallback (for saturation capping) ---------------
+    use_discovery_fallback: bool = True
+    """If True and the input catalog contains a discovery magnitude column
+    (e.g., ``discoverymag``), build per-band source magnitude estimates to
+    drive saturation capping when explicit per-band mags are missing."""
+
+    discovery_policy: str = "atlas_priors"
+    """Fallback policy: ``"atlas_transform"`` converts ATLAS ``cyan``/``orange``
+    to r-band (using :math:`g-r` assumption) and copies to other bands with a
+    small safety margin; ``"copy"`` copies discovery mag into all bands with
+    a small margin (more conservative)."""
+
+    discovery_assumed_gr: float = 0.0
+    """Assumed :math:`g-r` color used when converting ATLAS ``c``/``o`` to r."""
+
+    discovery_margin_mag: float = 0.2
+    """Safety margin (mag) subtracted when copying mags to other bands so the
+    fallback treats the source as slightly brighter, avoiding saturation."""
+
+    # Color prior ranges for discovery fallback (mag). Keys are color names.
+    discovery_color_priors_min: Dict[str, float] = field(
+        default_factory=lambda: {
+            "u-g": 0.3,
+            "g-r": -0.25,
+            "r-i": -0.15,
+            "i-z": -0.10,
+            "z-y": -0.05,
+        }
+    )
+    discovery_color_priors_max: Dict[str, float] = field(
+        default_factory=lambda: {
+            "u-g": 1.0,
+            "g-r": 0.15,
+            "r-i": 0.25,
+            "i-z": 0.20,
+            "z-y": 0.30,
+        }
+    )
+    discovery_non_ia_widen_mag: float = 0.1
+    """Widen color prior extreme by this amount for non‑Ia or unknown types.
+    Applied on the chosen extreme only, in the direction that brightens the
+    target band for saturation safety."""
+
+    discovery_y_extra_margin_mag: float = 0.25
+    """Additional safety margin (mag) applied when extrapolating to y band."""
+
+    # Optional ATLAS c/o → r linear coefficients (alpha + beta*(g-r)).
+    discovery_atlas_linear: Dict[str, Dict[str, float]] = field(
+        default_factory=lambda: {
+            "c": {"alpha": 0.0, "beta": -0.47},
+            "o": {"alpha": 0.0, "beta": 0.26},
+        }
+    )
+
+    discovery_error_on_missing: bool = True
+    """If True, raise an error when discovery fallback fails to provide a
+    magnitude for any planned band and target in the input catalog. This ensures
+    the saturation guard always has a source magnitude and never falls back to
+    a baseline exposure silently."""
 
     def __post_init__(self) -> None:  # type: ignore[override]
         if self.filter_change_time_s is not None:

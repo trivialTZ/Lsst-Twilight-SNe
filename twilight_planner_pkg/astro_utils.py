@@ -11,6 +11,7 @@ notes.
 from __future__ import annotations
 
 import warnings
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple, TypedDict
 
@@ -419,6 +420,73 @@ def per_sn_time_seconds(filters: Sequence[str], sep_deg: float, cfg: PlannerConf
     return total, slew, exposure, readout, fchanges
 
 
+def _Ez_for_lcdm(z: float, Om: float, Ol: float) -> float:
+    """Hubble parameter term :math:`E(z)` for a general ΛCDM cosmology."""
+
+    Ok = 1.0 - Om - Ol
+    return math.sqrt(Om * (1.0 + z) ** 3 + Ok * (1.0 + z) ** 2 + Ol)
+
+
+def distance_modulus_mu(
+    z: float,
+    H0: float = 70.0,
+    Om: float = 0.3,
+    Ol: float = 0.7,
+) -> float:
+    """Return the distance modulus μ(z) using Simpson integration for ΛCDM."""
+
+    zf = float(z)
+    if zf <= 0.0:
+        return 0.0
+    c_km_s = 299_792.458
+    steps = 100
+    h = zf / steps
+    inv_e0 = 1.0 / _Ez_for_lcdm(0.0, Om, Ol)
+    inv_en = 1.0 / _Ez_for_lcdm(zf, Om, Ol)
+    acc = inv_e0 + inv_en
+    for i in range(1, steps):
+        zi = i * h
+        weight = 4.0 if i % 2 else 2.0
+        acc += weight / _Ez_for_lcdm(zi, Om, Ol)
+    Dc_Mpc = (c_km_s / H0) * (h / 3.0) * acc
+    Dl_Mpc = (1.0 + zf) * Dc_Mpc
+    if Dl_Mpc <= 0.0:
+        return 0.0
+    return 5.0 * math.log10(Dl_Mpc * 1e6 / 10.0)
+
+
+def peak_mag_from_redshift(
+    z: float,
+    band: str,
+    *,
+    MB: float = -19.36,
+    alpha: float = 0.14,
+    beta: float = 3.1,
+    x1: float = 0.0,
+    c: float = 0.0,
+    K_approx: float = 0.0,
+    Ab_MW: float = 0.0,
+    Ab_host: float = 0.0,
+    H0: float = 70.0,
+    Om: float = 0.3,
+    Ol: float = 0.7,
+) -> float:
+    """Conservative SN Ia peak magnitude estimate from redshift.
+
+    ``band`` is accepted for API symmetry; the simplified model applies a
+    scalar K-correction via ``K_approx``. Defaults keep ``x1=c=0`` so the
+    result errs brightwards for saturation safety.
+    """
+
+    zf = float(z)
+    if zf <= 0.0:
+        mu = 0.0
+    else:
+        mu = distance_modulus_mu(zf, H0=H0, Om=Om, Ol=Ol)
+    M_eff = MB - alpha * x1 + beta * c
+    return mu + M_eff + K_approx + Ab_MW + Ab_host
+
+
 def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[str]]:
     """Return a saturation-safe exposure time and flags for ``band``.
 
@@ -437,11 +505,42 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
     """
 
     base = cfg.exposure_by_filter.get(band, 0.0)
-    if (
-        cfg.current_mag_by_filter is None
-        or band not in cfg.current_mag_by_filter
-        or cfg.current_alt_deg is None
-    ):
+    if cfg.current_alt_deg is None:
+        return base, set()
+
+    src_mag_map = dict((cfg.current_mag_by_filter or {}))
+    if band not in src_mag_map:
+        try:
+            z_val = float(getattr(cfg, "current_redshift", float("nan")))
+        except Exception:
+            z_val = float("nan")
+        if z_val == z_val and z_val > 0.0:
+            try:
+                H0 = float(getattr(cfg, "H0_km_s_Mpc", 70.0))
+                Om = float(getattr(cfg, "Omega_m", 0.3))
+                Ol = float(getattr(cfg, "Omega_L", 0.7))
+                MB = float(getattr(cfg, "MB_absolute", -19.36))
+                alpha = float(getattr(cfg, "SALT2_alpha", 0.14))
+                beta = float(getattr(cfg, "SALT2_beta", 3.1))
+                K0 = float(getattr(cfg, "Kcorr_approx_mag", 0.0))
+                K_by_filter = getattr(cfg, "Kcorr_approx_mag_by_filter", None)
+                if isinstance(K_by_filter, dict):
+                    K0 = float(K_by_filter.get(str(band).lower(), K0))
+                margin = float(getattr(cfg, "peak_extra_bright_margin_mag", 0.3))
+                src_mag_map[band] = peak_mag_from_redshift(
+                    z_val,
+                    band,
+                    MB=MB,
+                    alpha=alpha,
+                    beta=beta,
+                    H0=H0,
+                    Om=Om,
+                    Ol=Ol,
+                    K_approx=K0,
+                ) - margin
+            except Exception:
+                pass
+    if band not in src_mag_map:
         return base, set()
 
     from .photom_rubin import PhotomConfig, cap_exposure_for_saturation
@@ -508,7 +607,7 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         band,
         base,
         cfg.current_alt_deg,
-        cfg.current_mag_by_filter[band],
+        src_mag_map[band],
         sky_mag,
         phot_cfg,
         **kwargs,

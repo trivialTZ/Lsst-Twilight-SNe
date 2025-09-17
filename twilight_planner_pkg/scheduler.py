@@ -508,6 +508,9 @@ def _attempt_schedule_one(
         if isinstance(t["best_time_utc"], (datetime, pd.Timestamp))
         else None
     )
+    cfg.current_redshift = (
+        float(t.get("redshift")) if t.get("redshift") is not None else None
+    )
     now_mjd = Time(current_time_utc).mjd
     cad_on = getattr(cfg, "cadence_enable", True) and getattr(
         cfg, "cadence_per_filter", True
@@ -986,7 +989,11 @@ def plan_twilight_range_with_caps(
             df = df[types_norm.str.contains("ia", na=False)].copy()
     except Exception:
         pass
-    mag_lookup = extract_current_mags(df)
+    # Build per-target per-band magnitudes with discovery fallback so that
+    # saturation capping can use source brightness even when band mags are
+    # missing in the input catalog.
+    from .io_utils import build_mag_lookup_with_fallback
+    mag_lookup = build_mag_lookup_with_fallback(df, cfg)
 
     phot_cfg = PhotomConfig(
         pixel_scale_arcsec=cfg.pixel_scale_arcsec,

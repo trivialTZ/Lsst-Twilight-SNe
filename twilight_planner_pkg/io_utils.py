@@ -9,7 +9,11 @@ from astropy.coordinates import Angle
 from astropy.time import Time
 from datetime import timezone as _dt_timezone
 
-from .astro_utils import parse_sn_type_to_window_days, validate_coords
+from .astro_utils import (
+    parse_sn_type_to_window_days,
+    peak_mag_from_redshift,
+    validate_coords,
+)
 from .config import PlannerConfig
 
 # mypy: ignore-errors
@@ -81,11 +85,520 @@ _NAME_SYNONYMS = [
 _TYPE_SYNONYMS = ["type", "sntype", "class", "tnsclass", "subtype"]
 
 _MAG_SYNONYMS = {
-    "g": ["gmag", "mag_g", "atlas_gmag", "last_mag_g", "gmaglast"],
-    "r": ["rmag", "mag_r", "atlas_rmag", "last_mag_r", "rmaglast"],
-    "i": ["imag", "mag_i", "atlas_imag", "last_mag_i", "imaglast"],
-    "z": ["zmag", "mag_z", "atlas_zmag", "last_mag_z", "zmaglast"],
+    "g": [
+        "gmag",
+        "mag_g",
+        "atlas_gmag",
+        "last_mag_g",
+        "gmaglast",
+        # additional common variants
+        "atlas_mag_g",
+        "magpsf_g",
+        "psfmag_g",
+    ],
+    "r": [
+        "rmag",
+        "mag_r",
+        "atlas_rmag",
+        "last_mag_r",
+        "rmaglast",
+        # additional common variants
+        "atlas_mag_r",
+        "magpsf_r",
+        "psfmag_r",
+    ],
+    "i": [
+        "imag",
+        "mag_i",
+        "atlas_imag",
+        "last_mag_i",
+        "imaglast",
+        # additional common variants
+        "atlas_mag_i",
+        "magpsf_i",
+        "psfmag_i",
+    ],
+    "z": [
+        "zmag",
+        "mag_z",
+        "atlas_zmag",
+        "last_mag_z",
+        "zmaglast",
+        # additional common variants
+        "atlas_mag_z",
+        "magpsf_z",
+        "psfmag_z",
+    ],
+    "y": [
+        "ymag",
+        "mag_y",
+        "atlas_ymag",
+        "last_mag_y",
+        "ymaglast",
+        # additional common variants
+        "atlas_mag_y",
+        "magpsf_y",
+        "psfmag_y",
+    ],
 }
+
+# Fallback based on discovery magnitude
+_DISC_MAG_SYNONYMS = [
+    "discoverymag",
+    "disc_mag",
+    "discovermag",
+]
+_DISC_FILT_SYNONYMS = [
+    "discmagfilter",
+    "discoverymagfilter",
+    "disc_filter",
+    "filter",
+    "band",
+]
+
+
+def _pick_filter_column(df: pd.DataFrame) -> Optional[str]:
+    """Pick a discovery filter column from common synonyms if present."""
+    canon = dict(_normalize_col_names(df.columns))
+    for syn in _DISC_FILT_SYNONYMS:
+        key = "".join(ch for ch in syn.lower() if ch.isalnum())
+        for orig, norm in canon.items():
+            if norm == key:
+                return orig
+    return None
+
+
+def _norm_filter_string(x: object) -> str:
+    """Normalize a free-form filter string to a compact token.
+
+    Examples: "Orange" → "o", "ATLAS-o" → "o", "PS1 r" → "r".
+    """
+    s = str(x).strip().lower()
+    # remove common prefixes/suffixes and spaces
+    for rm in ["atlas-", "ps1", "ps ", "lsst", "panstarrs", "_ps1", " "]:
+        s = s.replace(rm, "")
+    alias = {
+        "orange": "o",
+        "cyan": "c",
+        "o": "o",
+        "c": "c",
+        "gpc1": "g",
+        "rpc1": "r",
+        "ipc1": "i",
+        "zpc1": "z",
+        "ypc1": "y",
+        "g": "g",
+        "r": "r",
+        "i": "i",
+        "z": "z",
+        "y": "y",
+    }
+    return alias.get(s, s)
+
+
+def _to_r_from_atlas(discovery_mag: float, disc_filter: str, assumed_gr: float = 0.0) -> Optional[float]:
+    """Approximate r-band mag from ATLAS c/o using simple color relations.
+
+    With no color (g-r≈0), this reduces to r≈c or r≈o.
+    """
+    try:
+        dm = float(discovery_mag)
+    except Exception:
+        return None
+    f = str(disc_filter).lower()
+    if f == "c":
+        return dm - 0.47 * float(assumed_gr)
+    if f == "o":
+        return dm + 0.26 * float(assumed_gr)
+    return None
+
+
+def infer_src_mag_from_discovery_pro(
+    df: pd.DataFrame,
+    planned_bands: List[str],
+    *,
+    policy: str = "atlas_transform",
+    assumed_gr: float = 0.0,
+    margin_mag: float = 0.2,
+) -> Dict[str, Dict[str, float]]:
+    """Infer per-band source magnitudes from discovery magnitude.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Catalog after :func:`standardize_columns`.
+    planned_bands : list[str]
+        Bands that the planner intends to observe (cfg.filters).
+    policy : str
+        "copy" to copy discoverymag into all bands minus ``margin_mag``;
+        "atlas_transform" to convert ATLAS c/o to r (using ``assumed_gr``),
+        copy to others with a small margin.
+    assumed_gr : float
+        Assumed g-r color used in ATLAS c/o → r transformation.
+    margin_mag : float
+        Safety margin (mag) to make copied mags brighter (conservative).
+    """
+    # Pick discovery magnitude column
+    disc_mag_col = None
+    canon = dict(_normalize_col_names(df.columns))
+    for syn in _DISC_MAG_SYNONYMS:
+        key = "".join(ch for ch in syn.lower() if ch.isalnum())
+        for orig, norm in canon.items():
+            if norm == key:
+                disc_mag_col = orig
+                break
+        if disc_mag_col:
+            break
+    if disc_mag_col is None:
+        return {}
+
+    filt_col = _pick_filter_column(df)
+    out: Dict[str, Dict[str, float]] = {}
+    for _, row in df.iterrows():
+        name = str(row.get("Name", row.name))
+        dm = row.get(disc_mag_col)
+        try:
+            dm = float(dm)
+        except Exception:
+            continue
+        disc_f = _norm_filter_string(row.get(filt_col, "")) if filt_col else ""
+        src: Dict[str, float] = {}
+
+        if policy == "copy":
+            for b in planned_bands:
+                src[b] = dm - float(margin_mag)
+        elif policy == "atlas_transform":
+            # Determine r first
+            if disc_f == "r":
+                rmag = dm
+            elif disc_f == "g":
+                rmag = dm - float(assumed_gr)
+            elif disc_f in ("c", "o"):
+                rmag = _to_r_from_atlas(dm, disc_f, assumed_gr=assumed_gr)
+                if rmag is None:
+                    rmag = dm - float(margin_mag)
+            else:
+                rmag = dm - float(margin_mag)
+
+            for b in planned_bands:
+                if str(b).lower() == "r":
+                    src[b] = float(rmag)
+                else:
+                    src[b] = float(rmag) - float(margin_mag)
+        else:  # atlas_priors (use color prior ranges for conservative bright estimate)
+            # Read priors and knobs
+            pri_min = getattr(df, "_dummy", None)  # placeholder
+            # pull from cfg-like attributes via closure? Not available here; use defaults
+            # Overload via a small helper that reads from a global config isn't ideal.
+            # Instead, we support atlas_priors in build_mag_lookup_with_fallback below where cfg is present.
+            # Here we just fallback to atlas_transform behavior.
+            if disc_f == "r":
+                rmag = dm
+            elif disc_f == "g":
+                rmag = dm - float(assumed_gr)
+            elif disc_f in ("c", "o"):
+                rmag = _to_r_from_atlas(dm, disc_f, assumed_gr=assumed_gr)
+                if rmag is None:
+                    rmag = dm - float(margin_mag)
+            else:
+                rmag = dm - float(margin_mag)
+            for b in planned_bands:
+                if str(b).lower() == "r":
+                    src[b] = float(rmag)
+                else:
+                    src[b] = float(rmag) - float(margin_mag)
+
+        out[name] = src
+    return out
+
+
+def _merge_mag_maps(
+    base: Dict[str, Dict[str, float]], fallback: Dict[str, Dict[str, float]]
+) -> Dict[str, Dict[str, float]]:
+    """Merge two {Name: {band: mag}} maps, preferring values from ``base``."""
+    out: Dict[str, Dict[str, float]] = {}
+    names = set(base.keys()) | set(fallback.keys())
+    for n in names:
+        bmap = dict(fallback.get(n, {}))
+        bmap.update(base.get(n, {}))  # base wins
+        if bmap:
+            out[n] = bmap
+    return out
+
+
+def build_mag_lookup_with_fallback(df: pd.DataFrame, cfg: PlannerConfig) -> Dict[str, Dict[str, float]]:
+    """Return per-target per-band magnitudes with discovery fallback.
+
+    This wraps :func:`extract_current_mags` and, when necessary, fills missing
+    bands or targets using discovery magnitude heuristics. Fallback is active
+    only when the input contains a discovery magnitude column.
+    """
+    base = extract_current_mags(df)
+    # Only activate fallback if the config allows and discovery mag is present
+    if not getattr(cfg, "use_discovery_fallback", True):
+        return base
+    planned = list(getattr(cfg, "filters", []) or [])
+    if not planned:
+        planned = ["r", "i", "z", "y", "g"]
+    policy = str(getattr(cfg, "discovery_policy", "atlas_priors") or "atlas_priors")
+    assumed_gr = float(getattr(cfg, "discovery_assumed_gr", 0.0))
+    margin = float(getattr(cfg, "discovery_margin_mag", 0.2))
+
+    fb_disc: Dict[str, Dict[str, float]] = {}
+    if policy == "atlas_priors":
+        fb_disc = _infer_from_discovery_with_priors(df, planned, cfg)
+    else:
+        fb_disc = infer_src_mag_from_discovery_pro(
+            df, planned, policy=policy, assumed_gr=assumed_gr, margin_mag=margin
+        )
+
+    try:
+        fb_peak = _infer_peak_from_redshift(df, planned, cfg)
+    except Exception:
+        fb_peak = {}
+
+    fallback_combined: Dict[str, Dict[str, float]] = {}
+    if fb_disc or fb_peak:
+        names = set(fb_disc.keys()) | set(fb_peak.keys())
+        for name in names:
+            band_map: Dict[str, float] = {}
+            disc_map = fb_disc.get(name, {})
+            peak_map = fb_peak.get(name, {})
+            bands = set(disc_map.keys()) | set(peak_map.keys())
+            for band in bands:
+                candidates = []
+                if band in disc_map:
+                    candidates.append(float(disc_map[band]))
+                if band in peak_map:
+                    candidates.append(float(peak_map[band]))
+                if candidates:
+                    band_map[band] = min(candidates)
+            if band_map:
+                fallback_combined[name] = band_map
+
+    fallback_source = fallback_combined or fb_disc or fb_peak
+    merged = _merge_mag_maps(base, fallback_source) if fallback_source else base
+
+    # Enforce completeness if requested: every Name in df must have values for all planned bands
+    if getattr(cfg, "discovery_error_on_missing", True):
+        planned_set = set(str(b).lower() for b in planned)
+        missing: list[str] = []
+        incomplete: list[str] = []
+        for _, row in df.iterrows():
+            name = str(row.get("Name", row.name))
+            bandmap = merged.get(name)
+            if not bandmap:
+                missing.append(name)
+                continue
+            have = set(str(b).lower() for b in bandmap.keys())
+            # restrict to planned bands present in priors/generation
+            need = {b for b in planned_set if b in {"u","g","r","i","z","y"}}
+            if not need.issubset(have):
+                incomplete.append(name)
+        if missing or incomplete:
+            details = []
+            if missing:
+                details.append(f"missing mags for: {', '.join(missing[:5])}{'...' if len(missing)>5 else ''}")
+            if incomplete:
+                details.append(f"incomplete mags for: {', '.join(incomplete[:5])}{'...' if len(incomplete)>5 else ''}")
+            raise ValueError(
+                "Discovery fallback failed to produce per-band magnitudes for all targets: "
+                + "; ".join(details)
+            )
+
+    return merged
+
+
+def _color_extreme(color: str, sign_k: int, cfg: PlannerConfig, is_non_ia: bool) -> float:
+    """Return the color extreme that minimizes the target-band magnitude.
+
+    If the relation is ``target = base + sign_k * color``, choose the extreme
+    of ``color`` that minimizes ``target``. For ``sign_k=+1`` choose the lower
+    bound; for ``sign_k=-1`` choose the upper bound. If ``is_non_ia`` widen the
+    chosen extreme by ``cfg.discovery_non_ia_widen_mag`` further in the same
+    direction (more extreme), for saturation safety.
+    """
+    cmin = cfg.discovery_color_priors_min.get(color, 0.0)
+    cmax = cfg.discovery_color_priors_max.get(color, 0.0)
+    widen = float(getattr(cfg, "discovery_non_ia_widen_mag", 0.0) or 0.0)
+    if sign_k >= 0:
+        val = float(cmin)
+        if is_non_ia:
+            val -= widen
+        return val
+    else:
+        val = float(cmax)
+        if is_non_ia:
+            val += widen
+        return val
+
+
+def _is_non_ia_type(row: pd.Series) -> bool:
+    t = str(row.get("SN_type_raw", "")).strip().lower()
+    return (not t) or ("ia" not in t)
+
+
+def _infer_from_discovery_with_priors(
+    df: pd.DataFrame, planned_bands: List[str], cfg: PlannerConfig
+) -> Dict[str, Dict[str, float]]:
+    """Infer per-band mags from discovery mag using ATLAS c/o→r color terms and priors.
+
+    Implements conservative (bright-side) choice of color endpoints to avoid
+    saturation. Converts discovery filter to r, then extrapolates to other
+    planned bands via chained colors and an extra safety margin in y.
+    """
+    # Pick discovery magnitude column
+    disc_mag_col = None
+    canon = dict(_normalize_col_names(df.columns))
+    for syn in _DISC_MAG_SYNONYMS:
+        key = "".join(ch for ch in syn.lower() if ch.isalnum())
+        for orig, norm in canon.items():
+            if norm == key:
+                disc_mag_col = orig
+                break
+        if disc_mag_col:
+            break
+    if disc_mag_col is None:
+        return {}
+
+    filt_col = _pick_filter_column(df)
+    out: Dict[str, Dict[str, float]] = {}
+    for _, row in df.iterrows():
+        name = str(row.get("Name", row.name))
+        dm = row.get(disc_mag_col)
+        try:
+            dm = float(dm)
+        except Exception:
+            continue
+        disc_f = _norm_filter_string(row.get(filt_col, "")) if filt_col else ""
+        non_ia = _is_non_ia_type(row)
+
+        # 1) Find r from discovery
+        rmag: Optional[float]
+        if disc_f == "r":
+            rmag = dm
+        elif disc_f == "g":
+            # r = g - (g-r) → sign_k = -1
+            gr = _color_extreme("g-r", -1, cfg, non_ia)
+            rmag = dm - gr
+        elif disc_f in ("c", "o"):
+            pars = cfg.discovery_atlas_linear.get(disc_f, {"alpha": 0.0, "beta": 0.0})
+            alpha = float(pars.get("alpha", 0.0))
+            beta = float(pars.get("beta", 0.0))
+            # r = m_disc + alpha + beta*(g-r); choose (g-r) extreme based on sign(beta)
+            sign_k = 1 if beta >= 0 else -1  # increasing with g-r? then choose min; else max
+            gr = _color_extreme("g-r", -1 if beta < 0 else +1, cfg, non_ia)
+            rmag = dm + alpha + beta * gr
+        else:
+            # unknown discovery filter → conservative copy with margin
+            rmag = dm - float(cfg.discovery_margin_mag)
+
+        # 2) Extrapolate to planned bands using priors (bright-side extremes)
+        src: Dict[str, float] = {}
+        # r is anchor
+        if "r" in [b.lower() for b in planned_bands]:
+            src["r"] = float(rmag)
+
+        # g = r + (g-r) → sign_k = +1
+        if any(str(b).lower() == "g" for b in planned_bands):
+            gr = _color_extreme("g-r", +1, cfg, non_ia)
+            src["g"] = float(rmag + gr)
+
+        # i = r - (r-i) → sign_k = -1
+        if any(str(b).lower() == "i" for b in planned_bands):
+            ri = _color_extreme("r-i", -1, cfg, non_ia)
+            src["i"] = float(rmag - ri)
+
+        # z = i - (i-z) → compute i if missing
+        need_z = any(str(b).lower() == "z" for b in planned_bands)
+        if need_z:
+            if "i" not in src:
+                ri = _color_extreme("r-i", -1, cfg, non_ia)
+                src["i"] = float(rmag - ri)
+            iz = _color_extreme("i-z", -1, cfg, non_ia)
+            src["z"] = float(src["i"] - iz)
+
+        # y = z - (z-y) - Δy
+        need_y = any(str(b).lower() == "y" for b in planned_bands)
+        if need_y:
+            if "z" not in src:
+                # build z through i
+                if "i" not in src:
+                    ri = _color_extreme("r-i", -1, cfg, non_ia)
+                    src["i"] = float(rmag - ri)
+                iz = _color_extreme("i-z", -1, cfg, non_ia)
+                src["z"] = float(src["i"] - iz)
+            zy = _color_extreme("z-y", -1, cfg, non_ia)
+            y_extra = float(getattr(cfg, "discovery_y_extra_margin_mag", 0.25) or 0.0)
+            src["y"] = float(src["z"] - zy - y_extra)
+
+        # u = g + (u-g) → sign_k = +1; build g if missing
+        need_u = any(str(b).lower() == "u" for b in planned_bands)
+        if need_u:
+            if "g" not in src:
+                gr = _color_extreme("g-r", +1, cfg, non_ia)
+                src["g"] = float(rmag + gr)
+            ug = _color_extreme("u-g", +1, cfg, non_ia)
+            src["u"] = float(src["g"] + ug)
+
+        # Map to requested bands
+        out[name] = {b: src[b.lower()] for b in (str(x).lower() for x in planned_bands) if b in src}
+
+    return out
+
+
+def _infer_peak_from_redshift(
+    df: pd.DataFrame, planned_bands: List[str], cfg: PlannerConfig
+) -> Dict[str, Dict[str, float]]:
+    """Infer conservative peak magnitudes from redshift when present."""
+
+    planned = [str(b).lower() for b in planned_bands]
+    if not planned:
+        return {}
+
+    H0 = float(getattr(cfg, "H0_km_s_Mpc", 70.0))
+    Om = float(getattr(cfg, "Omega_m", 0.3))
+    Ol = float(getattr(cfg, "Omega_L", 0.7))
+    MB = float(getattr(cfg, "MB_absolute", -19.36))
+    alpha = float(getattr(cfg, "SALT2_alpha", 0.14))
+    beta = float(getattr(cfg, "SALT2_beta", 3.1))
+    K0 = float(getattr(cfg, "Kcorr_approx_mag", 0.0))
+    K_by_filter = getattr(cfg, "Kcorr_approx_mag_by_filter", None)
+    margin = float(getattr(cfg, "peak_extra_bright_margin_mag", 0.3))
+
+    out: Dict[str, Dict[str, float]] = {}
+    for _, row in df.iterrows():
+        name = str(row.get("Name", row.name))
+        z_val = row.get("redshift")
+        try:
+            zf = float(z_val)
+        except Exception:
+            continue
+        if not np.isfinite(zf) or zf <= 0.0:
+            continue
+        band_map: Dict[str, float] = {}
+        for band in planned:
+            k_eff = K0
+            if isinstance(K_by_filter, dict):
+                k_eff = float(K_by_filter.get(band, K0))
+            try:
+                m_peak = peak_mag_from_redshift(
+                    zf,
+                    band,
+                    MB=MB,
+                    alpha=alpha,
+                    beta=beta,
+                    H0=H0,
+                    Om=Om,
+                    Ol=Ol,
+                    K_approx=k_eff,
+                )
+            except Exception:
+                continue
+            band_map[band] = float(m_peak - margin)
+        if band_map:
+            out[name] = band_map
+    return out
 
 # Common redshift column synonyms (first match wins)
 _REDSHIFT_SYNONYMS = [

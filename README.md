@@ -25,6 +25,14 @@ background (per pixel). Optional inputs support rest‑frame host SB with
 Tolman dimming and an optional compact host knot. Setting ``--simlib-out``
 on the CLI writes a SIMLIB file alongside the usual planning CSVs.
 
+When per-band source magnitudes are missing, the planner can fall back to a
+catalog `discoverymag` to estimate source brightness for saturation guard
+(enabled by default; see `PlannerConfig.use_discovery_fallback`). If a
+`discoverymag` column is present but the code cannot infer per-band magnitudes
+for any target, it raises a `ValueError` by default
+(`PlannerConfig.discovery_error_on_missing=True`) to avoid silently skipping
+saturation protection.
+
 See `twilight_planner_pkg/README.md` for detailed usage instructions and
 module documentation.
 
