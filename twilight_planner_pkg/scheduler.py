@@ -116,6 +116,35 @@ def _policy_filters_mid(sun_alt_deg: float, cfg: PlannerConfig) -> list[str]:
     return allowed_filters_for_sun_alt(sun_alt_deg, cfg)
 
 
+def _is_low_z_ia(sn_type, redshift, cfg: PlannerConfig) -> bool:
+    """Return True if the target is Ia-like and below the configured z threshold.
+
+    Ia-like detection is based on cfg.low_z_ia_markers: for the special token
+    'ia' we do a substring match (e.g., 'Ia-91bg' counts), while other markers
+    are compared by exact, case-insensitive match (e.g., '1', '101').
+    """
+    try:
+        z = float(redshift) if redshift is not None else math.nan
+    except Exception:
+        z = math.nan
+    if not (isinstance(cfg.low_z_ia_z_threshold, (int, float)) and z < cfg.low_z_ia_z_threshold):
+        return False
+    if sn_type is None:
+        return False
+    t = str(sn_type).strip().lower()
+    if not t or t in {"nan", "none"}:
+        return False
+    markers = [str(m).strip().lower() for m in getattr(cfg, "low_z_ia_markers", ["ia"]) or ["ia"]]
+    for m in markers:
+        if m == "ia":
+            if "ia" in t:
+                return True
+        else:
+            if t == m:
+                return True
+    return False
+
+
 def _path_plan(
     outdir: str | Path,
     start: datetime,
@@ -319,9 +348,30 @@ def _prepare_window_candidates(
 
     candidates: list[dict] = []
     for _, row in group_df.iterrows():
+        # Optionally evaluate policy at each target's best time instead of the window midpoint.
+        sun_alt_for_policy = mid_sun_alt
+        if getattr(cfg, "filter_policy_use_best_time_alt", False) and pd.notna(
+            row.get("best_time_utc")
+        ):
+            try:
+                t_best = row["best_time_utc"]
+                t_best = (
+                    pd.Timestamp(t_best).tz_convert("UTC")
+                    if isinstance(t_best, pd.Timestamp)
+                    else pd.Timestamp(t_best).tz_localize("UTC")
+                )
+                sun_alt_for_policy = float(
+                    get_sun(Time(t_best.to_pydatetime()))
+                    .transform_to(AltAz(location=site, obstime=Time(t_best.to_pydatetime())))
+                    .alt.to(u.deg)
+                    .value
+                )
+            except Exception:
+                sun_alt_for_policy = mid_sun_alt
+
         allowed = allowed_filters_for_window(
             mag_lookup.get(row["Name"], {}),
-            mid_sun_alt,
+            sun_alt_for_policy,
             row["_moon_alt"],
             row["_moon_phase"],
             row["_moon_sep"],
@@ -329,7 +379,7 @@ def _prepare_window_candidates(
             cfg.fwhm_eff or 0.7,
         )
         allowed = [f for f in allowed if f in cfg.filters]
-        allowed_policy = _policy_filters_mid(mid_sun_alt, cfg)
+        allowed_policy = _policy_filters_mid(sun_alt_for_policy, cfg)
         allowed = [f for f in allowed if f in allowed_policy]
         moon_sep_ok = {
             f: row["_moon_sep"]
@@ -350,7 +400,7 @@ def _prepare_window_candidates(
             tracker,
             policy_allowed,
             cfg,
-            sun_alt_deg=mid_sun_alt,
+            sun_alt_deg=sun_alt_for_policy,
             moon_sep_ok=moon_sep_ok,
             current_mag=mag_lookup.get(row["Name"]),
             current_filter=current_filter_by_window.get(idx_w),
@@ -431,6 +481,7 @@ def _attempt_schedule_one(
         pass
 
     allow_defer: bool = window_state.get("allow_defer", True)
+    relax_cadence: bool = window_state.get("relax_cadence", False)
     deferred: list[dict] = window_state.get("deferred", [])
     window_sum: float = window_state.get("window_sum", 0.0)
     cap_s: float = window_state.get("cap_s", 0.0)
@@ -466,23 +517,37 @@ def _attempt_schedule_one(
     cad_sig = getattr(cfg, "cadence_bonus_sigma_days", 0.5)
     cad_wt = getattr(cfg, "cadence_bonus_weight", 0.25)
     cad_first = getattr(cfg, "cadence_first_epoch_bonus_weight", 0.0)
+    # Per-target cadence override for low-z Ia (smaller gate allowed)
+    cad_tgt_eff = cad_tgt
+    try:
+        if _is_low_z_ia(t.get("sn_type"), t.get("redshift"), cfg):
+            override = getattr(cfg, "low_z_ia_cadence_days_target", None)
+            if isinstance(override, (int, float)) and override > 0.0:
+                cad_tgt_eff = float(override)
+    except Exception:
+        pass
     if cad_on:
-        gated = [
-            f
-            for f in t["policy_allowed"]
-            if tracker.cadence_gate(t["Name"], f, now_mjd, cad_tgt, cad_jit)
-        ]
-        if not gated:
-            if allow_defer:
-                deferred.append(t)
-            return False, {}
+        if relax_cadence:
+            gated = list(t["policy_allowed"])  # ignore cadence gate in relaxed mode
+        else:
+            gated = [
+                f
+                for f in t["policy_allowed"]
+                if tracker.cadence_gate(
+                    t["Name"], f, now_mjd, cad_tgt_eff, cad_jit
+                )
+            ]
+            if not gated:
+                if allow_defer:
+                    deferred.append(t)
+                return False, {}
 
         def _bonus(f: str) -> float:
             return tracker.compute_filter_bonus(
                 t["Name"],
                 f,
                 now_mjd,
-                cad_tgt,
+                cad_tgt_eff,
                 cad_sig,
                 cad_wt,
                 cad_first,
@@ -622,7 +687,7 @@ def _attempt_schedule_one(
         end_utc = sn_end_utc
         days_since = tracker.days_since(t["Name"], f, visit_mjd)
         gate_passed = (
-            tracker.cadence_gate(t["Name"], f, visit_mjd, cad_tgt, cad_jit)
+            tracker.cadence_gate(t["Name"], f, visit_mjd, cad_tgt_eff, cad_jit)
             if cad_on
             else True
         )
@@ -657,7 +722,7 @@ def _attempt_schedule_one(
             "cadence_days_since": (
                 round(days_since, 3) if days_since is not None else np.nan
             ),
-            "cadence_target_d": cad_tgt,
+            "cadence_target_d": cad_tgt_eff,
             "cadence_gate_passed": bool(gate_passed),
             "slew_s": round(timing["slew_s"], 2) if f == filters_used[0] else 0.0,
             "cross_filter_change_s": (
@@ -914,6 +979,13 @@ def plan_twilight_range_with_caps(
     Path(outdir).mkdir(parents=True, exist_ok=True)
     raw = pd.read_csv(csv_path)
     df = standardize_columns(raw, cfg)
+    # Optional: restrict to Ia-like types
+    try:
+        if getattr(cfg, "only_ia", False):
+            types_norm = df["SN_type_raw"].astype(str).str.lower()
+            df = df[types_norm.str.contains("ia", na=False)].copy()
+    except Exception:
+        pass
     mag_lookup = extract_current_mags(df)
 
     phot_cfg = PhotomConfig(
@@ -1226,6 +1298,22 @@ def plan_twilight_range_with_caps(
                 return float(base * boost)
 
             visible["priority_score"] = visible.apply(_apply_zboost, axis=1)
+        # Stronger low-z Ia multiplier (configurable; disabled if =1.0)
+        if (
+            float(getattr(cfg, "low_z_ia_priority_multiplier", 1.0)) > 1.0
+            and "redshift" in visible.columns
+        ):
+            mult = float(getattr(cfg, "low_z_ia_priority_multiplier", 1.0))
+
+            def _apply_lowz_ia(row):
+                base = float(row["priority_score"])
+                if base <= 0.0:
+                    return base
+                if _is_low_z_ia(row.get("SN_type_raw"), row.get("redshift"), cfg):
+                    return float(base * mult)
+                return base
+
+            visible["priority_score"] = visible.apply(_apply_lowz_ia, axis=1)
         if cfg.priority_strategy == "unique_first":
             thr = float(getattr(cfg, "unique_first_drop_threshold", 0.0))
             visible = visible[visible["priority_score"] > thr].copy()
@@ -1346,9 +1434,9 @@ def plan_twilight_range_with_caps(
             # we'd leave time unused because no backfill candidates match the
             # current carousel filter. Keeps change minimal and scoped.
             backfill_extra_swap_used = False
-            # Track per-window revisits so each SN is at most scheduled twice
-            # (primary + one repeat) in this window when using leftover time.
-            revisited_ids: set[str] = set()
+            # Track per-window revisits: allow configurable repeats per SN
+            # (default remains one repeat: primary + one extra color)
+            repeat_counts: dict[str, int] = {}
 
             # Collect rows only for this window (avoids scanning global history)
             pernight_rows_window: List[Dict] = []
@@ -1453,12 +1541,22 @@ def plan_twilight_range_with_caps(
                     costs: List[float] = []
                     for t in batch:
                         now_mjd_cost = Time(current_time_utc).mjd
+                        lowz_ia_t = False
+                        try:
+                            lowz_ia_t = _is_low_z_ia(t.get("sn_type"), t.get("redshift"), cfg)
+                        except Exception:
+                            lowz_ia_t = False
+                        cad_tgt_for_t = (
+                            float(getattr(cfg, "low_z_ia_cadence_days_target", cad_tgt))
+                            if (lowz_ia_t and isinstance(getattr(cfg, "low_z_ia_cadence_days_target", None), (int, float)))
+                            else cad_tgt
+                        )
                         gated_for_cost = [
                             f
                             for f in t.get("policy_allowed", t["allowed"])
                             if (not cad_on)
                             or tracker.cadence_gate(
-                                t["Name"], f, now_mjd_cost, cad_tgt, cad_jit
+                                t["Name"], f, now_mjd_cost, cad_tgt_for_t, cad_jit
                             )
                         ]
                         if gated_for_cost:
@@ -1468,7 +1566,7 @@ def plan_twilight_range_with_caps(
                                     t["Name"],
                                     f,
                                     now_mjd_cost,
-                                    cad_tgt,
+                                    cad_tgt_for_t,
                                     cad_sig,
                                     cad_wt,
                                     cad_first,
@@ -1580,8 +1678,18 @@ def plan_twilight_range_with_caps(
                 def _passes_cad(t: dict) -> bool:
                     if not cad_on or now_mjd_bf is None:
                         return True
+                    lowz_ia_t = False
+                    try:
+                        lowz_ia_t = _is_low_z_ia(t.get("sn_type"), t.get("redshift"), cfg)
+                    except Exception:
+                        lowz_ia_t = False
+                    cad_tgt_for_t = (
+                        float(getattr(cfg, "low_z_ia_cadence_days_target", cad_tgt))
+                        if (lowz_ia_t and isinstance(getattr(cfg, "low_z_ia_cadence_days_target", None), (int, float)))
+                        else cad_tgt
+                    )
                     for f in t.get("policy_allowed", t["allowed"]):
-                        if tracker.cadence_gate(t["Name"], f, now_mjd_bf, cad_tgt, cad_jit):
+                        if tracker.cadence_gate(t["Name"], f, now_mjd_bf, cad_tgt_for_t, cad_jit):
                             return True
                     return False
                 has_state_backfill = False
@@ -1620,12 +1728,22 @@ def plan_twilight_range_with_caps(
                         costs: List[float] = []
                         for t in batch:
                             now_mjd_cost = Time(current_time_utc).mjd
+                            lowz_ia_t = False
+                            try:
+                                lowz_ia_t = _is_low_z_ia(t.get("sn_type"), t.get("redshift"), cfg)
+                            except Exception:
+                                lowz_ia_t = False
+                            cad_tgt_for_t = (
+                                float(getattr(cfg, "low_z_ia_cadence_days_target", cad_tgt))
+                                if (lowz_ia_t and isinstance(getattr(cfg, "low_z_ia_cadence_days_target", None), (int, float)))
+                                else cad_tgt
+                            )
                             gated_for_cost = [
                                 f
                                 for f in t.get("policy_allowed", t["allowed"])
                                 if (not cad_on)
                                 or tracker.cadence_gate(
-                                    t["Name"], f, now_mjd_cost, cad_tgt, cad_jit
+                                    t["Name"], f, now_mjd_cost, cad_tgt_for_t, cad_jit
                                 )
                             ]
                             if gated_for_cost:
@@ -1635,7 +1753,7 @@ def plan_twilight_range_with_caps(
                                         t["Name"],
                                         f,
                                         now_mjd_cost,
-                                        cad_tgt,
+                                        cad_tgt_for_t,
                                         cad_sig,
                                         cad_wt,
                                         cad_first,
@@ -1740,7 +1858,7 @@ def plan_twilight_range_with_caps(
                 repeat_candidates = [
                     c
                     for c in (candidates + backfill_candidates)
-                    if c["Name"] in seen_ids and c["Name"] not in revisited_ids
+                    if c["Name"] in seen_ids
                 ]
                 if repeat_candidates:
                     available_rep = {c["first_filter"] for c in repeat_candidates}
@@ -1758,8 +1876,18 @@ def plan_twilight_range_with_caps(
                     def _passes_cad_rep(t: dict) -> bool:
                         if not cad_on or now_mjd_rep is None:
                             return True
+                        lowz_ia_t = False
+                        try:
+                            lowz_ia_t = _is_low_z_ia(t.get("sn_type"), t.get("redshift"), cfg)
+                        except Exception:
+                            lowz_ia_t = False
+                        cad_tgt_for_t = (
+                            float(getattr(cfg, "low_z_ia_cadence_days_target", cad_tgt))
+                            if (lowz_ia_t and isinstance(getattr(cfg, "low_z_ia_cadence_days_target", None), (int, float)))
+                            else cad_tgt
+                        )
                         for f in t.get("policy_allowed", t["allowed"]):
-                            if tracker.cadence_gate(t["Name"], f, now_mjd_rep, cad_tgt, cad_jit):
+                            if tracker.cadence_gate(t["Name"], f, now_mjd_rep, cad_tgt_for_t, cad_jit):
                                 return True
                         return False
                     has_state_repeat = False
@@ -1773,11 +1901,24 @@ def plan_twilight_range_with_caps(
                     for filt in batch_order_rep:
                         if nightly_cap is not None and len(seen_ids) >= nightly_cap:
                             break
-                        batch = [
-                            c
-                            for c in repeat_candidates
-                            if c["first_filter"] == filt and c["Name"] not in revisited_ids
-                        ]
+                        batch = []
+                        for c in repeat_candidates:
+                            if c["first_filter"] != filt:
+                                continue
+                            name_c = c["Name"]
+                            # Determine per-target allowed repeats (default 1)
+                            lowz = False
+                            try:
+                                lowz = _is_low_z_ia(c.get("sn_type"), c.get("redshift"), cfg)
+                            except Exception:
+                                lowz = False
+                            allowed_rep = 1
+                            if lowz:
+                                rep_conf = getattr(cfg, "low_z_ia_repeats_per_window", None)
+                                if isinstance(rep_conf, int) and rep_conf >= 1:
+                                    allowed_rep = int(rep_conf)
+                            if repeat_counts.get(name_c, 0) < allowed_rep:
+                                batch.append(c)
                         min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
                         while batch and window_sum < cap_s:
                             if nightly_cap is not None and len(seen_ids) >= nightly_cap:
@@ -1871,14 +2012,215 @@ def plan_twilight_range_with_caps(
                             j = int(np.argmin(costs))
                             t = batch.pop(j)
                             sn_id = t["Name"]
-                            if sn_id in revisited_ids:
+                            # Per-target allowed repeats (default 1)
+                            lowz = False
+                            try:
+                                lowz = _is_low_z_ia(t.get("sn_type"), t.get("redshift"), cfg)
+                            except Exception:
+                                lowz = False
+                            allowed_rep = 1
+                            if lowz:
+                                rep_conf = getattr(cfg, "low_z_ia_repeats_per_window", None)
+                                if isinstance(rep_conf, int) and rep_conf >= 1:
+                                    allowed_rep = int(rep_conf)
+                            if repeat_counts.get(sn_id, 0) >= allowed_rep:
                                 continue
                             if _attempt_schedule(t):
-                                revisited_ids.add(sn_id)
+                                repeat_counts[sn_id] = repeat_counts.get(sn_id, 0) + 1
                                 # Reuse the same one-time extra swap allowance across backfill/repeats
                                 limit = int(getattr(cfg, "max_swaps_per_window", 999))
                                 if swap_count_by_window.get(idx_w, 0) > limit:
                                     backfill_extra_swap_used = True
+
+            # Final last-resort relaxed backfill: only if time remains and
+            # otherwise we'd leave the window under-utilized. This ignores
+            # cadence gating but keeps swap and other constraints. Only targets
+            # not yet observed in this window are considered to avoid
+            # exceeding repeat policies here.
+            if (
+                getattr(cfg, "backfill_relax_cadence", False)
+                and window_sum < cap_s
+                and (nightly_cap is None or len(seen_ids) < nightly_cap)
+                and (candidates or backfill_candidates)
+            ):
+                relaxed_pool = [
+                    c
+                    for c in (candidates + backfill_candidates)
+                    if c["Name"] not in seen_ids
+                ]
+                if relaxed_pool:
+                    available_relax = {c["first_filter"] for c in relaxed_pool}
+                    batch_order_relax = [f for f in pal_rot if f in available_relax]
+                    batch_order_relax += [
+                        f
+                        for f in ["y", "z", "i", "r", "g", "u"]
+                        if f in available_relax and f not in batch_order_relax
+                    ]
+                    for filt in batch_order_relax:
+                        if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                            break
+                        batch = [c for c in relaxed_pool if c["first_filter"] == filt]
+                        min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
+                        while batch and window_sum < cap_s:
+                            if nightly_cap is not None and len(seen_ids) >= nightly_cap:
+                                break
+                            time_left = float(cap_s - window_sum)
+                            exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
+                            est_visit_s = (
+                                max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
+                                + cfg.slew_small_time_s
+                                + cfg.slew_settle_s
+                            )
+                            k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
+                            k = max(1, min(len(batch), k_time))
+                            amortized_penalty = cfg.filter_change_s / k
+                            costs: List[float] = []
+                            for t in batch:
+                                now_mjd_cost = Time(current_time_utc).mjd
+                                # In relaxed mode, ignore cadence gating when
+                                # choosing the first filter for cost.
+                                allowed_for_cost = t.get("policy_allowed", t["allowed"]) or []
+
+                                def _bonus_cost_rel(f: str) -> float:
+                                    return tracker.compute_filter_bonus(
+                                        t["Name"],
+                                        f,
+                                        now_mjd_cost,
+                                        cad_tgt,
+                                        cad_sig,
+                                        cad_wt,
+                                        cad_first,
+                                        cfg.cosmo_weight_by_filter,
+                                        cfg.color_target_pairs,
+                                        cfg.color_window_days,
+                                        cfg.color_alpha,
+                                        cfg.first_epoch_color_boost,
+                                    )
+
+                                if allowed_for_cost:
+                                    first_tmp = (
+                                        t["first_filter"]
+                                        if t["first_filter"] in allowed_for_cost
+                                        else max(allowed_for_cost, key=_bonus_cost_rel)
+                                    )
+                                else:
+                                    first_tmp = None
+                                sep = (
+                                    0.0
+                                    if prev is None
+                                    else great_circle_sep_deg(
+                                        prev["RA_deg"],
+                                        prev["Dec_deg"],
+                                        t["RA_deg"],
+                                        t["Dec_deg"],
+                                    )
+                                )
+                                cost = slew_time_seconds(
+                                    sep,
+                                    small_deg=cfg.slew_small_deg,
+                                    small_time=cfg.slew_small_time_s,
+                                    rate_deg_per_s=cfg.slew_rate_deg_per_s,
+                                    settle_s=cfg.slew_settle_s,
+                                )
+                                if first_tmp is None:
+                                    cost = 1e9
+                                elif state is not None and state != first_tmp:
+                                    limit = int(getattr(cfg, "max_swaps_per_window", 999))
+                                    if swap_count_by_window.get(idx_w, 0) >= limit:
+                                        cost = 1e9
+                                    else:
+                                        scale = 1.0
+                                        if (
+                                            tracker.cosmology_boost(
+                                                t["Name"],
+                                                first_tmp,
+                                                now_mjd_cost,
+                                                cfg.color_target_pairs,
+                                                cfg.color_window_days,
+                                                cfg.color_alpha,
+                                            )
+                                            > 1.0
+                                        ):
+                                            scale = cfg.swap_cost_scale_color
+                                        penalty = max(amortized_penalty, min_amort) * scale
+                                        cost += penalty
+                                costs.append(cost)
+                            j = int(np.argmin(costs))
+                            t = batch.pop(j)
+                            sn_id = t["Name"]
+                            if sn_id in seen_ids:
+                                continue
+                            # Set relaxed cadence flag in the per-call state
+                            def _attempt_schedule_relaxed(tt: dict) -> bool:
+                                nonlocal window_sum, prev, internal_changes, window_filter_change_s
+                                nonlocal state, window_slew_times, window_airmasses, window_skymags
+                                nonlocal filters_used_set, current_time_utc, order_in_window, libid_counter
+                                window_state = {
+                                    "allow_defer": False,
+                                    "deferred": deferred,
+                                    "window_sum": window_sum,
+                                    "cap_s": cap_s,
+                                    "state": state,
+                                    "prev": prev,
+                                    "current_time_utc": current_time_utc,
+                                    "order_in_window": order_in_window,
+                                    "day": day,
+                                    "window_label_out": window_label_out,
+                                    "mag_lookup": mag_lookup,
+                                    "relax_cadence": True,
+                                }
+                                scheduled, effects = _attempt_schedule_one(
+                                    tt,
+                                    window_state,
+                                    cfg,
+                                    site,
+                                    tracker,
+                                    phot_cfg,
+                                    sky_cfg,
+                                    sky_provider,
+                                    writer,
+                                )
+                                if not scheduled:
+                                    return False
+                                window_sum += effects["time_used_s"]
+                                updates = effects["state_updates"]
+                                current_time_utc = updates["current_time_utc"]
+                                state = updates["state_filter"]
+                                prev = updates["prev_target"]
+                                order_in_window = updates["order_in_window"]
+                                current_filter_by_window[idx_w] = state
+                                filters_used_set.update(updates["filters_used_set_delta"])
+                                summary = updates["summary_updates"]
+                                swap_count_by_window[idx_w] = swap_count_by_window.get(
+                                    idx_w, 0
+                                ) + summary.get("swap_count_delta", 0)
+                                internal_changes += summary["internal_changes_delta"]
+                                window_filter_change_s += summary["window_filter_change_s_delta"]
+                                window_slew_times.append(summary["slew_time"])
+                                window_airmasses.append(summary["airmass"])
+                                window_skymags.extend(summary["sky_mags"])
+                                if not stream_per_sn:
+                                    pernight_rows.extend(effects["pernight_rows"])
+                                pernight_rows_window.extend(effects["pernight_rows"])
+                                day_pernight_rows.extend(effects["pernight_rows"])  # day batch
+                                if not stream_sequence:
+                                    sequence_rows.extend(effects["sequence_rows"])
+                                sequence_rows_window.extend(effects["sequence_rows"])
+                                day_sequence_rows.extend(effects["sequence_rows"])  # day batch
+                                if writer and effects["simlib_epochs"]:
+                                    libid_counter = _emit_simlib(
+                                        writer,
+                                        libid_counter,
+                                        tt["Name"],
+                                        tt["RA_deg"],
+                                        tt["Dec_deg"],
+                                        effects["simlib_epochs"],
+                                        redshift=float(tt.get("redshift")) if tt.get("redshift") is not None else None,
+                                    )
+                                return True
+
+                            if _attempt_schedule_relaxed(t):
+                                seen_ids.add(sn_id)
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]
             # Build window-local rows without scanning full history

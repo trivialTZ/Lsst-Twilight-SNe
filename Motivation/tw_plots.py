@@ -340,7 +340,9 @@ def plot_fs8_scan(
     zmin: float = 0.02,
     quiet: bool = True,
     title: str = "fσ8 forecast vs error floor and zmax",
-) -> np.ndarray:
+    sigma_ref: float | None = None,
+    sigma_label: str | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Scan σ(fσ8) vs. added error floor and zmax using FLIP.
 
     Parameters
@@ -374,10 +376,19 @@ def plot_fs8_scan(
     title : str, optional
         Plot title.
 
+    sigma_ref : float, optional
+        Reference value for the rms distance-modulus scatter (e.g., DEBASS
+        benchmark). Drawn as a vertical dashed line if provided.
+    sigma_label : str, optional
+        Custom x-axis label. Defaults to ``r"$\langle\sigma_\mu\rangle$ [mag]"``.
+
     Returns
     -------
-    numpy.ndarray
-        2D array of shape (len(zlim_list), len(sig_floor_list)) with σ(fσ8).
+    tuple of numpy.ndarray
+        ``(sigma_fs8, sigma_mu_rms)`` with shape ``(len(zlim_list),
+        len(sig_floor_list))``. The first entry is σ(fσ8); the second is the
+        rms of the per-SN ``dmu_error`` values after the additive floor is
+        applied.
     """
     import os as _os
     import logging as _logging
@@ -452,15 +463,20 @@ def plot_fs8_scan(
         }
 
     fs8_grid = _np.full((len(zlim_list), len(sig_floor_list)), _np.nan, dtype=float)
+    sig_rms_grid = _np.full_like(fs8_grid, _np.nan, dtype=float)
 
     for ii, zl in enumerate(zlim_list):
         m = (df["zobs"] >= float(zmin)) & (df["zobs"] <= float(zl))
         sub = df.loc[m].copy()
         if sub.empty:
             continue
+        base_errors = sub["dmu_error_base"].to_numpy(dtype=float)
         for jj, sf in enumerate(sig_floor_list):
-            # Floors correspond to additional uncorrelated noise, so combine in quadrature
-            sub["dmu_error"] = _np.sqrt(sub["dmu_error_base"] ** 2 + float(sf) ** 2)
+            # Match DEBASS forecast convention: add an error floor linearly in magnitude
+            sub["dmu_error"] = base_errors + float(sf)
+            sig_rms_grid[ii, jj] = float(
+                _np.sqrt(_np.mean(_np.square(sub["dmu_error"].to_numpy(dtype=float))))
+            )
             DF = flip.data_vector.FisherVelFromHDres(sub.to_dict(orient="list"))
             Cfit = DF.compute_covariance(
                 "carreres23",
@@ -481,14 +497,21 @@ def plot_fs8_scan(
 
     # Plot
     _plt.figure(figsize=(7, 5), dpi=150)
+    xlabel = sigma_label or r"$\langle\sigma_\mu\rangle$ [mag]"
     for ii, zl in enumerate(zlim_list):
+        xvals = sig_rms_grid[ii]
+        mask = _np.isfinite(xvals) & _np.isfinite(fs8_grid[ii])
+        if not mask.any():
+            continue
         _plt.plot(
-            sig_floor_list,
-            fs8_grid[ii],
+            xvals[mask],
+            fs8_grid[ii, mask],
             marker="o",
             label=f"z≤{float(zl):.3f}",
         )
-    _plt.xlabel("added floor to dμ_error [mag]")
+    if sigma_ref is not None:
+        _plt.axvline(float(sigma_ref), color="k", linestyle="--", linewidth=1.0)
+    _plt.xlabel(xlabel)
     _plt.ylabel("$\\sigma_{f\\sigma_8}$")
     _plt.legend(frameon=False)
     if title:
@@ -497,4 +520,198 @@ def plot_fs8_scan(
     _plt.tight_layout()
     _plt.show()
 
-    return fs8_grid
+    return fs8_grid, sig_rms_grid
+
+
+def compute_fs8_scan_grid(
+    flow_df,
+    *,
+    power_spectrum_dict: dict | None = None,
+    sig_floor_list: np.ndarray | None = None,
+    zlim_list: np.ndarray | None = None,
+    fisher_properties: dict | None = None,
+    parameter_dict: dict | None = None,
+    size_batch: int = 10_000,
+    number_worker: int = 20,
+    zmin: float = 0.02,
+    quiet: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute σ(fσ8) grid and corresponding RMS(σμ) grid without plotting.
+
+    Returns (fs8_grid, sig_rms_grid, sig_floor_list, zlim_list).
+    API and science match plot_fs8_scan.
+    """
+    import os as _os
+    import logging as _logging
+    import numpy as _np
+    try:
+        import flip  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "flip is required for compute_fs8_scan_grid; install flip-peculiar-velocity"
+        ) from e
+
+    _os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    _os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
+    if quiet:
+        _logging.getLogger().setLevel(_logging.WARNING)
+        _logging.getLogger("jax._src.xla_bridge").setLevel(_logging.ERROR)
+        _logging.getLogger("root").setLevel(_logging.WARNING)
+
+    df = flow_df.copy()
+    if "dmu_error_base" not in df.columns:
+        df["dmu_error_base"] = df["dmu_error"]
+
+    sig_floor_list = (
+        _np.linspace(0.035, 0.10, 6)
+        if sig_floor_list is None
+        else _np.asarray(sig_floor_list, dtype=float)
+    )
+    zlim_list = (
+        _np.array([0.04, 0.05, 0.06, 0.08, 0.10], dtype=float)
+        if zlim_list is None
+        else _np.asarray(zlim_list, dtype=float)
+    )
+
+    fisher_properties = fisher_properties or {"inversion_method": "inverse"}
+    parameter_dict = parameter_dict or {"fs8": 1.0, "sigv": 300.0, "sigma_M": 0.0}
+
+    if power_spectrum_dict is None:
+        kh, _, _, ptt, _ = flip.power_spectra.compute_power_spectra(
+            "class_engine",
+            {
+                "h": 0.6766,
+                "sigma8": 0.8102,
+                "n_s": 0.9665,
+                "omega_b": 0.02242,
+                "omega_cdm": 0.11933,
+            },
+            0,
+            1e-5,
+            0.2,
+            1500,
+            normalization_power_spectrum="growth_rate",
+        )
+        sigmau_fiducial = 21.0
+        power_spectrum_dict = {
+            "vv": [[kh, ptt * flip.utils.Du(kh, sigmau_fiducial) ** 2]]
+        }
+
+    fs8_grid = _np.full((len(zlim_list), len(sig_floor_list)), _np.nan, dtype=float)
+    sig_rms_grid = _np.full_like(fs8_grid, _np.nan, dtype=float)
+
+    for ii, zl in enumerate(zlim_list):
+        m = (df["zobs"] >= float(zmin)) & (df["zobs"] <= float(zl))
+        sub = df.loc[m].copy()
+        if sub.empty:
+            continue
+        base_errors = sub["dmu_error_base"].to_numpy(dtype=float)
+        for jj, sf in enumerate(sig_floor_list):
+            sub["dmu_error"] = base_errors + float(sf)
+            sig_rms_grid[ii, jj] = float(
+                _np.sqrt(_np.mean(_np.square(sub["dmu_error"].to_numpy(dtype=float))))
+            )
+            DF = flip.data_vector.FisherVelFromHDres(sub.to_dict(orient="list"))
+            Cfit = DF.compute_covariance(
+                "carreres23",
+                power_spectrum_dict,
+                size_batch=size_batch,
+                number_worker=number_worker,
+            )
+            FF = flip.fisher.FisherMatrix.init_from_covariance(
+                Cfit, DF, parameter_dict, fisher_properties=fisher_properties
+            )
+            names, Fm = FF.compute_fisher_matrix()
+            try:
+                idx = list(names).index("fs8")
+            except ValueError:
+                idx = 0
+            Covm = _np.linalg.pinv(Fm)
+            fs8_grid[ii, jj] = float(_np.sqrt(Covm[idx, idx]))
+
+    return fs8_grid, sig_rms_grid, sig_floor_list, zlim_list
+
+
+def plot_fs8_scan_compare(
+    flow_wfd,
+    flow_combined,
+    *,
+    power_spectrum_dict: dict | None = None,
+    sig_floor_list: np.ndarray | None = None,
+    zlim_list: np.ndarray | None = None,
+    fisher_properties: dict | None = None,
+    parameter_dict: dict | None = None,
+    size_batch: int = 10_000,
+    number_worker: int = 20,
+    zmin: float = 0.02,
+    quiet: bool = True,
+    sigma_ref: float | None = None,
+    title: str = "fσ8 vs ⟨σμ⟩: WFD Y1 (dashed) vs WFD+Twilight Y1 (solid)",
+):
+    """Overlay fσ8 scans: dashed WFD vs solid WFD+Twilight with matched colors per z-limit.
+
+    Uses the same science/definitions as plot_fs8_scan (linear error floor → per-SN
+    dμ rms on the x-axis; Fisher σ(fσ8) on the y-axis).
+    """
+    import matplotlib.pyplot as _plt
+    import numpy as _np
+
+    fs8_wfd, rms_wfd, sf_list, zl_list = compute_fs8_scan_grid(
+        flow_wfd,
+        power_spectrum_dict=power_spectrum_dict,
+        sig_floor_list=sig_floor_list,
+        zlim_list=zlim_list,
+        fisher_properties=fisher_properties,
+        parameter_dict=parameter_dict,
+        size_batch=size_batch,
+        number_worker=number_worker,
+        zmin=zmin,
+        quiet=quiet,
+    )
+    fs8_tw, rms_tw, _, _ = compute_fs8_scan_grid(
+        flow_combined,
+        power_spectrum_dict=power_spectrum_dict,
+        sig_floor_list=sf_list,
+        zlim_list=zl_list,
+        fisher_properties=fisher_properties,
+        parameter_dict=parameter_dict,
+        size_batch=size_batch,
+        number_worker=number_worker,
+        zmin=zmin,
+        quiet=quiet,
+    )
+
+    _plt.figure(figsize=(8, 5.5), dpi=150)
+    color_cycle = _plt.rcParams["axes.prop_cycle"].by_key().get("color", ["C0","C1","C2","C3","C4"])
+    for i, zl in enumerate(zl_list):
+        color = color_cycle[i % len(color_cycle)]
+        # WFD dashed
+        mask = _np.isfinite(rms_wfd[i]) & _np.isfinite(fs8_wfd[i])
+        if mask.any():
+            _plt.plot(rms_wfd[i][mask], fs8_wfd[i][mask], linestyle="--", color=color, linewidth=2.0)
+        # Combined solid
+        mask2 = _np.isfinite(rms_tw[i]) & _np.isfinite(fs8_tw[i])
+        if mask2.any():
+            _plt.plot(rms_tw[i][mask2], fs8_tw[i][mask2], linestyle="-", color=color, linewidth=2.0, label=f"z≤{float(zl):.3f}")
+
+    if sigma_ref is not None:
+        _plt.axvline(float(sigma_ref), color="k", linestyle="--", linewidth=1.0)
+
+    # Build a second legend for dataset styles
+    from matplotlib.lines import Line2D as _Line2D
+    style_handles = [
+        _Line2D([0], [0], color="k", linestyle="--", lw=2.0, label="WFD Y1"),
+        _Line2D([0], [0], color="k", linestyle="-", lw=2.0, label="WFD+Twilight Y1"),
+    ]
+
+    _plt.xlabel(r"$\langle\sigma_\mu\rangle$ [mag]")
+    _plt.ylabel(r"$\sigma_{f\sigma_8}$")
+    _plt.title(title)
+    leg1 = _plt.legend(frameon=False, title="z max", loc="upper left")
+    _plt.gca().add_artist(leg1)
+    _plt.legend(handles=style_handles, frameon=False, loc="lower right", title="dataset")
+    _plt.grid(alpha=0.2)
+    _plt.tight_layout()
+    _plt.show()
+
+    return (fs8_wfd, rms_wfd), (fs8_tw, rms_tw), sf_list, zl_list

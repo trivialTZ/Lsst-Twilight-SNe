@@ -194,8 +194,12 @@ class SimlibWriter:
             w("#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR\n")
             # Epochs (re-ID from 1..N to guarantee consistency)
             for idx, e in enumerate(epochs, start=1):
+                # Normalize band: emit 'Y' (uppercase) for y-band to match SNANA expectations
+                band = e.get('band', '')
+                if band == 'y':
+                    band = 'Y'
                 w(
-                    f"S: {e['mjd']:11.4f}  {idx:3d}  {e['band']:1s}  "
+                    f"S: {e['mjd']:11.4f}  {idx:3d}  {band:1s}  "
                     f"{e['gain']:5.2f}  {e['rdnoise']:5.2f}  {e['skysig']:7.2f}  "
                     f"{e['nea']:7.2f}  {e['zpavg']:6.3f}  {e['zperr']:5.3f}\n"
                 )
