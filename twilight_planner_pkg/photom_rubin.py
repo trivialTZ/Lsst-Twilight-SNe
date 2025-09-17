@@ -37,8 +37,11 @@ class PhotomConfig:
     read_noise_e: float = 6.0
     gain_e_per_adu: float = 1.0
     zpt_err_mag: float = 0.005
+    # Pixel full-well thresholds (electrons)
     npe_pixel_saturate: int = 100_000
     npe_pixel_warn_nonlinear: int = 80_000
+    # Optional extra safety factor for non-linearity region (1.0 = disabled)
+    nonlinear_headroom: float = 1.0
     sky_mag_override: Optional[float] = None
 
     def __post_init__(self) -> None:
@@ -124,6 +127,28 @@ def central_pixel_electrons(m_source: float, ZPT_pe: float, frac: float) -> floa
     return frac * total_e
 
 
+def electrons_per_pixel_from_sb(
+    mu_arcsec2: float, ZPT_pe: float, pixel_scale_arcsec: float
+) -> float:
+    """Electrons per pixel from a surface-brightness value in mag/arcsec^2.
+
+    This mirrors the sky calculation but returns electrons directly rather than
+    an RMS in ADU. ``ZPT_pe`` is the electron zeropoint for the epoch.
+    """
+    area = pixel_scale_arcsec**2
+    return max(0.0, 10 ** (-0.4 * (mu_arcsec2 - ZPT_pe)) * area)
+
+
+def observed_sb_from_rest(mu_rest_arcsec2: float, z: float, K_mag: float = 0.0) -> float:
+    """Convert rest-frame surface brightness to observed-frame.
+
+    Applies Tolman dimming by (1+z)^4 and an optional K-correction ``K_mag``
+    (mag). Returns the observed-frame surface brightness in mag/arcsec^2.
+    """
+    # 2.5 * log10( (1+z)^4 ) = 10 * log10(1+z)
+    return float(mu_rest_arcsec2) + 10.0 * math.log10(1.0 + float(z)) + float(K_mag)
+
+
 def compute_epoch_photom(
     band: str,
     t_exp_s: float,
@@ -164,6 +189,15 @@ def cap_exposure_for_saturation(
     cfg: PhotomConfig,
     fwhm_eff_arcsec: float | None = None,
     min_exp_s: float = 1.0,
+    *,
+    # Optional host terms; supply either observed SB or (rest SB + z)
+    mu_host_obs_arcsec2: float | None = None,
+    mu_host_rest_arcsec2: float | None = None,
+    z_host: float | None = None,
+    K_host: float = 0.0,
+    # Optional compact host knot (treated as a point-like component)
+    host_point_mag: float | None = None,
+    host_point_frac: float | None = None,
 ) -> tuple[float, set[str]]:
     """Return a safe exposure time capped to avoid source or sky saturation.
 
@@ -198,35 +232,55 @@ def cap_exposure_for_saturation(
     """
     flags: set[str] = set()
     t = max(min_exp_s, t_exp_s)
-    max_e = 0.0
+    last_total_e = 0.0
     for _ in range(10):
         eph = compute_epoch_photom(
             band, t, alt_deg, sky_mag_arcsec2, cfg, fwhm_eff_arcsec
         )
+
+        # Central-pixel electrons from the SN (point source)
         frac = central_pixel_fraction_gaussian(
             fwhm_eff_arcsec or cfg.fwhm_eff[band], cfg.pixel_scale_arcsec
         )
-        ce = central_pixel_electrons(src_mag, eph.ZPT_pe, frac)
-        se = (eph.SKYSIG * eph.GAIN) ** 2  # sky electrons per pixel
-        max_e = max(ce, se)
-        if max_e <= cfg.npe_pixel_saturate:
-            if max_e >= cfg.npe_pixel_warn_nonlinear:
+        e_src = central_pixel_electrons(src_mag, eph.ZPT_pe, frac)
+
+        # Per-pixel electrons from the sky (use direct electrons, not RMS)
+        e_sky = electrons_per_pixel_from_sb(
+            sky_mag_arcsec2, eph.ZPT_pe, cfg.pixel_scale_arcsec
+        )
+
+        # Per-pixel electrons from the host (observed SB or rest SB + z)
+        e_host = 0.0
+        if mu_host_obs_arcsec2 is not None:
+            e_host += electrons_per_pixel_from_sb(
+                mu_host_obs_arcsec2, eph.ZPT_pe, cfg.pixel_scale_arcsec
+            )
+        elif mu_host_rest_arcsec2 is not None and z_host is not None:
+            mu_obs = observed_sb_from_rest(mu_host_rest_arcsec2, z_host, K_host)
+            e_host += electrons_per_pixel_from_sb(
+                mu_obs, eph.ZPT_pe, cfg.pixel_scale_arcsec
+            )
+
+        # Optional compact host knot approximated as a point-like component
+        if host_point_mag is not None:
+            fpt = host_point_frac if host_point_frac is not None else frac
+            e_host += central_pixel_electrons(host_point_mag, eph.ZPT_pe, fpt)
+
+        total_e = e_src + e_host + e_sky
+        last_total_e = total_e
+
+        # Threshold checks (include optional headroom for the warn zone)
+        warn_thr = cfg.npe_pixel_warn_nonlinear * max(1.0, cfg.nonlinear_headroom)
+        if total_e <= cfg.npe_pixel_saturate:
+            if total_e >= warn_thr:
                 flags.add("warn_nonlinear")
             break
+
+        # Over the hard cap: shorten exposure proportionally (linear scaling)
         flags.add("sat_guard")
-        scale_src = (
-            cfg.npe_pixel_saturate / max(1.0, ce)
-            if ce > cfg.npe_pixel_saturate
-            else 1.0
-        )
-        scale_sky = (
-            cfg.npe_pixel_saturate / max(1.0, se)
-            if se > cfg.npe_pixel_saturate
-            else 1.0
-        )
-        scale = max(0.1, min(scale_src, scale_sky))
+        scale = max(0.1, min(1.0, cfg.npe_pixel_saturate / max(1.0, total_e)))
         t = max(min_exp_s, t * scale)
     else:
-        if max_e >= cfg.npe_pixel_warn_nonlinear:
+        if last_total_e >= cfg.npe_pixel_warn_nonlinear:
             flags.add("warn_nonlinear")
     return t, flags

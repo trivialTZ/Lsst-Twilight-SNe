@@ -324,31 +324,45 @@ The planner adds gentle Sun/Moon penalties to $m_5$ in bright conditions and fal
 
 Filter feasibility rule (per candidate/time): select the first filter m for which $m_5 - m_{\rm target} \ge \Delta m_{\rm margin}$ (default margin 0.3 mag). If magnitudes are unavailable, the code uses a conservative band order favoring r/i/z at high sky brightness.
 
-### 5) Saturation Guard (Central‑Pixel Model)
+### 5) Saturation Guard (Central‑Pixel Sum)
 
-To avoid CCD blooming, we approximate the central‑pixel electrons for a Gaussian PSF:
+To avoid CCD blooming we evaluate the total electrons in the brightest pixel as the sum of three components:
 
-- Peak pixel fraction:
-
-```math
-
-f_{\rm peak} \approx \frac{1}{2\pi\sigma_{\rm pix}^2}\underbrace{p^2}_{\text{pixel area}}, \qquad \sigma_{\rm pix}=\frac{\theta}{2\sqrt{2\ln 2}\,p}.
-
-```
-
-- Central pixel electrons: $N_{\rm cen} \approx f_{\rm peak}F_*$.
-
-If $N_{\rm cen} > N_{\rm sat}$ (default $N_{\rm sat}\sim 1\times 10^5$ e⁻), the planner shortens the exposure.
-
-Because $F_* \propto t$, the bright‑limit magnitude that saturates scales as
+- SN point source central pixel: $N_{\rm src,cen} = f_{\rm cen}(\theta, p)\,F_*$ with a Gaussian PSF; we use
 
 ```math
-
-m_{\rm sat}(t) = m_{\rm sat}(t_0) + 2.5\log_{10}\left(\frac{t}{t_0}\right),
-
+f_{\rm cen} = \mathrm{erf}\!\left(\frac{p}{2\sqrt{2}\,\sigma}\right)^2, \qquad \sigma=\frac{\theta}{2.355}.
 ```
 
-so 1 s vs 15 s shifts the r‑band bright limit by $\approx 2.9$ mag, enabling very short twilight snaps to avoid saturation.
+- Host galaxy local surface brightness (observed frame) as electrons per pixel:
+
+```math
+N_{\rm host/pix} = 10^{-0.4 (\mu_{\rm host,obs} - ZP_{\rm e})}\, p^2.
+```
+
+- Sky background per pixel:
+
+```math
+N_{\rm sky/pix} = 10^{-0.4 (\mu_{\rm sky} - ZP_{\rm e})}\, p^2.
+```
+
+The pixel is considered saturated if the sum exceeds the full‑well threshold:
+
+```math
+N_{\rm tot} = N_{\rm src,cen} + N_{\rm host/pix} + N_{\rm sky/pix} > N_{\rm sat}.
+```
+
+We shorten the exposure time linearly to bring $N_{\rm tot}$ under $N_{\rm sat}$ and flag frames exceeding a non‑linearity warning threshold (default 80 ke⁻). Defaults for $N_{\rm sat}$ are 100 ke⁻, adjustable via configuration.
+
+If only rest‑frame host surface brightness is available, we apply Tolman dimming (and optional K‑correction) to obtain the observed value:
+
+```math
+\mu_{\rm host,obs} = \mu_{\rm host,rest} + 2.5\log_{10}(1+z)^4 + K(z) = \mu_{\rm host,rest} + 10\log_{10}(1+z) + K(z).
+```
+
+An optional compact host knot can be included as an extra point‑like component with its own central‑pixel fraction.
+
+Default host SB (when per‑target host inputs are absent): the planner can apply a conservative r‑band typical value of \(\mu_{\rm host}\approx22\,\mathrm{mag/arcsec^2}\) (reflecting the 21–23 range seen in SDSS target selection and Freeman’s disk central SB after band conversion). This fallback is enabled by default and can be customized or disabled via `PlannerConfig.use_default_host_sb` and `PlannerConfig.default_host_mu_arcsec2_by_filter`.
 
 ### 6) Priority Scoring (Hybrid → LC)
 

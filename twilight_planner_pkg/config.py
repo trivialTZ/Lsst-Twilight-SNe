@@ -250,6 +250,25 @@ class PlannerConfig:
     current_mjd: Optional[float] = None  # populated by scheduler for exposure capping
     sky_provider: Optional[object] = None
 
+    # Optional per-target host galaxy context (used in saturation capping)
+    # If available, provide either observed-frame surface brightness at the SN
+    # location per filter, or rest-frame SB plus a redshift (and optional K-corr).
+    current_host_mu_arcsec2_by_filter: Optional[Dict[str, float]] = None
+    current_host_mu_rest_arcsec2_by_filter: Optional[Dict[str, float]] = None
+    current_host_z: Optional[float] = None
+    current_host_K_by_filter: Optional[Dict[str, float]] = None
+    # Optional compact host knot approximated as a point-like component
+    current_host_point_mag_by_filter: Optional[Dict[str, float]] = None
+    current_host_point_frac: Optional[float] = None
+
+    # Default host SB fallback when per-target host inputs are missing.
+    # Based on literature: r-band typical µ_host ~ 21–23 mag/arcsec^2.
+    # We default to 22.0 mag/arcsec^2 across filters as a conservative mid-point.
+    use_default_host_sb: bool = True
+    default_host_mu_arcsec2_by_filter: Dict[str, float] = field(
+        default_factory=lambda: {"u": 22.0, "g": 22.0, "r": 22.0, "i": 22.0, "z": 22.0, "y": 22.0}
+    )
+
     # Backwards-compatibility options
     allow_filter_changes_in_twilight: bool = False
 

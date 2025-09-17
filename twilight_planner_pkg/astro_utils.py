@@ -423,13 +423,14 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
     """Return a saturation-safe exposure time and flags for ``band``.
 
     The function examines ``cfg.current_mag_by_filter`` and
-    ``cfg.current_alt_deg`` for the SN currently under consideration.  If a
+    ``cfg.current_alt_deg`` for the SN currently under consideration. If a
     ``cfg.sky_provider`` is available it is queried for the sky brightness.
     When ``cfg.current_mjd`` is set the provider receives it, allowing
     Sun-altitude--aware brightening to drive exposure capping.  These
-    parameters are fed into
+    parameters plus any available host-galaxy context (local surface brightness
+    or rest-frame SB + redshift) are fed into
     :func:`photom_rubin.cap_exposure_for_saturation`, potentially reducing the
-    baseline exposure from ``cfg.exposure_by_filter``.  The returned tuple
+    baseline exposure from ``cfg.exposure_by_filter``. The returned tuple
     includes a set of flags such as ``{"warn_nonlinear"}``.
     When the required context is missing, the baseline exposure and an empty
     flag set are returned.
@@ -463,7 +464,46 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         read_noise_e=cfg.read_noise_e,
         gain_e_per_adu=cfg.gain_e_per_adu,
         zpt_err_mag=cfg.zpt_err_mag,
+        # Tie saturation thresholds to PlannerConfig's SIMLIB settings when present
+        npe_pixel_saturate=int(getattr(cfg, "simlib_npe_pixel_saturate", 100_000) or 100_000),
+        npe_pixel_warn_nonlinear=int(
+            0.8 * (getattr(cfg, "simlib_npe_pixel_saturate", 100_000) or 100_000)
+        ),
     )
+    # Optional host terms if provided via config
+    kwargs = {}
+    if getattr(cfg, "current_host_mu_arcsec2_by_filter", None) and (
+        band in cfg.current_host_mu_arcsec2_by_filter
+    ):
+        kwargs["mu_host_obs_arcsec2"] = cfg.current_host_mu_arcsec2_by_filter[band]
+    elif getattr(cfg, "current_host_mu_rest_arcsec2_by_filter", None) and (
+        band in cfg.current_host_mu_rest_arcsec2_by_filter
+    ) and getattr(cfg, "current_host_z", None) is not None:
+        kwargs["mu_host_rest_arcsec2"] = cfg.current_host_mu_rest_arcsec2_by_filter[band]
+        kwargs["z_host"] = cfg.current_host_z
+        if getattr(cfg, "current_host_K_by_filter", None):
+            kwargs["K_host"] = cfg.current_host_K_by_filter.get(band, 0.0)
+    if getattr(cfg, "current_host_point_mag_by_filter", None) and (
+        band in cfg.current_host_point_mag_by_filter
+    ):
+        kwargs["host_point_mag"] = cfg.current_host_point_mag_by_filter[band]
+        if getattr(cfg, "current_host_point_frac", None) is not None:
+            kwargs["host_point_frac"] = cfg.current_host_point_frac
+
+    # If no explicit host info is supplied, use default host SB if enabled
+    if (
+        "mu_host_obs_arcsec2" not in kwargs
+        and "mu_host_rest_arcsec2" not in kwargs
+        and getattr(cfg, "use_default_host_sb", False)
+    ):
+        mu_def = None
+        if getattr(cfg, "default_host_mu_arcsec2_by_filter", None):
+            mu_def = cfg.default_host_mu_arcsec2_by_filter.get(band)
+        if mu_def is None:
+            # Conservative mid-range default per literature (e.g., r ~21–23)
+            mu_def = 22.0
+        kwargs["mu_host_obs_arcsec2"] = float(mu_def)
+
     return cap_exposure_for_saturation(
         band,
         base,
@@ -471,6 +511,7 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         cfg.current_mag_by_filter[band],
         sky_mag,
         phot_cfg,
+        **kwargs,
     )
 
 

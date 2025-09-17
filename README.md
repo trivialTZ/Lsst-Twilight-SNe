@@ -18,9 +18,12 @@ scheduler itself.  This structure makes it easy to swap in new
 strategies or extend the planner for different surveys.
 
 Recent additions provide a Rubin-style photometry model and a minimal
-SNANA SIMLIB writer.  Planned exposures are now capped to avoid pixel
-saturation, and setting ``--simlib-out`` on the CLI writes a SIMLIB file
-alongside the usual planning CSVs.
+SNANA SIMLIB writer. Planned exposures are capped to avoid pixel
+full‑well saturation by summing the central‑pixel electrons from the SN
+point source, local host‑galaxy surface brightness (per pixel), and sky
+background (per pixel). Optional inputs support rest‑frame host SB with
+Tolman dimming and an optional compact host knot. Setting ``--simlib-out``
+on the CLI writes a SIMLIB file alongside the usual planning CSVs.
 
 See `twilight_planner_pkg/README.md` for detailed usage instructions and
 module documentation.
