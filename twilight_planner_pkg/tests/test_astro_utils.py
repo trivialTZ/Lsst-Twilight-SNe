@@ -1,5 +1,5 @@
+from twilight_planner_pkg.astro_utils import compute_capped_exptime, default_host_mu_obs
 from twilight_planner_pkg.config import PlannerConfig
-from twilight_planner_pkg.astro_utils import compute_capped_exptime
 
 
 def test_default_host_mu_applied_when_missing():
@@ -25,5 +25,20 @@ def test_default_host_mu_applied_when_missing():
 
     assert t_def <= t_no
     # At least one of them should either warn or guard under this synthetic threshold
-    assert ("sat_guard" in flags_def) or ("warn_nonlinear" in flags_def) or ("sat_guard" in flags_no) or ("warn_nonlinear" in flags_no)
+    assert (
+        ("sat_guard" in flags_def)
+        or ("warn_nonlinear" in flags_def)
+        or ("sat_guard" in flags_no)
+        or ("warn_nonlinear" in flags_no)
+    )
 
+
+def test_default_host_mu_obs_scales_with_redshift():
+    cfg = PlannerConfig()
+    cfg.use_default_host_sb = True
+    cfg.current_host_z = 0.5
+    mu_high = default_host_mu_obs("i", cfg)
+    cfg.current_host_z = 0.1
+    mu_low = default_host_mu_obs("i", cfg)
+    assert mu_high is not None and mu_low is not None
+    assert mu_high > mu_low

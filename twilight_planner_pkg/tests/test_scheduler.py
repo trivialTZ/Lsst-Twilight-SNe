@@ -142,6 +142,9 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         "NEA_pix",
         "RDNOISE",
         "GAIN",
+        "PSF1_pix",
+        "PSF2_pix",
+        "PSFRATIO",
         "saturation_guard_applied",
         "warn_nonlinear",
         "priority_score",
@@ -545,9 +548,15 @@ def test_run_label_in_output_paths(tmp_path, monkeypatch):
     start_iso = pd.to_datetime(start, utc=True).isoformat()
     end_iso = pd.to_datetime(end, utc=True).isoformat()
     plan_path_date = tmp_path / f"lsst_twilight_plan_{run_label}_{start}_to_{end}.csv"
-    plan_path_iso = tmp_path / f"lsst_twilight_plan_{run_label}_{start_iso}_to_{end_iso}.csv"
-    summary_path_date = tmp_path / f"lsst_twilight_summary_{run_label}_{start}_to_{end}.csv"
-    summary_path_iso = tmp_path / f"lsst_twilight_summary_{run_label}_{start_iso}_to_{end_iso}.csv"
+    plan_path_iso = (
+        tmp_path / f"lsst_twilight_plan_{run_label}_{start_iso}_to_{end_iso}.csv"
+    )
+    summary_path_date = (
+        tmp_path / f"lsst_twilight_summary_{run_label}_{start}_to_{end}.csv"
+    )
+    summary_path_iso = (
+        tmp_path / f"lsst_twilight_summary_{run_label}_{start_iso}_to_{end_iso}.csv"
+    )
     assert plan_path_date.exists() or plan_path_iso.exists()
     assert summary_path_date.exists() or summary_path_iso.exists()
 
@@ -625,7 +634,9 @@ def test_default_run_label_hybrid(tmp_path, monkeypatch):
     plan_path_date = tmp_path / f"lsst_twilight_plan_hybrid_{start}_to_{end}.csv"
     plan_path_iso = tmp_path / f"lsst_twilight_plan_hybrid_{start_iso}_to_{end_iso}.csv"
     summary_path_date = tmp_path / f"lsst_twilight_summary_hybrid_{start}_to_{end}.csv"
-    summary_path_iso = tmp_path / f"lsst_twilight_summary_hybrid_{start_iso}_to_{end_iso}.csv"
+    summary_path_iso = (
+        tmp_path / f"lsst_twilight_summary_hybrid_{start_iso}_to_{end_iso}.csv"
+    )
     assert plan_path_date.exists() or plan_path_iso.exists()
     assert summary_path_date.exists() or summary_path_iso.exists()
 

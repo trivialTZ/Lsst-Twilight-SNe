@@ -231,9 +231,9 @@ class PlannerConfig:
     simlib_survey: str = "LSST"
     simlib_filters: str = "grizy"
     simlib_pixsize: float = 0.2
-    simlib_npe_pixel_saturate: float = 100_000.0
-    simlib_photflag_saturate: int = 4096
-    simlib_psf_unit: str = "arcsec"
+    simlib_npe_pixel_saturate: float = 80_000.0
+    simlib_photflag_saturate: int = 2048
+    simlib_psf_unit: str = "PIXEL"
 
     # -- Miscellaneous -----------------------------------------------------
     typical_days_by_type: Dict[str, int] = field(
@@ -274,11 +274,39 @@ class PlannerConfig:
     current_host_point_frac: Optional[float] = None
 
     # Default host SB fallback when per-target host inputs are missing.
-    # Based on literature: r-band typical µ_host ~ 21–23 mag/arcsec^2.
-    # We default to 22.0 mag/arcsec^2 across filters as a conservative mid-point.
+    # Rest-frame values are dimmed via Tolman + a linear K-term when a
+    # redshift is available. Observed-frame overrides remain configurable for
+    # backwards compatibility.
     use_default_host_sb: bool = True
     default_host_mu_arcsec2_by_filter: Dict[str, float] = field(
-        default_factory=lambda: {"u": 22.0, "g": 22.0, "r": 22.0, "i": 22.0, "z": 22.0, "y": 22.0}
+        default_factory=lambda: {
+            "u": 22.0,
+            "g": 22.0,
+            "r": 22.0,
+            "i": 22.0,
+            "z": 22.0,
+            "y": 22.0,
+        }
+    )
+    default_host_mu_rest_arcsec2_by_filter: Dict[str, float] = field(
+        default_factory=lambda: {
+            "u": 22.8,
+            "g": 22.2,
+            "r": 21.7,
+            "i": 21.5,
+            "z": 21.4,
+            "y": 21.3,
+        }
+    )
+    default_host_kcorr_slope_by_filter: Dict[str, float] = field(
+        default_factory=lambda: {
+            "u": 0.35,
+            "g": 0.30,
+            "r": 0.25,
+            "i": 0.20,
+            "z": 0.20,
+            "y": 0.15,
+        }
     )
 
     # Backwards-compatibility options

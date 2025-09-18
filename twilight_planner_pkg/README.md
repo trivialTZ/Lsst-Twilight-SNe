@@ -387,7 +387,7 @@ If only rest‑frame host surface brightness is available, we apply Tolman dimmi
 
 An optional compact host knot can be included as an extra point‑like component with its own central‑pixel fraction.
 
-Default host SB (when per‑target host inputs are absent): the planner can apply a conservative r‑band typical value of \(\mu_{\rm host}\approx22\,\mathrm{mag/arcsec^2}\) (reflecting the 21–23 range seen in SDSS target selection and Freeman’s disk central SB after band conversion). This fallback is enabled by default and can be customized or disabled via `PlannerConfig.use_default_host_sb` and `PlannerConfig.default_host_mu_arcsec2_by_filter`.
+Default host SB (when per‑target host inputs are absent): the planner now keeps a rest‑frame template (mid-disk \(\mu_{\rm host,rest}\sim21.5\text{--}22.5\,\mathrm{mag/arcsec^2}\) by filter) and applies Tolman dimming plus a linear K-term (e.g., \(K\approx0.2z\) in $i/z$) whenever a redshift is available. The resulting observed-frame value feeds the saturation guard. Users can override or disable this behaviour via `PlannerConfig.use_default_host_sb`, `PlannerConfig.default_host_mu_rest_arcsec2_by_filter`, and the observed-frame map `PlannerConfig.default_host_mu_arcsec2_by_filter`.
 
 ### Discovery‑Magnitude Fallback (ATLAS c/o to r with Color Priors)
 
