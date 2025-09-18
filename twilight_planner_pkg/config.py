@@ -8,6 +8,7 @@ at Cerro Pach\u00f3n and can be customised for testing purposes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import warnings
 from math import inf
 from typing import Dict, List, Literal, Optional, Tuple
 
@@ -57,7 +58,10 @@ class PlannerConfig:
             "y": 15.0,
         }
     )
-    max_filters_per_visit: int = 1
+    filters_per_visit_cap: int = 1
+    """Upper bound on distinct filters used within a single visit."""
+    auto_color_pairing: bool = True
+    """If True, automatically add an opposite-colour filter when the cap allows."""
     start_filter: str | None = None
     sun_alt_policy: List[Tuple[float, float, List[str]]] = field(
         default_factory=lambda: [
@@ -379,3 +383,49 @@ class PlannerConfig:
             self.readout_s = self.readout_time_s
         if self.start_filter is None and self.filters:
             self.start_filter = self.filters[0]
+        try:
+            self.filters_per_visit_cap = int(self.filters_per_visit_cap)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise TypeError("filters_per_visit_cap must be coercible to int") from exc
+        if self.filters_per_visit_cap < 1:
+            raise ValueError("filters_per_visit_cap must be >= 1")
+
+
+_original_planner_config_init = PlannerConfig.__init__
+
+
+def _planner_config_init_wrapper(self, *args, **kwargs):
+    if "max_filters_per_visit" in kwargs and "filters_per_visit_cap" not in kwargs:
+        warnings.warn(
+            "max_filters_per_visit is deprecated; use filters_per_visit_cap",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        kwargs["filters_per_visit_cap"] = kwargs.pop("max_filters_per_visit")
+    return _original_planner_config_init(self, *args, **kwargs)
+
+
+PlannerConfig.__init__ = _planner_config_init_wrapper  # type: ignore[attr-defined]
+
+
+@property
+def _deprecated_max_filters_per_visit(self) -> int:
+    warnings.warn(
+        "max_filters_per_visit is deprecated; use filters_per_visit_cap",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return self.filters_per_visit_cap
+
+
+@_deprecated_max_filters_per_visit.setter  # type: ignore[attr-defined]
+def _deprecated_max_filters_per_visit_set(self, value: int) -> None:
+    warnings.warn(
+        "max_filters_per_visit is deprecated; use filters_per_visit_cap",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    self.filters_per_visit_cap = int(value)
+
+
+PlannerConfig.max_filters_per_visit = _deprecated_max_filters_per_visit  # type: ignore[assignment]

@@ -663,6 +663,7 @@ def choose_filters_with_cap(
     cfg: PlannerConfig,
     *,
     current_filter: str | None = None,
+    filters_per_visit_cap: int | None = None,
     max_filters_per_visit: int | None = None,
     use_capped_exposure: bool = True,
 ) -> tuple[list[str], dict]:
@@ -676,11 +677,18 @@ def choose_filters_with_cap(
     returned by :func:`compute_capped_exptime`.
     """
 
-    max_filters = (
-        max_filters_per_visit
-        if max_filters_per_visit is not None
-        else cfg.max_filters_per_visit
-    )
+    if filters_per_visit_cap is None and max_filters_per_visit is not None:
+        warnings.warn(
+            "max_filters_per_visit argument is deprecated; use filters_per_visit_cap",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        filters_per_visit_cap = max_filters_per_visit
+    if filters_per_visit_cap is None:
+        filters_per_visit_cap = int(
+            getattr(cfg, "filters_per_visit_cap", getattr(cfg, "max_filters_per_visit", 1))
+        )
+    max_filters = max(1, int(filters_per_visit_cap))
     slew = slew_time_seconds(
         sep_deg,
         small_deg=cfg.slew_small_deg,

@@ -20,7 +20,7 @@ def test_internal_vs_cross_changes():
         filters=["r", "i"],
     )
     used, timing = choose_filters_with_cap(
-        ["r", "i"], 0.0, 1000.0, cfg, current_filter="r", max_filters_per_visit=2
+        ["r", "i"], 0.0, 1000.0, cfg, current_filter="r", filters_per_visit_cap=2
     )
     assert used == ["r", "i"]
     assert timing["cross_filter_change_s"] == 0.0
@@ -55,7 +55,7 @@ def test_cap_limits_number_of_filters():
         filters=["r", "i"],
     )
     used, timing = choose_filters_with_cap(
-        ["r", "i"], 0.0, 15.0, cfg, max_filters_per_visit=2
+        ["r", "i"], 0.0, 15.0, cfg, filters_per_visit_cap=2
     )
     assert used == ["r"]
     assert timing["internal_filter_changes_s"] == 0.0
@@ -73,10 +73,10 @@ def test_capped_exposure_allows_more_filters():
     cfg.sky_provider = DummySky()
 
     uncapped, t_uncapped = choose_filters_with_cap(
-        ["g", "r"], 0.0, 35.0, cfg, max_filters_per_visit=2, use_capped_exposure=False
+        ["g", "r"], 0.0, 35.0, cfg, filters_per_visit_cap=2, use_capped_exposure=False
     )
     capped, t_capped = choose_filters_with_cap(
-        ["g", "r"], 0.0, 35.0, cfg, max_filters_per_visit=2, use_capped_exposure=True
+        ["g", "r"], 0.0, 35.0, cfg, filters_per_visit_cap=2, use_capped_exposure=True
     )
     assert len(uncapped) == 1
     assert len(capped) == 2

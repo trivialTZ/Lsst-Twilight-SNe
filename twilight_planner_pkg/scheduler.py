@@ -541,6 +541,9 @@ def _attempt_schedule_one(
                 cad_tgt_eff = float(override)
     except Exception:
         pass
+    cap_per_visit = int(getattr(cfg, "filters_per_visit_cap", getattr(cfg, "max_filters_per_visit", 1)))
+    auto_color = bool(getattr(cfg, "auto_color_pairing", True))
+
     if cad_on:
         if relax_cadence:
             gated = list(t["policy_allowed"])  # ignore cadence gate in relaxed mode
@@ -576,31 +579,31 @@ def _attempt_schedule_one(
         )
         rest = sorted([f for f in gated if f != first], key=_bonus, reverse=True)
         filters_pref = [first]
-        if int(cfg.max_filters_per_visit) >= 2 and rest:
+        if auto_color and cap_per_visit >= 2 and rest:
             opp = tracker.RED if first in tracker.BLUE else tracker.BLUE
             second = next((f for f in rest if f in opp), rest[0])
             filters_pref.append(second)
             rest = [f for f in rest if f != second]
         filters_pref.extend(rest)
-        filters_pref = filters_pref[: int(cfg.max_filters_per_visit)]
+        filters_pref = filters_pref[:cap_per_visit]
     else:
         filters_pref = [t["first_filter"]] + [
             f for f in t["allowed"] if f != t["first_filter"]
         ]
-        if int(cfg.max_filters_per_visit) >= 2 and len(filters_pref) > 1:
+        if auto_color and cap_per_visit >= 2 and len(filters_pref) > 1:
             first = filters_pref[0]
             rest = filters_pref[1:]
             opp = tracker.RED if first in tracker.BLUE else tracker.BLUE
             second = next((f for f in rest if f in opp), rest[0])
             filters_pref = [first, second] + [f for f in rest if f != second]
-        filters_pref = filters_pref[: int(cfg.max_filters_per_visit)]
+        filters_pref = filters_pref[:cap_per_visit]
     filters_used, timing = choose_filters_with_cap(
         filters_pref,
         sep,
         cfg.per_sn_cap_s,
         cfg,
         current_filter=state,
-        max_filters_per_visit=cfg.max_filters_per_visit,
+        filters_per_visit_cap=cap_per_visit,
     )
     if not filters_used:
         return False, {}

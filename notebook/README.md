@@ -109,7 +109,7 @@ default priority strategy.
 - **Filters & Hardware:**  
   `FILTERS=["g","r","i","z"]`, `CAROUSEL_CAPACITY=5` — Rubin carousel holds up to five; `u`/`y` are not loaded in this example.  
   `EXPOSURE_BY_FILTER=5s` — very short exposures to mitigate twilight brightness and saturation risk.  
-  `MAX_FILTERS_PER_VISIT=1` — one filter per visit reduces swaps and keeps within `PER_SN_CAP_S`.  
+  `FILTERS_PER_VISIT_CAP=1` — one filter per visit reduces swaps and keeps within `PER_SN_CAP_S`.  
   `START_FILTER="g"` — initial carousel state only; the plan adapts per target.
 - **Sun-altitude policy:**
 
@@ -143,7 +143,7 @@ default priority strategy.
   `SIMLIB_OUT=None` (disabled in the example). Set e.g. `"twilight.simlib"` to generate a SIMLIB.
 - **Misc:**  
   `TYPICAL_DAYS_BY_TYPE` (e.g., Ia: 70, II-P: 100, …) and `DEFAULT_TYPICAL_DAYS=60` define the baseline lifetime window (inflated by 1.2× for safety).  
-  `ALLOW_FILTER_CHANGES_IN_TWILIGHT=False` — the example already constrains visits via `MAX_FILTERS_PER_VISIT=1`; if your build of the planner honors this flag, it further discourages cross-target swaps in twilight.
+  `ALLOW_FILTER_CHANGES_IN_TWILIGHT=False` — the example already constrains visits via `FILTERS_PER_VISIT_CAP=1`; if your build of the planner honors this flag, it further discourages cross-target swaps in twilight.
 
 ---
 
@@ -151,7 +151,7 @@ default priority strategy.
 
 - Short exposures and single-filter visits are deliberate: twilight is bright and short; you’ll get more distinct SNe with fewer swaps.
 - The Sun-altitude policy is strict: even if a filter is loaded, it won’t be used when the Sun is too high for that band.
-- If you want multi-filter color on the same visit, increase `MAX_FILTERS_PER_VISIT` and be prepared to raise `PER_SN_CAP_S` and the window caps—or add a Sun-alt exposure ladder so exposures shrink as the Sun rises.
+- If you want multi-filter color on the same visit, increase `FILTERS_PER_VISIT_CAP` (optionally leaving `auto_color_pairing=True`) and be prepared to raise `PER_SN_CAP_S` and the window caps—or add a Sun-alt exposure ladder so exposures shrink as the Sun rises.
 
 ---
 

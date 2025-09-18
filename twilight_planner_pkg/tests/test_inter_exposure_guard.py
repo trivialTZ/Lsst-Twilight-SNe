@@ -184,7 +184,7 @@ def test_multi_filter_visit_no_internal_guard(tmp_path, monkeypatch):
         twilight_step_min=1,
         start_filter="g",
         inter_exposure_min_s=15.0,
-        max_filters_per_visit=2,
+        filters_per_visit_cap=2,
     )
 
     pernight_df, nights_df = plan_twilight_range_with_caps(

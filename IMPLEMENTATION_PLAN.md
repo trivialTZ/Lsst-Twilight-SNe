@@ -57,3 +57,19 @@ This plan tracks incremental, testable stages for the twilight planner and the s
 ## Tracking
 - Keep stages small and mergeable.
 - Each stage: implement → add/green tests → update README + examples → land.
+
+---
+
+## Stage 8: Adaptive filter-per-visit heuristics (pre-work notes)
+**Goal**: Keep twilight throughput high by only paying carousel overhead when it advances colour goals.
+
+**Candidate refinements**:
+- *Target-driven second band*: In `twilight_planner_pkg/scheduler.py:579-596`, gate the append of a second/third filter behind `PriorityTracker.color_deficit(...)` and `_has_only_blue_or_red(...)`. If the SN already has balanced colour coverage within `color_window_days`, leave `filters_pref` as a single band. This reuses the existing cadence bonus machinery, avoids new state, and simply trims the list before it flows into `choose_filters_with_cap`.
+- *Overhead-aware acceptance test*: In `twilight_planner_pkg/astro_utils.py:666-706`, compute the marginal time cost of each additional filter (carousel change + guard). Reject filters whose extra cost exceeds (a) the remaining window slack or (b) a configurable ratio such as `exp_time / (filter_change_s + guard)` falling below a threshold. The ratio can default to 1.0 so existing behaviour is unchanged unless `filter_change_s` is large.
+- *Colour backfill pass*: Repurpose the existing per-window backfill loop (`twilight_planner_pkg/scheduler.py:1460-2080`) to queue only the SNe still lacking colour pairs. First run keeps `filters_per_visit_cap=1`; the backfill call temporarily lifts the per-visit cap for a short list and respects the same cadence/swap policies. This isolates carousel-heavy work to a second phase without rewriting the main queue logic.
+
+**Measurement**:
+- Compare `nights_df` metrics (`n_planned`, `window_utilization`, `cap_utilization`) against current baseline.
+- Add unit coverage around new gating paths (e.g., targeted tests in `tests/test_planner_features.py` exercising high `filter_change_s`).
+
+**Status**: Planned ☐
