@@ -27,11 +27,22 @@ on the CLI writes a SIMLIB file alongside the usual planning CSVs.
 
 When per-band source magnitudes are missing, the planner can fall back to a
 catalog `discoverymag` to estimate source brightness for saturation guard
-(enabled by default; see `PlannerConfig.use_discovery_fallback`). If a
-`discoverymag` column is present but the code cannot infer per-band magnitudes
-for any target, it raises a `ValueError` by default
+(enabled by default; see `PlannerConfig.use_discovery_fallback`). The fallback
+now also leverages redshift information: a lightweight ΛCDM distance-modulus
+calculator plus a conservative Ia peak-standardization is used to derive
+`z→peak` magnitudes, and the discovery-based and redshift-based estimates are
+merged by taking the brighter (smaller) magnitude per filter. Configuration
+knobs such as `PlannerConfig.peak_extra_bright_margin_mag`,
+`PlannerConfig.Kcorr_approx_mag`, and cosmology parameters allow tuning the
+safety margin. If neither discovery nor redshift information yields a per-band
+estimate for a target, the code raises a `ValueError`
 (`PlannerConfig.discovery_error_on_missing=True`) to avoid silently skipping
 saturation protection.
+
+Rubin photometry defaults now adopt a gain of 1.6 e⁻/ADU in both
+`PlannerConfig` and `PhotomConfig`, which keeps conversions between ADU and
+electrons consistent with LSST camera specifications while feeding the
+saturation guard.
 
 See `twilight_planner_pkg/README.md` for detailed usage instructions and
 module documentation.
