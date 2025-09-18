@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -23,6 +23,8 @@ def build_saturation_df(
     perSN_df: pd.DataFrame,
     csv_path: str,
     cfg: PlannerConfig,
+    *,
+    redshift_map: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     """Return a diagnostic DataFrame with per-visit saturation components.
 
@@ -42,6 +44,27 @@ def build_saturation_df(
     - uses the row's ``sky_mag_arcsec2`` for the sky term;
     - uses the configured default host SB (if enabled) when no per-target host
       SB was available at planning time.
+    
+    Parameters
+    ----------
+    perSN_df : pandas.DataFrame
+        Planner per-visit output (typically from ``plan_twilight_range_with_caps``).
+    csv_path : str
+        Path to the input catalog used for the planning run. The catalog is
+        re-read so per-target magnitudes and (optionally) redshifts can be
+        recovered with the same normalization performed at planning time.
+    cfg : PlannerConfig
+        Configuration used for the planning run.
+    redshift_map : dict, optional, keyword-only
+        Optional explicit mapping ``{target_name: redshift}``. When provided it
+        overrides redshifts recovered from ``csv_path``. Missing entries simply
+        fall back to the catalog values.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Diagnostics including per-target electron budgets and host
+        surface-brightness assumptions.
     """
 
     # Source magnitudes per target (by filter)
@@ -50,6 +73,37 @@ def build_saturation_df(
     raw = pd.read_csv(csv_path)
     cat = standardize_columns(raw, cfg)
     mag_lookup: Dict[str, Dict[str, float]] = build_mag_lookup_with_fallback(cat, cfg)
+
+    # Build a per-target redshift lookup, preferring an explicit map if provided.
+    redshift_lookup: Dict[str, float] = {}
+    if redshift_map:
+        for key, val in redshift_map.items():
+            try:
+                if val is None:
+                    continue
+                z_val = float(val)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(z_val) or z_val < 0.0:
+                continue
+            key_name = str(key).strip()
+            if not key_name:
+                continue
+            redshift_lookup[key_name] = z_val
+    elif "Name" in cat.columns and "redshift" in cat.columns:
+        for name, z in zip(cat["Name"], cat["redshift"]):
+            if pd.isna(z):
+                continue
+            try:
+                z_val = float(z)
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(z_val) or z_val < 0.0:
+                continue
+            key_name = str(name).strip()
+            if not key_name:
+                continue
+            redshift_lookup[key_name] = z_val
 
     phot_cfg = PhotomConfig(
         pixel_scale_arcsec=cfg.pixel_scale_arcsec,
@@ -183,7 +237,22 @@ def build_saturation_df(
         )
 
         # Host electrons per pixel: use configured default host SB if enabled
-        mu_host = default_host_mu_obs(band, cfg)
+        host_z_saved = getattr(cfg, "current_host_z", None)
+        redshift_saved = getattr(cfg, "current_redshift", None)
+        try:
+            z_target = redshift_lookup.get(name)
+            if z_target is not None:
+                cfg.current_host_z = z_target
+                cfg.current_redshift = z_target
+            else:
+                cfg.current_host_z = None
+                cfg.current_redshift = None
+
+            mu_host = default_host_mu_obs(band, cfg)
+        finally:
+            cfg.current_host_z = host_z_saved
+            cfg.current_redshift = redshift_saved
+
         e_host = (
             float(
                 electrons_per_pixel_from_sb(
