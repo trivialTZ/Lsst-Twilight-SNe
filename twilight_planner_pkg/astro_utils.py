@@ -10,8 +10,8 @@ notes.
 
 from __future__ import annotations
 
-import warnings
 import math
+import warnings
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Dict, List, Sequence, Tuple, TypedDict
 
@@ -25,9 +25,9 @@ from astropy.utils.exceptions import AstropyDeprecationWarning, AstropyWarning
 
 
 try:
-    from astropy.coordinates.baseframe import (  # most versions
+    from astropy.coordinates.baseframe import (
         NonRotationTransformationWarning,
-    )
+    )  # most versions
 except Exception:
     try:
         from astropy.coordinates.transformations import NonRotationTransformationWarning
@@ -51,6 +51,46 @@ warnings.filterwarnings(
     category=Warning,
     module="astropy",
 )
+
+
+def default_host_mu_obs(band: str, cfg: PlannerConfig) -> float | None:
+    """Return a fallback observed host surface brightness for ``band``."""
+
+    if not getattr(cfg, "use_default_host_sb", False):
+        return None
+
+    z_context: float | None = None
+    for attr in ("current_host_z", "current_redshift"):
+        z_val = getattr(cfg, attr, None)
+        if z_val is None:
+            continue
+        try:
+            z_candidate = float(z_val)
+        except (TypeError, ValueError):
+            continue
+        if z_candidate > -0.99:
+            z_context = z_candidate
+            break
+
+    mu_rest_map = getattr(cfg, "default_host_mu_rest_arcsec2_by_filter", None)
+    slope_map = getattr(cfg, "default_host_kcorr_slope_by_filter", None) or {}
+    if (
+        mu_rest_map
+        and z_context is not None
+        and z_context > 0.0
+        and band in mu_rest_map
+    ):
+        mu_rest = float(mu_rest_map[band])
+        slope = float(slope_map.get(band, 0.2))
+        mu_obs = mu_rest + 10.0 * math.log10(1.0 + z_context) + slope * z_context
+        return mu_obs
+
+    obs_map = getattr(cfg, "default_host_mu_arcsec2_by_filter", None)
+    if obs_map and band in obs_map:
+        return float(obs_map[band])
+
+    # Final conservative fallback matching historical behaviour.
+    return 22.0
 
 
 def validate_coords(
@@ -527,17 +567,20 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
                 if isinstance(K_by_filter, dict):
                     K0 = float(K_by_filter.get(str(band).lower(), K0))
                 margin = float(getattr(cfg, "peak_extra_bright_margin_mag", 0.3))
-                src_mag_map[band] = peak_mag_from_redshift(
-                    z_val,
-                    band,
-                    MB=MB,
-                    alpha=alpha,
-                    beta=beta,
-                    H0=H0,
-                    Om=Om,
-                    Ol=Ol,
-                    K_approx=K0,
-                ) - margin
+                src_mag_map[band] = (
+                    peak_mag_from_redshift(
+                        z_val,
+                        band,
+                        MB=MB,
+                        alpha=alpha,
+                        beta=beta,
+                        H0=H0,
+                        Om=Om,
+                        Ol=Ol,
+                        K_approx=K0,
+                    )
+                    - margin
+                )
             except Exception:
                 pass
     if band not in src_mag_map:
@@ -564,10 +607,13 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         gain_e_per_adu=cfg.gain_e_per_adu,
         zpt_err_mag=cfg.zpt_err_mag,
         # Tie saturation thresholds to PlannerConfig's SIMLIB settings when present
-        npe_pixel_saturate=int(getattr(cfg, "simlib_npe_pixel_saturate", 100_000) or 100_000),
-        npe_pixel_warn_nonlinear=int(
-            0.8 * (getattr(cfg, "simlib_npe_pixel_saturate", 100_000) or 100_000)
+        npe_pixel_saturate=int(
+            getattr(cfg, "simlib_npe_pixel_saturate", 80_000) or 80_000
         ),
+        npe_pixel_warn_nonlinear=int(
+            0.8 * (getattr(cfg, "simlib_npe_pixel_saturate", 80_000) or 80_000)
+        ),
+        use_snana_fA=getattr(cfg, "use_snana_fA", True),
     )
     # Optional host terms if provided via config
     kwargs = {}
@@ -575,10 +621,14 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         band in cfg.current_host_mu_arcsec2_by_filter
     ):
         kwargs["mu_host_obs_arcsec2"] = cfg.current_host_mu_arcsec2_by_filter[band]
-    elif getattr(cfg, "current_host_mu_rest_arcsec2_by_filter", None) and (
-        band in cfg.current_host_mu_rest_arcsec2_by_filter
-    ) and getattr(cfg, "current_host_z", None) is not None:
-        kwargs["mu_host_rest_arcsec2"] = cfg.current_host_mu_rest_arcsec2_by_filter[band]
+    elif (
+        getattr(cfg, "current_host_mu_rest_arcsec2_by_filter", None)
+        and (band in cfg.current_host_mu_rest_arcsec2_by_filter)
+        and getattr(cfg, "current_host_z", None) is not None
+    ):
+        kwargs["mu_host_rest_arcsec2"] = cfg.current_host_mu_rest_arcsec2_by_filter[
+            band
+        ]
         kwargs["z_host"] = cfg.current_host_z
         if getattr(cfg, "current_host_K_by_filter", None):
             kwargs["K_host"] = cfg.current_host_K_by_filter.get(band, 0.0)
@@ -590,18 +640,10 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
             kwargs["host_point_frac"] = cfg.current_host_point_frac
 
     # If no explicit host info is supplied, use default host SB if enabled
-    if (
-        "mu_host_obs_arcsec2" not in kwargs
-        and "mu_host_rest_arcsec2" not in kwargs
-        and getattr(cfg, "use_default_host_sb", False)
-    ):
-        mu_def = None
-        if getattr(cfg, "default_host_mu_arcsec2_by_filter", None):
-            mu_def = cfg.default_host_mu_arcsec2_by_filter.get(band)
-        if mu_def is None:
-            # Conservative mid-range default per literature (e.g., r ~21–23)
-            mu_def = 22.0
-        kwargs["mu_host_obs_arcsec2"] = float(mu_def)
+    if "mu_host_obs_arcsec2" not in kwargs and "mu_host_rest_arcsec2" not in kwargs:
+        mu_def = default_host_mu_obs(band, cfg)
+        if mu_def is not None:
+            kwargs["mu_host_obs_arcsec2"] = float(mu_def)
 
     return cap_exposure_for_saturation(
         band,

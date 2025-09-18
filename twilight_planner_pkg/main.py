@@ -141,7 +141,7 @@ def build_parser():
     p.add_argument("--simlib-pixsize", type=float, default=0.200)
     p.add_argument("--npe-pixel-saturate", type=int, default=120000)
     p.add_argument("--photflag-saturate", type=int, default=2048)
-    p.add_argument("--psf-unit", default="NEA_PIXEL")
+    p.add_argument("--psf-unit", default="PIXEL")
     p.add_argument("--gain", type=float, default=1.6)
     p.add_argument("--read-noise-e", type=float, default=9.0)
     p.add_argument("--allow-filter-changes-in-twilight", action="store_true")

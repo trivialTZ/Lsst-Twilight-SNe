@@ -105,7 +105,7 @@ def test_simlib_output(tmp_path, monkeypatch):
 
     # BEGIN LIBGEN should appear after the global header
     assert any(line.strip() == "BEGIN LIBGEN" for line in lines[:50])
-    header_line = "#     MJD        ID   FLT GAIN NOISE SKYSIG NEA ZPTAVG ZPTERR"
+    header_line = "#     MJD        ID+NEXPOSE FLT GAIN NOISE SKYSIG PSF1 PSF2 PSFRATIO ZPTAVG ZPTERR"
     libid_indices = [i for i, line in enumerate(lines) if line.startswith("LIBID:")]
     assert lines.count(header_line) == len(libid_indices)
 
@@ -146,10 +146,10 @@ def test_writer_groups_epochs(tmp_path):
         writer = SimlibWriter(fp, SimlibHeader())
         writer.write_header()
         writer.start_libid(1, 1.0, 2.0, 1, comment="SN1")
-        writer.add_epoch(1.0, "r", 1.0, 1.0, 1.0, 1.0, 25.0, 0.1)
+        writer.add_epoch(1.0, "r", 1.0, 1.0, 1.0, 0.8, 0.0, 0.0, 25.0, 0.1)
         writer.end_libid()
         writer.start_libid(2, 1.0, 2.0, 1, comment="SN1")
-        writer.add_epoch(2.0, "r", 1.0, 1.0, 1.0, 1.0, 25.0, 0.1)
+        writer.add_epoch(2.0, "r", 1.0, 1.0, 1.0, 0.8, 0.0, 0.0, 25.0, 0.1)
         writer.end_libid()
         writer.close()
 
@@ -163,5 +163,27 @@ def test_writer_groups_epochs(tmp_path):
     assert "NOBS: 2" in nobs_line
     s_lines = [line for line in lines if line.startswith("S:")]
     assert len(s_lines) == 2
-    assert s_lines[0].split()[2] == "1"
-    assert s_lines[1].split()[2] == "2"
+    parts0 = s_lines[0].split()
+    parts1 = s_lines[1].split()
+    assert parts0[2] == "1"
+    assert parts0[3] == "r"
+    assert parts1[2] == "2"
+    assert parts1[3] == "r"
+
+
+def test_writer_emits_id_plus_nexpose_token(tmp_path):
+    path = tmp_path / "out_coadd.SIMLIB"
+    with path.open("w") as fp:
+        writer = SimlibWriter(fp, SimlibHeader())
+        writer.write_header()
+        writer.start_libid(1, 1.0, 2.0, 1, comment="SN1")
+        writer.add_epoch(1.0, "r", 1.0, 1.0, 1.0, 0.8, 0.0, 0.0, 25.0, 0.1, nexpose=6)
+        writer.end_libid()
+        writer.close()
+
+    line = next(line for line in path.read_text().splitlines() if line.startswith("S:"))
+    tokens = line.split()
+    assert tokens[2] == "1*6"
+    assert tokens[3] == "r"
+    # Ensure no stray token was created between ID and band
+    assert "*" in tokens[2]

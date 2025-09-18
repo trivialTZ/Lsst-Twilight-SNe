@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timezone as _dt_timezone
 from typing import Dict, List, Optional, Tuple
 
 import astropy.units as u
@@ -7,7 +8,6 @@ import numpy as np
 import pandas as pd
 from astropy.coordinates import Angle
 from astropy.time import Time
-from datetime import timezone as _dt_timezone
 
 from .astro_utils import (
     parse_sn_type_to_window_days,
@@ -82,7 +82,7 @@ _NAME_SYNONYMS = [
     "id",
     "snname",
 ]
-_TYPE_SYNONYMS = ["type", "sntype", "class", "tnsclass", "subtype"]
+_TYPE_SYNONYMS = ["type", "sntype", "class", "tnsclass", "subtype", "sn_type_raw"]
 
 _MAG_SYNONYMS = {
     "g": [
@@ -196,7 +196,9 @@ def _norm_filter_string(x: object) -> str:
     return alias.get(s, s)
 
 
-def _to_r_from_atlas(discovery_mag: float, disc_filter: str, assumed_gr: float = 0.0) -> Optional[float]:
+def _to_r_from_atlas(
+    discovery_mag: float, disc_filter: str, assumed_gr: float = 0.0
+) -> Optional[float]:
     """Approximate r-band mag from ATLAS c/o using simple color relations.
 
     With no color (g-r≈0), this reduces to r≈c or r≈o.
@@ -286,8 +288,6 @@ def infer_src_mag_from_discovery_pro(
                 else:
                     src[b] = float(rmag) - float(margin_mag)
         else:  # atlas_priors (use color prior ranges for conservative bright estimate)
-            # Read priors and knobs
-            pri_min = getattr(df, "_dummy", None)  # placeholder
             # pull from cfg-like attributes via closure? Not available here; use defaults
             # Overload via a small helper that reads from a global config isn't ideal.
             # Instead, we support atlas_priors in build_mag_lookup_with_fallback below where cfg is present.
@@ -326,7 +326,9 @@ def _merge_mag_maps(
     return out
 
 
-def build_mag_lookup_with_fallback(df: pd.DataFrame, cfg: PlannerConfig) -> Dict[str, Dict[str, float]]:
+def build_mag_lookup_with_fallback(
+    df: pd.DataFrame, cfg: PlannerConfig
+) -> Dict[str, Dict[str, float]]:
     """Return per-target per-band magnitudes with discovery fallback.
 
     This wraps :func:`extract_current_mags` and, when necessary, fills missing
@@ -381,6 +383,12 @@ def build_mag_lookup_with_fallback(df: pd.DataFrame, cfg: PlannerConfig) -> Dict
 
     # Enforce completeness if requested: every Name in df must have values for all planned bands
     if getattr(cfg, "discovery_error_on_missing", True):
+        normalized_cols = {norm for _, norm in _normalize_col_names(df.columns)}
+        has_discovery_mag = any("discoverymag" in norm for norm in normalized_cols)
+        has_discovery_filter = any(
+            "".join(ch for ch in syn.lower() if ch.isalnum()) in normalized_cols
+            for syn in _DISC_FILT_SYNONYMS
+        )
         planned_set = set(str(b).lower() for b in planned)
         missing: list[str] = []
         incomplete: list[str] = []
@@ -392,24 +400,31 @@ def build_mag_lookup_with_fallback(df: pd.DataFrame, cfg: PlannerConfig) -> Dict
                 continue
             have = set(str(b).lower() for b in bandmap.keys())
             # restrict to planned bands present in priors/generation
-            need = {b for b in planned_set if b in {"u","g","r","i","z","y"}}
+            need = {b for b in planned_set if b in {"u", "g", "r", "i", "z", "y"}}
             if not need.issubset(have):
                 incomplete.append(name)
         if missing or incomplete:
             details = []
             if missing:
-                details.append(f"missing mags for: {', '.join(missing[:5])}{'...' if len(missing)>5 else ''}")
+                details.append(
+                    f"missing mags for: {', '.join(missing[:5])}{'...' if len(missing)>5 else ''}"
+                )
             if incomplete:
-                details.append(f"incomplete mags for: {', '.join(incomplete[:5])}{'...' if len(incomplete)>5 else ''}")
-            raise ValueError(
-                "Discovery fallback failed to produce per-band magnitudes for all targets: "
-                + "; ".join(details)
-            )
+                details.append(
+                    f"incomplete mags for: {', '.join(incomplete[:5])}{'...' if len(incomplete)>5 else ''}"
+                )
+            if has_discovery_mag or has_discovery_filter:
+                raise ValueError(
+                    "Discovery fallback failed to produce per-band magnitudes for all targets: "
+                    + "; ".join(details)
+                )
 
     return merged
 
 
-def _color_extreme(color: str, sign_k: int, cfg: PlannerConfig, is_non_ia: bool) -> float:
+def _color_extreme(
+    color: str, sign_k: int, cfg: PlannerConfig, is_non_ia: bool
+) -> float:
     """Return the color extreme that minimizes the target-band magnitude.
 
     If the relation is ``target = base + sign_k * color``, choose the extreme
@@ -435,7 +450,9 @@ def _color_extreme(color: str, sign_k: int, cfg: PlannerConfig, is_non_ia: bool)
 
 def _is_non_ia_type(row: pd.Series) -> bool:
     t = str(row.get("SN_type_raw", "")).strip().lower()
-    return (not t) or ("ia" not in t)
+    if not t or t in {"nan", "none", "unknown"}:
+        return False
+    return "ia" not in t
 
 
 def _infer_from_discovery_with_priors(
@@ -486,7 +503,6 @@ def _infer_from_discovery_with_priors(
             alpha = float(pars.get("alpha", 0.0))
             beta = float(pars.get("beta", 0.0))
             # r = m_disc + alpha + beta*(g-r); choose (g-r) extreme based on sign(beta)
-            sign_k = 1 if beta >= 0 else -1  # increasing with g-r? then choose min; else max
             gr = _color_extreme("g-r", -1 if beta < 0 else +1, cfg, non_ia)
             rmag = dm + alpha + beta * gr
         else:
@@ -542,7 +558,11 @@ def _infer_from_discovery_with_priors(
             src["u"] = float(src["g"] + ug)
 
         # Map to requested bands
-        out[name] = {b: src[b.lower()] for b in (str(x).lower() for x in planned_bands) if b in src}
+        out[name] = {
+            b: src[b.lower()]
+            for b in (str(x).lower() for x in planned_bands)
+            if b in src
+        }
 
     return out
 
@@ -599,6 +619,7 @@ def _infer_peak_from_redshift(
         if band_map:
             out[name] = band_map
     return out
+
 
 # Common redshift column synonyms (first match wins)
 _REDSHIFT_SYNONYMS = [
@@ -1005,7 +1026,9 @@ def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
         nums = numeric[mask_num_remaining]
         # seconds
         try:
-            dt_s = pd.to_datetime(nums, unit="s", origin="unix", utc=True, errors="coerce")
+            dt_s = pd.to_datetime(
+                nums, unit="s", origin="unix", utc=True, errors="coerce"
+            )
         except TypeError:
             dt_s = pd.Series(pd.NaT, index=nums.index, dtype="datetime64[ns, UTC]")
         ok_s = _in_bounds(dt_s) & dt_s.notna()
@@ -1016,9 +1039,13 @@ def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
         if mask_after_s.any():
             nums_ms = numeric[mask_after_s]
             try:
-                dt_ms = pd.to_datetime(nums_ms, unit="ms", origin="unix", utc=True, errors="coerce")
+                dt_ms = pd.to_datetime(
+                    nums_ms, unit="ms", origin="unix", utc=True, errors="coerce"
+                )
             except TypeError:
-                dt_ms = pd.Series(pd.NaT, index=nums_ms.index, dtype="datetime64[ns, UTC]")
+                dt_ms = pd.Series(
+                    pd.NaT, index=nums_ms.index, dtype="datetime64[ns, UTC]"
+                )
             ok_ms = _in_bounds(dt_ms) & dt_ms.notna()
             out.loc[ok_ms.index[ok_ms]] = dt_ms[ok_ms]
 
@@ -1027,9 +1054,13 @@ def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
         if mask_after_ms.any():
             nums_us = numeric[mask_after_ms]
             try:
-                dt_us = pd.to_datetime(nums_us, unit="us", origin="unix", utc=True, errors="coerce")
+                dt_us = pd.to_datetime(
+                    nums_us, unit="us", origin="unix", utc=True, errors="coerce"
+                )
             except TypeError:
-                dt_us = pd.Series(pd.NaT, index=nums_us.index, dtype="datetime64[ns, UTC]")
+                dt_us = pd.Series(
+                    pd.NaT, index=nums_us.index, dtype="datetime64[ns, UTC]"
+                )
             ok_us = _in_bounds(dt_us) & dt_us.notna()
             out.loc[ok_us.index[ok_us]] = dt_us[ok_us]
 
@@ -1086,7 +1117,11 @@ def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
     )
     # Normalized redshift column (best-effort): look for configured column first,
     # else try common synonyms. Non-finite or negative values become NaN.
-    red_col = cfg.redshift_column if (cfg.redshift_column in df.columns) else _fuzzy_pick(df, _REDSHIFT_SYNONYMS)
+    red_col = (
+        cfg.redshift_column
+        if (cfg.redshift_column in df.columns)
+        else _fuzzy_pick(df, _REDSHIFT_SYNONYMS)
+    )
     if red_col and red_col in df.columns:
         z_num = pd.to_numeric(df[red_col], errors="coerce")
         # reject negatives and absurdly large values

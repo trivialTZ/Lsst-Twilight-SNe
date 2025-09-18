@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Optional
-
-import warnings
 
 from .astro_utils import airmass_from_alt_deg
 
@@ -19,11 +18,11 @@ class PhotomConfig:
     ----------
     npe_pixel_saturate: int
         Hard pixel full-well capacity in electrons where exposure must be
-        shortened to avoid saturation (~100 ke-).
+        shortened to avoid saturation (~80 ke⁻ by default).
     npe_pixel_warn_nonlinear: int
         Non-linearity warning threshold in electrons; exposures predicting a
-        per-pixel charge above this level (~80 ke-) will be flagged but not
-        forcibly reduced unless the hard cap is exceeded.
+        per-pixel charge above this level (~0.8×full well) will be flagged but
+        not forcibly reduced unless the hard cap is exceeded.
     read_noise_e: float
         Read noise per pixel in electrons (typical 5.4–6.2 e⁻ depending on
         sensor vendor; requirement ≤9 e⁻ per LCA-48-J).
@@ -40,11 +39,15 @@ class PhotomConfig:
     gain_e_per_adu: float = 1.6
     zpt_err_mag: float = 0.005
     # Pixel full-well thresholds (electrons)
-    npe_pixel_saturate: int = 100_000
-    npe_pixel_warn_nonlinear: int = 80_000
+    npe_pixel_saturate: int = 80_000
+    npe_pixel_warn_nonlinear: int = 64_000
     # Optional extra safety factor for non-linearity region (1.0 = disabled)
     nonlinear_headroom: float = 1.0
     sky_mag_override: Optional[float] = None
+    # Toggle which central-pixel fraction approximation to use for saturation
+    # guards. ``True`` selects the SNANA Taylor expansion (recommended for SIMLIB
+    # parity); ``False`` keeps the exact Gaussian integral used historically.
+    use_snana_fA: bool = True
 
     def __post_init__(self) -> None:
         if self.zpt1s is None:
@@ -104,6 +107,10 @@ class EpochPhotom:
     NEA_pix: float
     RDNOISE: float
     GAIN: float
+    FWHM_eff_arcsec: float
+    PSF1_pix: float
+    PSF2_pix: float
+    PSFRATIO: float
 
 
 def nea_pixels(fwhm_eff_arcsec: float, pixel_scale_arcsec: float) -> float:
@@ -112,12 +119,29 @@ def nea_pixels(fwhm_eff_arcsec: float, pixel_scale_arcsec: float) -> float:
     return 2.266 * (fwhm_eff_arcsec / pixel_scale_arcsec) ** 2
 
 
-def central_pixel_fraction_gaussian(fwhm_arcsec: float, pix_arcsec: float) -> float:
-    """Fraction of flux landing in the central pixel for a Gaussian PSF."""
-    sigma = fwhm_arcsec / 2.355
+def central_pixel_fraction_exact(fwhm_arcsec: float, pix_arcsec: float) -> float:
+    """Exact central-pixel fraction for a Gaussian PSF via erf^2 integral."""
+
+    sigma = max(1e-6, fwhm_arcsec / 2.355)
     x = pix_arcsec / (2.0 * math.sqrt(2.0) * sigma)
     erf = math.erf(x)
     return max(1e-6, min(1.0, erf * erf))
+
+
+def central_pixel_fraction_snana(
+    fwhm_arcsec: float, pixel_scale_arcsec: float
+) -> float:
+    """SNANA 4.7.4 Taylor-approximation to the central pixel fraction ``f_A``."""
+
+    sigma = max(1e-6, fwhm_arcsec / 2.355)
+    P = float(pixel_scale_arcsec)
+    term = (P * P) / (2.0 * math.pi * sigma * sigma)
+    frac = term * (1.0 - (P * P) / (4.0 * math.pi * sigma * sigma))
+    return max(0.0, min(1.0, frac))
+
+
+# Backwards-compatibility alias (deprecated name used in older notebooks/tests).
+central_pixel_fraction_gaussian = central_pixel_fraction_exact
 
 
 def epoch_zeropoints(
@@ -158,7 +182,9 @@ def electrons_per_pixel_from_sb(
     return max(0.0, 10 ** (-0.4 * (mu_arcsec2 - ZPT_pe)) * area)
 
 
-def observed_sb_from_rest(mu_rest_arcsec2: float, z: float, K_mag: float = 0.0) -> float:
+def observed_sb_from_rest(
+    mu_rest_arcsec2: float, z: float, K_mag: float = 0.0
+) -> float:
     """Convert rest-frame surface brightness to observed-frame.
 
     Applies Tolman dimming by (1+z)^4 and an optional K-correction ``K_mag``
@@ -176,7 +202,12 @@ def compute_epoch_photom(
     cfg: PhotomConfig,
     fwhm_eff_arcsec: float | None = None,
 ) -> EpochPhotom:
-    """Compute photometric parameters for a single exposure."""
+    """Compute photometric parameters for a single exposure.
+
+    The returned ``SKYSIG`` and ``RDNOISE`` fields are emitted as ADU/pixel for
+    SIMLIB rows: ``SKYSIG`` corresponds to ``sqrt(sky electrons) / gain`` (read
+    noise excluded) while ``NOISE`` in the SIMLIB output is ``RDNOISE / gain``.
+    """
 
     X = airmass_from_alt_deg(alt_deg)
     ZPT_pe, ZPTAVG = epoch_zeropoints(
@@ -184,6 +215,8 @@ def compute_epoch_photom(
     )
     fwhm = fwhm_eff_arcsec or cfg.fwhm_eff[band]
     nea = nea_pixels(fwhm, cfg.pixel_scale_arcsec)
+    sigma_arcsec = fwhm / 2.355
+    sigma_pix = sigma_arcsec / max(1e-6, cfg.pixel_scale_arcsec)
     SKYSIG = sky_rms_adu_per_pix(
         sky_mag_arcsec2, ZPT_pe, cfg.pixel_scale_arcsec, cfg.gain_e_per_adu
     )
@@ -196,6 +229,10 @@ def compute_epoch_photom(
         NEA_pix=nea,
         RDNOISE=RDNOISE,
         GAIN=cfg.gain_e_per_adu,
+        FWHM_eff_arcsec=fwhm,
+        PSF1_pix=sigma_pix,
+        PSF2_pix=0.0,
+        PSFRATIO=0.0,
     )
 
 
@@ -209,6 +246,7 @@ def cap_exposure_for_saturation(
     fwhm_eff_arcsec: float | None = None,
     min_exp_s: float = 1.0,
     *,
+    nexpose: int = 1,
     # Optional host terms; supply either observed SB or (rest SB + z)
     mu_host_obs_arcsec2: float | None = None,
     mu_host_rest_arcsec2: float | None = None,
@@ -239,11 +277,17 @@ def cap_exposure_for_saturation(
     min_exp_s: float, default 1.0
         Minimum allowable exposure time in seconds.
 
+    nexpose: int, default 1
+        Number of equal-length exposures coadded into the epoch. SNANA compares
+        the *average* per-exposure pixel charge against the saturation
+        threshold. The guard therefore divides the summed electrons by this
+        value when checking against ``cfg.npe_pixel_saturate``.
+
     Returns
     -------
     tuple
         ``(t, flags)`` where ``t`` is the exposure time after applying the
-        saturation policy and ``flags`` is a set of strings.  ``"sat_guard"``
+        saturation policy and ``flags`` is a set of strings. ``"sat_guard"``
         indicates the exposure was shortened to respect the hard cap
         (``cfg.npe_pixel_saturate`` ≈ 100 ke-). ``"warn_nonlinear"`` marks
         exposures that fall in the non-linear 80–100 ke- range but do not
@@ -251,16 +295,18 @@ def cap_exposure_for_saturation(
     """
     flags: set[str] = set()
     t = max(min_exp_s, t_exp_s)
-    last_total_e = 0.0
+    last_total_e_avg = 0.0
+    n_expose = max(1, int(round(nexpose)))
     for _ in range(10):
         eph = compute_epoch_photom(
             band, t, alt_deg, sky_mag_arcsec2, cfg, fwhm_eff_arcsec
         )
 
         # Central-pixel electrons from the SN (point source)
-        frac = central_pixel_fraction_gaussian(
-            fwhm_eff_arcsec or cfg.fwhm_eff[band], cfg.pixel_scale_arcsec
-        )
+        seeing = fwhm_eff_arcsec or cfg.fwhm_eff[band]
+        frac_exact = central_pixel_fraction_exact(seeing, cfg.pixel_scale_arcsec)
+        frac_snana = central_pixel_fraction_snana(seeing, cfg.pixel_scale_arcsec)
+        frac = frac_snana if cfg.use_snana_fA else frac_exact
         e_src = central_pixel_electrons(src_mag, eph.ZPT_pe, frac)
 
         # Per-pixel electrons from the sky (use direct electrons, not RMS)
@@ -282,24 +328,27 @@ def cap_exposure_for_saturation(
 
         # Optional compact host knot approximated as a point-like component
         if host_point_mag is not None:
-            fpt = host_point_frac if host_point_frac is not None else frac
+            default_frac = frac_snana if cfg.use_snana_fA else frac_exact
+            fpt = host_point_frac if host_point_frac is not None else default_frac
             e_host += central_pixel_electrons(host_point_mag, eph.ZPT_pe, fpt)
 
         total_e = e_src + e_host + e_sky
-        last_total_e = total_e
+        total_e_avg = total_e / float(n_expose)
+        last_total_e_avg = total_e_avg
 
         # Threshold checks (include optional headroom for the warn zone)
         warn_thr = cfg.npe_pixel_warn_nonlinear * max(1.0, cfg.nonlinear_headroom)
-        if total_e <= cfg.npe_pixel_saturate:
-            if total_e >= warn_thr:
+        if total_e_avg <= cfg.npe_pixel_saturate:
+            if total_e_avg >= warn_thr:
                 flags.add("warn_nonlinear")
             break
 
         # Over the hard cap: shorten exposure proportionally (linear scaling)
         flags.add("sat_guard")
-        scale = max(0.1, min(1.0, cfg.npe_pixel_saturate / max(1.0, total_e)))
+        scale = cfg.npe_pixel_saturate / max(1.0, total_e_avg)
+        scale = max(0.1, min(1.0, scale))
         t = max(min_exp_s, t * scale)
     else:
-        if last_total_e >= cfg.npe_pixel_warn_nonlinear:
+        if last_total_e_avg >= cfg.npe_pixel_warn_nonlinear:
             flags.add("warn_nonlinear")
     return t, flags

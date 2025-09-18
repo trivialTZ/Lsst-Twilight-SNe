@@ -1,6 +1,8 @@
 from twilight_planner_pkg.photom_rubin import (
     PhotomConfig,
     cap_exposure_for_saturation,
+    central_pixel_fraction_exact,
+    central_pixel_fraction_snana,
     compute_epoch_photom,
     electrons_per_pixel_from_sb,
     observed_sb_from_rest,
@@ -13,6 +15,10 @@ def test_compute_epoch_photom_basics():
     assert abs(eph.ZPTAVG - 27.83) < 0.1
     assert eph.SKYSIG > 0
     assert eph.NEA_pix > 0
+    assert eph.PSF1_pix > 0
+    assert eph.PSF2_pix == 0.0
+    assert eph.PSFRATIO == 0.0
+    assert eph.FWHM_eff_arcsec > 0
 
 
 def test_cap_exposure_warns_and_caps_source():
@@ -55,6 +61,13 @@ def test_observed_sb_from_rest_tolman_dimming():
     assert mu_obs > mu_rest
 
 
+def test_snana_fraction_close_to_exact():
+    frac_exact = central_pixel_fraction_exact(0.8, 0.2)
+    frac_snana = central_pixel_fraction_snana(0.8, 0.2)
+    assert 0.0 < frac_snana < 1.0
+    assert abs(frac_exact - frac_snana) < 5e-3
+
+
 def test_cap_exposure_more_aggressive_with_host_sb():
     # With a bright SN, adding a bright host SB should shorten exposure further
     cfg = PhotomConfig()
@@ -75,7 +88,7 @@ def test_tolman_dimming_relaxes_host_contribution():
     t_exp = 30.0
     alt = 60.0
     src_mag = 25.0  # negligible point source
-    sky_mu = 21.0   # moderate sky
+    sky_mu = 21.0  # moderate sky
     mu_rest = 20.0
 
     # Case A: treat rest SB as observed (i.e., no dimming)
