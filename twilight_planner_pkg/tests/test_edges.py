@@ -17,7 +17,9 @@ def test_sun_alt_monotonic():
     mags = {}
     sets = []
     for alt in [-18.1, -18.0, -17.9, -0.1, 0.0, 0.1]:
-        allowed = allowed_filters_for_window(mags, alt, -20.0, 0.0, 180.0, 1.0, 0.7)
+        allowed = allowed_filters_for_window(
+            mags, alt, -20.0, 0.0, 180.0, 1.0, 0.7
+        )
         sets.append(set(allowed))
     for earlier, later in zip(sets, sets[1:]):
         assert later.issubset(earlier)

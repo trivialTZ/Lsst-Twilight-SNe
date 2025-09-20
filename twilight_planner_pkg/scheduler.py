@@ -336,6 +336,9 @@ def _prepare_window_candidates(
     cad_sig: float,
     cad_wt: float,
     cad_first: float,
+    phot_cfg: PhotomConfig,
+    sky_provider,
+    sky_cfg: SkyModelConfig,
 ) -> tuple[list[dict], bool]:
     """Build candidate target dicts for a twilight window.
 
@@ -378,6 +381,11 @@ def _prepare_window_candidates(
             except Exception:
                 sun_alt_for_policy = mid_sun_alt
 
+        ra_val = row.get("RA_deg")
+        ra_float = float(ra_val) if pd.notna(ra_val) else None
+        dec_val = row.get("Dec_deg")
+        dec_float = float(dec_val) if pd.notna(dec_val) else None
+
         allowed = allowed_filters_for_window(
             mag_lookup.get(row["Name"], {}),
             sun_alt_for_policy,
@@ -385,7 +393,14 @@ def _prepare_window_candidates(
             row["_moon_phase"],
             row["_moon_sep"],
             airmass_from_alt_deg(row["max_alt_deg"]),
-            cfg.fwhm_eff or 0.7,
+            phot_cfg.fwhm_eff.get("r", 0.83) if phot_cfg.fwhm_eff else 0.83,
+            exposure_by_filter=cfg.exposure_by_filter,
+            phot_cfg=phot_cfg,
+            sky_provider=sky_provider,
+            sky_cfg=sky_cfg,
+            mjd=Time(current_time_utc).mjd,
+            ra_deg=ra_float,
+            dec_deg=dec_float,
         )
         allowed = [f for f in allowed if f in cfg.filters]
         allowed_policy = _policy_filters_mid(sun_alt_for_policy, cfg)
@@ -1429,6 +1444,9 @@ def plan_twilight_range_with_caps(
                 cad_sig,
                 cad_wt,
                 cad_first,
+                phot_cfg,
+                cfg.sky_provider,
+                sky_cfg,
             )
             # Backfill pool for this window (lower-priority visibles)
             backfill_group = backfill_pool[
@@ -1450,6 +1468,9 @@ def plan_twilight_range_with_caps(
                     cad_sig,
                     cad_wt,
                     cad_first,
+                    phot_cfg,
+                    cfg.sky_provider,
+                    sky_cfg,
                 )
                 backfill_candidates = bfill_list
             # If both are empty, skip this window

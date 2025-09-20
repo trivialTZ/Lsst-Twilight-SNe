@@ -190,6 +190,24 @@ used for the filename prefix.
 - Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
   with a dynamic filter batch order: filters requested by more candidates as
   their first filter are processed earlier (palette order provides tie‑breaks),
+  constrained by per‑SN and per‑window time caps.
+
+### Filter feasibility (m5 / SNR gating)
+
+- Per‑band feasibility uses an LSST‑style depth scaling for the 5σ depth `m5`:
+  sky brightness, seeing, airmass, and the **current per-filter exposure time**
+  (after any ladder overrides) all enter, and the read-noise correction
+  `ΔC_m(τ)` is applied so short visits lose depth appropriately.
+- Sky brightness comes from `rubin_sim.skybrightness` when available, falling
+  back to a twilight brightening term plus a Krisciunas & Schaefer (1991)
+  moon-scatter model.
+- The selector requires `m5 ≥ m_target` (equivalently SNR ≥ 5) for a band to be
+  eligible. There are no hard‑coded bans for `g`; the final allowed set is the
+  intersection with the user’s `sun_alt_policy`.
+- When no band passes the gate, the feasibility function returns an empty list
+  (no heuristic fallback); policy intersection and downstream logic decide the
+  outcome.
+
 - Enforce window caps (`morning_cap_s`, `evening_cap_s`, default "auto" uses window duration) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
 
 > ### Prioritization strategy recap:
@@ -366,7 +384,9 @@ which is accurate in the background‑dominated regime (typical in twilight).
 
 The planner adds gentle Sun/Moon penalties to $m_5$ in bright conditions and falls back to redder filters if needed.
 
-Filter feasibility rule (per candidate/time): select the first filter m for which $m_5 - m_{\rm target} \ge \Delta m_{\rm margin}$ (default margin 0.3 mag). If magnitudes are unavailable, the code uses a conservative band order favoring r/i/z at high sky brightness.
+Filter feasibility rule (per candidate/time): select filters where `m5 ≥ m_target`
+(equivalently SNR ≥ 5 by definition of `m5`). If magnitudes are unavailable, the
+code falls back to policy ordering but still honours `sun_alt_policy`.
 
 ### 5) Saturation Guard (Central‑Pixel Sum)
 

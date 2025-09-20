@@ -111,6 +111,22 @@ visit because cadence is tracked per filter.
 Airmass calculations adopt the "simple" formula of Kasten & Young (1989), and
 the overhead values above follow Rubin Observatory technical notes.
 
+### Filter feasibility (m5 / SNR gate)
+
+- m5 scaling: LSST-style 5σ depth that responds to sky brightness, seeing,
+  airmass, and the **per-filter exposure time** currently in force (including
+  any `sun_alt_exposure_ladder` overrides).
+- Read-noise correction `ΔC_m(τ)` is applied using the standard τ scaling so
+  short (e.g. 5 s) visits lose depth appropriately.
+- Sky brightness: when `rubin_sim.skybrightness` is available the exact Rubin
+  model is used; otherwise a fallback combines a twilight term with a
+  Krisciunas & Schaefer (1991) moon-scatter model.
+- Gate: a band is eligible when `m5 ≥ m_target` (SNR ≥ 5). There are **no
+  hard-coded bans**: the final decision is the intersection with
+  `sun_alt_policy`. If no band passes the m5/SNR gate, an empty set is
+  returned—there is no heuristic fallback. Per-filter Moon separations are
+  checked afterwards using the notebook-configured `min_moon_sep_by_filter`.
+
 ## Minimal example
 
 ```python

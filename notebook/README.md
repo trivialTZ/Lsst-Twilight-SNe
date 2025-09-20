@@ -118,6 +118,19 @@ Short twilight windows can starve specific bands (typically g). The notebook’s
 
 With these two levers active, the planner tends to produce a much more even distribution across g/r/i/z without relaxing cadence or over‑swapping filters.
 
+### m5 feasibility notes
+- Filter feasibility uses LSST-style `m5` scaling: it responds to band-specific
+  sky brightness, seeing, airmass, and the **current exposure time** (including
+  any `sun_alt_exposure_ladder` overrides). The read-noise correction
+  `ΔC_m(τ)` is applied so short 5 s visits lose depth appropriately.
+- Sky brightness is sourced from `rubin_sim.skybrightness` when available;
+  otherwise a fallback combines a twilight brightening term with the
+  Krisciunas & Schaefer (1991) moon-scatter model, so moon geometry directly
+  affects `m5`.
+- Per-filter Moon safety uses the notebook’s `min_moon_sep_by_filter`
+  (e.g. `g:35°`) after feasibility: bands that pass the m5/SNR gate remain
+  subject to these minimum separations within each window.
+
 
 ## Notebook Parameter Highlights
 
@@ -142,9 +155,9 @@ With these two levers active, the planner tends to produce a much more even dist
   (-12,  0): ["i","r","z","y"]
   ```
 
-  Only filters allowed by policy and present in `FILTERS` are considered. ``g``
-  is only considered when the Sun is below −15° and the 5σ depth minus target
-  magnitude exceeds a stricter margin.
+  Only filters allowed by policy and present in `FILTERS` are considered. There
+  are no additional band-specific bans; feasibility now follows the m5/SNR gate
+  described above.
 
 - **Slew model:**  
   `SLEW_SMALL_DEG=3.5`, `SLEW_SMALL_TIME_S=4.0`, `SLEW_RATE_DEG_PER_S=5.25`, `SLEW_SETTLE_S=1.0` — a simple piecewise model with a constant small-slew time and a linear rate for larger moves.
