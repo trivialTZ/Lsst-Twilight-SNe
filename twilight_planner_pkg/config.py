@@ -457,14 +457,6 @@ class PlannerConfig:
         # Normalise core filter configuration to lowercase to keep scheduler internals
         # case-insensitive while still permitting uppercase inputs in notebooks.
         self.filters = _norm_filter_list(self.filters)
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for f in self.filters:
-            if f in seen:
-                continue
-            deduped.append(f)
-            seen.add(f)
-        self.filters = deduped
 
         if self.start_filter is not None:
             start_norm = _norm_filter_name(self.start_filter)

@@ -185,15 +185,27 @@ class PriorityTracker:
 
         if diversity_enable:
             # Per-filter diversity: favour a band if its recent count is below
-            # the configured target. Linear multiplier with slope diversity_alpha.
+            # the configured target.  Instead of pure multiplication (which can
+            # vanish when the cadence term is zero), add a diversity component
+            # scaled by the cadence weight so that an unseen filter still
+            # receives a positive preference.
             counts = self.filter_counts(name, now_mjd, diversity_window_days)
-            deficit = max(0, int(diversity_target_per_filter) - int(counts.get(filt, 0)))
-            div_boost = float(1.0 + max(0.0, diversity_alpha) * deficit)
+            seen_in_band = int(counts.get(filt, 0))
+            deficit = max(0, int(diversity_target_per_filter) - seen_in_band)
+            cadence_component = base * cosmo_w
+            diversity_component = 0.0
+            if deficit > 0:
+                diversity_component = (
+                    cosmo_w
+                    * max(0.0, cadence_weight)
+                    * max(0.0, diversity_alpha)
+                    * deficit
+                )
             # Re-interpret first-epoch boost as "first epoch in this band" nudge.
             first_epoch_nudge = 1.0
-            if counts.get(filt, 0) == 0:
+            if seen_in_band == 0:
                 first_epoch_nudge = max(1.0, first_epoch_color_boost)
-            return float(base * cosmo_w * div_boost * first_epoch_nudge)
+            return float((cadence_component + diversity_component) * first_epoch_nudge)
         else:
             # Original colour-group boost: favour the missing color side.
             boost = self.cosmology_boost(
