@@ -12,6 +12,16 @@ from astropy.time import Time
 
 from .astro_utils import airmass_from_alt_deg
 
+
+DEFAULT_DARK_SKY_MAG = {
+    "u": 23.05,
+    "g": 22.25,
+    "r": 21.20,
+    "i": 20.46,
+    "z": 19.61,
+    "y": 18.60,
+}
+
 @dataclass
 class SkyModelConfig:
     """Settings controlling simple sky-brightness estimates."""
@@ -22,16 +32,25 @@ class SkyModelConfig:
     override_mag: Optional[float] = None
 
     def __post_init__(self) -> None:
+        base = {band: float(val) for band, val in DEFAULT_DARK_SKY_MAG.items()}
         if self.dark_sky_mag is None:
             # Zenith dark-sky brightness from SMTN-002 (mag/arcsec^2)
-            self.dark_sky_mag = {
-                "u": 23.05,
-                "g": 22.25,
-                "r": 21.20,
-                "i": 20.46,
-                "z": 19.61,
-                "y": 18.60,
-            }
+            self.dark_sky_mag = base
+            return
+
+        merged = base
+        for key, val in self.dark_sky_mag.items():
+            try:
+                band = str(key).strip()
+            except Exception:
+                continue
+            if not band:
+                continue
+            try:
+                merged[band] = float(val)
+            except Exception:
+                continue
+        self.dark_sky_mag = merged
 
 
 def sky_mag_arcsec2(
@@ -69,7 +88,7 @@ def sky_mag_arcsec2(
     if cfg.use_override and cfg.override_mag is not None:
         return cfg.override_mag
 
-    base = cfg.dark_sky_mag[band]
+    base = float(cfg.dark_sky_mag.get(band, DEFAULT_DARK_SKY_MAG.get(band, 21.0)))
     if sun_alt_deg is None:
         mu_twilight = base - cfg.twilight_delta_mag
     else:

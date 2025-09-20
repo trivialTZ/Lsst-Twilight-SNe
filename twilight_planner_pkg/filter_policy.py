@@ -132,7 +132,33 @@ def allowed_filters_for_window(
     if sky_provider is not None and not isinstance(sky_provider, SimpleSkyProvider):
         use_provider = sky_provider
 
-    for filt in ["g", "r", "i", "z", "y"]:
+    # Order candidate filters using a simple twilight heuristic and then add any
+    # explicit per-target magnitudes so that we never invent filters when no
+    # photometry is available (important in bright twilight tests).
+    heuristic_order = heuristic_filters_from_sun_alt(sun_alt_deg)
+    seen: set[str] = set()
+    candidate_order: List[str] = []
+
+    def _add_candidate(name: str | None) -> None:
+        if not name:
+            return
+        filt_norm = str(name).strip().lower()
+        if not filt_norm:
+            return
+        if filt_norm in seen:
+            return
+        seen.add(filt_norm)
+        candidate_order.append(filt_norm)
+
+    for filt_name in heuristic_order:
+        _add_candidate(filt_name)
+    for filt_name in target_mag_dict.keys():
+        _add_candidate(filt_name)
+
+    if not candidate_order:
+        candidate_order = ["g", "r", "i", "z", "y"]
+
+    for filt in candidate_order:
         target_mag = target_mag_dict.get(filt, target_mag_dict.get("r", 21.5))
         t_vis = float(exp_map.get(filt, 30.0))
         if phot_cfg is not None and phot_cfg.fwhm_eff is not None:
