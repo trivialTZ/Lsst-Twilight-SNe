@@ -63,6 +63,32 @@ This mapping is configurable via `PlannerConfig.sun_alt_policy`, and
 `allowed_filters_for_window` adds a filter-specific 5σ/m₅ gate with extra
 headroom for ``g`` when the Sun is between −15° and −12°.
 
+### Band‑diversity mode (per‑filter balance)
+
+To avoid starving specific bands (e.g. too few g visits), the planner can
+prioritise under‑observed individual bands instead of only “opposite colour”
+pairs. Enable via:
+
+- `PlannerConfig.diversity_enable=True`
+- `PlannerConfig.diversity_target_per_filter` (e.g. 1)
+- `PlannerConfig.diversity_window_days` (e.g. 5)
+- `PlannerConfig.diversity_alpha` (boost strength)
+
+This mode keeps per‑filter cadence gating intact; the bonus only ranks among
+filters that already pass the gate.
+
+### First‑filter cycle (per window)
+
+You can explicitly alternate the first batch’s filter by window/day:
+
+- Morning cycles through `["g", "r"]`
+- Evening cycles through `["z", "i"]`
+
+Turn on with `PlannerConfig.first_filter_cycle_enable=True`. The selected
+filter is placed at the head of the per‑window batch order (other filters
+follow in the configured palette order). This helps ensure all bands get time
+in short twilight windows while still respecting swap limits and cadence.
+
 LSST's filter carousel can host at most five filters per night. Cross-target
 swaps incur a 120 s cost, amortized across same-filter batches and scaled down
 when the new filter supplies a missing color. Palette rotation (separate

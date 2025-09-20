@@ -15,6 +15,16 @@ class SimlibHeader:
     PHOTFLAG_SATURATE: int = 2048
     PSF_UNIT: str = "PIXEL"
 
+    def __post_init__(self) -> None:
+        # SNANA expects the y-band to be written as an uppercase 'Y'
+        # even though the rest of the bands are lowercase. Normalise
+        # here so callers do not have to remember the convention.
+        try:
+            filt_str = str(self.FILTERS)
+        except Exception:
+            filt_str = ""
+        self.FILTERS = "".join("Y" if c == "y" else c for c in filt_str)
+
 
 class SimlibWriter:
     """Minimal SNANA SIMLIB writer."""

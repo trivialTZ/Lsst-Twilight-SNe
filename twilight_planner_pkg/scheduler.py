@@ -21,6 +21,7 @@ import warnings
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Dict, List
+from collections import Counter
 
 import astropy.units as u
 import numpy as np
@@ -432,6 +433,10 @@ def _prepare_window_candidates(
                     cfg.color_window_days,
                     cfg.color_alpha,
                     cfg.first_epoch_color_boost,
+                    diversity_enable=getattr(cfg, "diversity_enable", False),
+                    diversity_target_per_filter=getattr(cfg, "diversity_target_per_filter", 1),
+                    diversity_window_days=getattr(cfg, "diversity_window_days", 5.0),
+                    diversity_alpha=getattr(cfg, "diversity_alpha", 0.3),
                 ),
                 reverse=True,
             )
@@ -572,6 +577,10 @@ def _attempt_schedule_one(
                 cfg.color_window_days,
                 cfg.color_alpha,
                 cfg.first_epoch_color_boost,
+                diversity_enable=getattr(cfg, "diversity_enable", False),
+                diversity_target_per_filter=getattr(cfg, "diversity_target_per_filter", 1),
+                diversity_window_days=getattr(cfg, "diversity_window_days", 5.0),
+                diversity_alpha=getattr(cfg, "diversity_alpha", 0.3),
             )
 
         first = (
@@ -1456,13 +1465,29 @@ def plan_twilight_range_with_caps(
             )
             rot = day_idx % max(cfg.palette_rotation_days, 1)
             pal_rot = pal[rot:] + pal[:rot]
+            # Optional per-window first-filter cycle override
+            first_override: str | None = None
+            if getattr(cfg, "first_filter_cycle_enable", False):
+                if window_label_out.startswith("morning"):
+                    cyc = list(getattr(cfg, "first_filter_cycle_morning", []))
+                    if cyc:
+                        first_override = cyc[day_idx % len(cyc)]
+                else:
+                    cyc = list(getattr(cfg, "first_filter_cycle_evening", []))
+                    if cyc:
+                        first_override = cyc[day_idx % len(cyc)]
             available = {c["first_filter"] for c in candidates}
-            batch_order = [f for f in pal_rot if f in available]
-            batch_order += [
-                f
-                for f in ["y", "z", "i", "r", "g", "u"]
-                if f in available and f not in batch_order
-            ]
+            counts = Counter(c["first_filter"] for c in candidates)
+            batch_order = sorted(
+                available,
+                key=lambda f: (
+                    -counts.get(f, 0),
+                    pal_rot.index(f) if f in pal_rot else 99,
+                ),
+            )
+            if first_override in batch_order:
+                batch_order.remove(first_override)
+                batch_order.insert(0, first_override)
 
             cap_s = window_caps.get(idx_w, 0.0)
             window_sum = 0.0
@@ -1633,6 +1658,10 @@ def plan_twilight_range_with_caps(
                                     cfg.color_window_days,
                                     cfg.color_alpha,
                                     cfg.first_epoch_color_boost,
+                                    diversity_enable=getattr(cfg, "diversity_enable", False),
+                                    diversity_target_per_filter=getattr(cfg, "diversity_target_per_filter", 1),
+                                    diversity_window_days=getattr(cfg, "diversity_window_days", 5.0),
+                                    diversity_alpha=getattr(cfg, "diversity_alpha", 0.3),
                                 )
 
                             first_tmp = (
@@ -1719,12 +1748,17 @@ def plan_twilight_range_with_caps(
             ):
                 # Rebuild palette for backfill candidates (can differ from primary)
                 available_bf = {c["first_filter"] for c in backfill_candidates}
-                batch_order_bf = [f for f in pal_rot if f in available_bf]
-                batch_order_bf += [
-                    f
-                    for f in ["y", "z", "i", "r", "g", "u"]
-                    if f in available_bf and f not in batch_order_bf
-                ]
+                counts_bf = Counter(c["first_filter"] for c in backfill_candidates)
+                batch_order_bf = sorted(
+                    available_bf,
+                    key=lambda f: (
+                        -counts_bf.get(f, 0),
+                        pal_rot.index(f) if f in pal_rot else 99,
+                    ),
+                )
+                if first_override in batch_order_bf:
+                    batch_order_bf.remove(first_override)
+                    batch_order_bf.insert(0, first_override)
 
                 # Check if any backfill candidate can run without a swap under
                 # current cadence gating and carousel state. If none, we permit
@@ -1846,6 +1880,10 @@ def plan_twilight_range_with_caps(
                                         cfg.color_window_days,
                                         cfg.color_alpha,
                                         cfg.first_epoch_color_boost,
+                                        diversity_enable=getattr(cfg, "diversity_enable", False),
+                                        diversity_target_per_filter=getattr(cfg, "diversity_target_per_filter", 1),
+                                        diversity_window_days=getattr(cfg, "diversity_window_days", 5.0),
+                                        diversity_alpha=getattr(cfg, "diversity_alpha", 0.3),
                                     )
 
                                 first_tmp = (
@@ -1946,12 +1984,17 @@ def plan_twilight_range_with_caps(
                 ]
                 if repeat_candidates:
                     available_rep = {c["first_filter"] for c in repeat_candidates}
-                    batch_order_rep = [f for f in pal_rot if f in available_rep]
-                    batch_order_rep += [
-                        f
-                        for f in ["y", "z", "i", "r", "g", "u"]
-                        if f in available_rep and f not in batch_order_rep
-                    ]
+                    counts_rep = Counter(c["first_filter"] for c in repeat_candidates)
+                    batch_order_rep = sorted(
+                        available_rep,
+                        key=lambda f: (
+                            -counts_rep.get(f, 0),
+                            pal_rot.index(f) if f in pal_rot else 99,
+                        ),
+                    )
+                    if first_override in batch_order_rep:
+                        batch_order_rep.remove(first_override)
+                        batch_order_rep.insert(0, first_override)
                     # Determine if a swap is unavoidable for repeats under current state
                     try:
                         now_mjd_rep = Time(current_time_utc).mjd
@@ -2060,6 +2103,10 @@ def plan_twilight_range_with_caps(
                                             cfg.color_window_days,
                                             cfg.color_alpha,
                                             cfg.first_epoch_color_boost,
+                                            diversity_enable=getattr(cfg, "diversity_enable", False),
+                                            diversity_target_per_filter=getattr(cfg, "diversity_target_per_filter", 1),
+                                            diversity_window_days=getattr(cfg, "diversity_window_days", 5.0),
+                                            diversity_alpha=getattr(cfg, "diversity_alpha", 0.3),
                                         )
 
                                     first_tmp = (
@@ -2156,19 +2203,24 @@ def plan_twilight_range_with_caps(
                 and (nightly_cap is None or len(seen_ids) < nightly_cap)
                 and (candidates or backfill_candidates)
             ):
-                relaxed_pool = [
-                    c
-                    for c in (candidates + backfill_candidates)
-                    if c["Name"] not in seen_ids
-                ]
+                # Permit relaxed mode to revisit already observed targets, but
+                # keep unseen SNe ahead of repeats when picking the next visit.
+                relaxed_pool = list(candidates + backfill_candidates)
                 if relaxed_pool:
                     available_relax = {c["first_filter"] for c in relaxed_pool}
-                    batch_order_relax = [f for f in pal_rot if f in available_relax]
-                    batch_order_relax += [
-                        f
-                        for f in ["y", "z", "i", "r", "g", "u"]
-                        if f in available_relax and f not in batch_order_relax
-                    ]
+                    counts_relax = Counter(
+                        c["first_filter"] for c in relaxed_pool
+                    )
+                    batch_order_relax = sorted(
+                        available_relax,
+                        key=lambda f: (
+                            -counts_relax.get(f, 0),
+                            pal_rot.index(f) if f in pal_rot else 99,
+                        ),
+                    )
+                    if first_override in batch_order_relax:
+                        batch_order_relax.remove(first_override)
+                        batch_order_relax.insert(0, first_override)
                     for filt in batch_order_relax:
                         if nightly_cap is not None and len(seen_ids) >= nightly_cap:
                             break
@@ -2188,7 +2240,12 @@ def plan_twilight_range_with_caps(
                             k = max(1, min(len(batch), k_time))
                             amortized_penalty = cfg.filter_change_s / k
                             costs: List[float] = []
-                            for t in batch:
+                            idx_candidates: List[int] = []
+                            has_unseen = any(
+                                c["Name"] not in seen_ids for c in batch
+                            )
+
+                            for idx_item, t in enumerate(batch):
                                 now_mjd_cost = Time(current_time_utc).mjd
                                 # In relaxed mode, ignore cadence gating when
                                 # choosing the first filter for cost.
@@ -2210,6 +2267,10 @@ def plan_twilight_range_with_caps(
                                         cfg.color_window_days,
                                         cfg.color_alpha,
                                         cfg.first_epoch_color_boost,
+                                        diversity_enable=getattr(cfg, "diversity_enable", False),
+                                        diversity_target_per_filter=getattr(cfg, "diversity_target_per_filter", 1),
+                                        diversity_window_days=getattr(cfg, "diversity_window_days", 5.0),
+                                        diversity_alpha=getattr(cfg, "diversity_alpha", 0.3),
                                     )
 
                                 if allowed_for_cost:
@@ -2263,12 +2324,58 @@ def plan_twilight_range_with_caps(
                                             max(amortized_penalty, min_amort) * scale
                                         )
                                         cost += penalty
+                                sn_id_cost = t["Name"]
+                                already_seen = sn_id_cost in seen_ids
+                                if already_seen:
+                                    if has_unseen:
+                                        continue
+
+                                    lowz = False
+                                    try:
+                                        lowz = _is_low_z_ia(
+                                            t.get("sn_type"), t.get("redshift"), cfg
+                                        )
+                                    except Exception:
+                                        lowz = False
+                                    allowed_rep = 1
+                                    if lowz:
+                                        rep_conf = getattr(
+                                            cfg, "low_z_ia_repeats_per_window", None
+                                        )
+                                        if isinstance(rep_conf, int) and rep_conf >= 1:
+                                            allowed_rep = int(rep_conf)
+                                    if repeat_counts.get(sn_id_cost, 0) >= allowed_rep:
+                                        continue
+
+                                idx_candidates.append(idx_item)
                                 costs.append(cost)
-                            j = int(np.argmin(costs))
+
+                            if not costs:
+                                break
+
+                            j_local = int(np.argmin(costs))
+                            j = idx_candidates[j_local]
                             t = batch.pop(j)
                             sn_id = t["Name"]
-                            if sn_id in seen_ids:
-                                continue
+
+                            already_seen_main = sn_id in seen_ids
+                            if already_seen_main:
+                                lowz = False
+                                try:
+                                    lowz = _is_low_z_ia(
+                                        t.get("sn_type"), t.get("redshift"), cfg
+                                    )
+                                except Exception:
+                                    lowz = False
+                                allowed_rep = 1
+                                if lowz:
+                                    rep_conf = getattr(
+                                        cfg, "low_z_ia_repeats_per_window", None
+                                    )
+                                    if isinstance(rep_conf, int) and rep_conf >= 1:
+                                        allowed_rep = int(rep_conf)
+                                if repeat_counts.get(sn_id, 0) >= allowed_rep:
+                                    continue
 
                             # Set relaxed cadence flag in the per-call state
                             def _attempt_schedule_relaxed(tt: dict) -> bool:
@@ -2352,6 +2459,8 @@ def plan_twilight_range_with_caps(
                                 return True
 
                             if _attempt_schedule_relaxed(t):
+                                if already_seen_main:
+                                    repeat_counts[sn_id] = repeat_counts.get(sn_id, 0) + 1
                                 seen_ids.add(sn_id)
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]

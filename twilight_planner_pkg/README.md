@@ -66,8 +66,9 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
 `unique_first_fill_with_color` is a placeholder knob for a future second pass that would add color to unique-first selections.
 
 The tracker records every visit's color group and computes a unified filter
-bonus blending cadence pressure, per-filter cosmology weights, and any
-blue/red deficit so missing colors are filled early.
+bonus blending cadence pressure, per-filter cosmology weights, and either
+blue/red deficit (default) or per‑filter band‑diversity (when enabled) so
+missing bands are filled early without breaking cadence.
 
 ### Low‑Redshift Prioritization (Hybrid)
 
@@ -94,6 +95,22 @@ Input catalogs with columns like `redshift`, `z`, `zspec`, `zphot`, `zbest`, or
 - Nightly summaries report per-filter cadence compliance via
   `cad_median_abs_err_by_filter_csv` and `cad_within_pct_by_filter_csv`, with overall
   aggregates `cad_median_abs_err_all_d` and `cad_within_pct_all`.
+
+### Band diversity mode
+
+- Set `diversity_enable=True` to prefer under‑observed individual filters using
+  a linear multiplier `1 + diversity_alpha * max(0, target_per_filter − count)`
+  within a sliding window of `diversity_window_days`.
+- The “first‑epoch color” knob is re‑interpreted in this mode as
+  “first‑epoch in this band” and remains useful to seed missing bands.
+
+### Window first‑filter cycle
+
+- With `first_filter_cycle_enable=True`, morning windows alternate
+  `first_filter_cycle_morning` (default `["g", "r"]`) and evenings alternate
+  `first_filter_cycle_evening` (default `["z", "i"]`). The chosen first filter
+  is placed at the head of the per‑window batch order; remaining filters follow
+  the palette order.
 
 ---
 
@@ -171,6 +188,8 @@ used for the filename prefix.
 - apply a stratified cap per twilight window based on ``max_sn_per_night``
   (default infinity).
 - Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
+  with a dynamic filter batch order: filters requested by more candidates as
+  their first filter are processed earlier (palette order provides tie‑breaks),
 - Enforce window caps (`morning_cap_s`, `evening_cap_s`, default "auto" uses window duration) and per‑SN cap (`per_sn_cap_s`); trim filters greedily to fit
 
 > ### Prioritization strategy recap:

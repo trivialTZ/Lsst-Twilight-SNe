@@ -25,3 +25,24 @@ def test_custom_overrides():
     )
     assert cfg.filters == custom_filters
     assert cfg.typical_days_by_type == custom_typical
+
+
+def test_filter_name_normalisation():
+    cfg = PlannerConfig(
+        10.0,
+        20.0,
+        30.0,
+        filters=["g", "Y"],
+        start_filter="Y",
+        exposure_by_filter={"g": 15.0, "Y": 20.0},
+        min_moon_sep_by_filter={"g": 50.0, "Y": 25.0},
+        sun_alt_policy=[(-18.0, -12.0, ["Y", "g"])],
+        cosmo_weight_by_filter={"g": 1.1, "Y": 0.7},
+    )
+
+    assert cfg.filters == ["g", "y"]
+    assert cfg.start_filter == "y"
+    assert cfg.exposure_by_filter["y"] == 20.0
+    assert cfg.min_moon_sep_by_filter["y"] == 25.0
+    assert cfg.sun_alt_policy[0][2] == ["y", "g"]
+    assert cfg.cosmo_weight_by_filter["y"] == 0.7

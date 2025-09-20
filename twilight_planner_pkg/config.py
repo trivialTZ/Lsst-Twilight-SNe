@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import warnings
 from math import inf
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 
 @dataclass
@@ -161,8 +161,9 @@ class PlannerConfig:
     swap_cost_scale_color: float = 0.6
     swap_amortize_min: int = 6
     palette_rotation_days: int = 4
-    palette_evening: List[str] = field(default_factory=lambda: ["i", "r", "z", "i"])
-    palette_morning: List[str] = field(default_factory=lambda: ["r", "g", "i", "r"])
+    # Base palettes (tie-breakers). First-filter cycling can override the head.
+    palette_evening: List[str] = field(default_factory=lambda: ["z", "i", "r", "g"])
+    palette_morning: List[str] = field(default_factory=lambda: ["g", "r", "i", "z"])
     max_swaps_per_window: int = 2
     first_epoch_color_boost: float = 1.5
 
@@ -191,6 +192,23 @@ class PlannerConfig:
     low_z_ia_repeats_per_window: Optional[int] = None
     """Optional max repeats per twilight window for low-z Ia (default 1)."""
 
+    # -- Band diversity (per-filter) ----------------------------------------
+    diversity_enable: bool = True
+    """If True, use per-filter diversity bonus instead of blue/red color boost.
+
+    Encourages under-observed individual bands (g, r, i, z) rather than only
+    favoring the opposite color group. Cadence gating remains per filter.
+    """
+    diversity_target_per_filter: int = 1
+    """Target number of visits per filter within ``diversity_window_days``.
+
+    The diversity multiplier scales with the shortfall relative to this target.
+    """
+    diversity_window_days: float = 5.0
+    """Time window (days) for counting per-filter visits in diversity mode."""
+    diversity_alpha: float = 0.3
+    """Strength of the diversity multiplier (≥0)."""
+
     # -- Backfill relax cadence -------------------------------------------
     backfill_relax_cadence: bool = False
     """If True, allow a last-resort backfill that ignores cadence gating
@@ -218,6 +236,17 @@ class PlannerConfig:
     zpt_err_mag: float = 0.01
     dark_sky_mag: Dict[str, float] | None = None
     twilight_delta_mag: float = 2.5
+
+    # -- Window first-filter cycle ------------------------------------------
+    first_filter_cycle_enable: bool = True
+    """If True, enforce a day-by-day first-filter alternation per window.
+
+    Morning windows alternate ``first_filter_cycle_morning``; evening
+    windows alternate ``first_filter_cycle_evening``. The chosen first filter
+    is placed at the head of the per-window filter batch order.
+    """
+    first_filter_cycle_morning: List[str] = field(default_factory=lambda: ["g", "r"])
+    first_filter_cycle_evening: List[str] = field(default_factory=lambda: ["z", "i"])
 
     # -- Cosmology / peak-magnitude guardrails ----------------------------
     H0_km_s_Mpc: float = 70.0
@@ -389,6 +418,82 @@ class PlannerConfig:
             raise TypeError("filters_per_visit_cap must be coercible to int") from exc
         if self.filters_per_visit_cap < 1:
             raise ValueError("filters_per_visit_cap must be >= 1")
+
+        def _norm_filter_name(value: Any) -> str | None:
+            """Return a canonical, lowercase filter name or ``None`` if invalid."""
+
+            if value is None:
+                return None
+            try:
+                stripped = str(value).strip()
+            except Exception:
+                return None
+            if not stripped:
+                return None
+            return stripped.lower()
+
+        def _norm_filter_list(seq: Any) -> list[str]:
+            result: list[str] = []
+            if not seq:
+                return result
+            for item in seq:
+                name = _norm_filter_name(item)
+                if name is None:
+                    continue
+                result.append(name)
+            return result
+
+        def _norm_filter_dict(mapping: Any) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not mapping:
+                return result
+            for key, val in mapping.items():
+                name = _norm_filter_name(key)
+                if name is None:
+                    continue
+                result[name] = val
+            return result
+
+        # Normalise core filter configuration to lowercase to keep scheduler internals
+        # case-insensitive while still permitting uppercase inputs in notebooks.
+        self.filters = _norm_filter_list(self.filters)
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for f in self.filters:
+            if f in seen:
+                continue
+            deduped.append(f)
+            seen.add(f)
+        self.filters = deduped
+
+        if self.start_filter is not None:
+            start_norm = _norm_filter_name(self.start_filter)
+            self.start_filter = start_norm
+        if self.start_filter and self.start_filter not in self.filters:
+            self.filters.insert(0, self.start_filter)
+
+        self.exposure_by_filter = _norm_filter_dict(self.exposure_by_filter)
+        self.min_moon_sep_by_filter = _norm_filter_dict(self.min_moon_sep_by_filter)
+        self.cosmo_weight_by_filter = _norm_filter_dict(self.cosmo_weight_by_filter)
+        self.default_host_mu_arcsec2_by_filter = _norm_filter_dict(
+            self.default_host_mu_arcsec2_by_filter
+        )
+        self.default_host_mu_rest_arcsec2_by_filter = _norm_filter_dict(
+            self.default_host_mu_rest_arcsec2_by_filter
+        )
+        self.default_host_kcorr_slope_by_filter = _norm_filter_dict(
+            self.default_host_kcorr_slope_by_filter
+        )
+        self.Kcorr_approx_mag_by_filter = _norm_filter_dict(
+            getattr(self, "Kcorr_approx_mag_by_filter", {})
+        )
+        self.palette_evening = _norm_filter_list(self.palette_evening)
+        self.palette_morning = _norm_filter_list(self.palette_morning)
+
+        policy_norm: list[tuple[float, float, list[str]]] = []
+        for low, high, flist in self.sun_alt_policy:
+            policy_norm.append((low, high, _norm_filter_list(flist)))
+        self.sun_alt_policy = policy_norm
 
 
 _original_planner_config_init = PlannerConfig.__init__

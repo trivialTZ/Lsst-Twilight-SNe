@@ -187,3 +187,8 @@ def test_writer_emits_id_plus_nexpose_token(tmp_path):
     assert tokens[3] == "r"
     # Ensure no stray token was created between ID and band
     assert "*" in tokens[2]
+
+
+def test_header_uppercases_y_band():
+    header = SimlibHeader(FILTERS="grizy")
+    assert header.FILTERS == "grizY"

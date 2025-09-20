@@ -89,6 +89,24 @@ class PriorityTracker:
                 red += 1
         return (blue, red)
 
+    def filter_counts(
+        self, name: str, now_mjd: float, window_days: float
+    ) -> Dict[str, int]:
+        """Return per-filter visit counts within ``[now - window_days, now]``.
+
+        Used by the band-diversity boost to encourage under-observed filters.
+        """
+        hist = self.history.get(name)
+        counts: Dict[str, int] = {}
+        if not hist or not hist.visits:
+            return counts
+        start = now_mjd - window_days
+        for mjd, filt in hist.visits:
+            if mjd < start or mjd > now_mjd:
+                continue
+            counts[filt] = counts.get(filt, 0) + 1
+        return counts
+
     def color_deficit(
         self, name: str, now_mjd: float, target_pairs: int, window_days: float
     ) -> tuple[int, int]:
@@ -140,8 +158,19 @@ class PriorityTracker:
         window_days: float,
         alpha: float,
         first_epoch_color_boost: float,
+        *,
+        diversity_enable: bool = False,
+        diversity_target_per_filter: int = 1,
+        diversity_window_days: float = 5.0,
+        diversity_alpha: float = 0.3,
     ) -> float:
-        """Return combined cadence and cosmology bonus for ``filt``."""
+        """Return combined cadence and band preference bonus for ``filt``.
+
+        The function blends a cadence-centered Gaussian bonus with either
+        (a) the original blue/red colour-group boost, or (b) a per-filter
+        band-diversity boost (when ``diversity_enable=True``) that encourages
+        under-observed individual bands within a recent time window.
+        """
 
         base = self.cadence_bonus(
             name,
@@ -153,17 +182,31 @@ class PriorityTracker:
             first_epoch_weight=first_epoch_weight,
         )
         cosmo_w = cosmo_weight_by_filter.get(filt, 1.0)
-        boost = self.cosmology_boost(
-            name, filt, now_mjd, target_pairs, window_days, alpha
-        )
-        only_one, which = self._has_only_blue_or_red(name)
-        nudge = 1.0
-        if only_one:
-            if which == "blue" and filt in self.RED:
-                nudge = max(1.0, first_epoch_color_boost)
-            elif which == "red" and filt in self.BLUE:
-                nudge = max(1.0, first_epoch_color_boost)
-        return float(base * cosmo_w * boost * nudge)
+
+        if diversity_enable:
+            # Per-filter diversity: favour a band if its recent count is below
+            # the configured target. Linear multiplier with slope diversity_alpha.
+            counts = self.filter_counts(name, now_mjd, diversity_window_days)
+            deficit = max(0, int(diversity_target_per_filter) - int(counts.get(filt, 0)))
+            div_boost = float(1.0 + max(0.0, diversity_alpha) * deficit)
+            # Re-interpret first-epoch boost as "first epoch in this band" nudge.
+            first_epoch_nudge = 1.0
+            if counts.get(filt, 0) == 0:
+                first_epoch_nudge = max(1.0, first_epoch_color_boost)
+            return float(base * cosmo_w * div_boost * first_epoch_nudge)
+        else:
+            # Original colour-group boost: favour the missing color side.
+            boost = self.cosmology_boost(
+                name, filt, now_mjd, target_pairs, window_days, alpha
+            )
+            only_one, which = self._has_only_blue_or_red(name)
+            nudge = 1.0
+            if only_one:
+                if which == "blue" and filt in self.RED:
+                    nudge = max(1.0, first_epoch_color_boost)
+                elif which == "red" and filt in self.BLUE:
+                    nudge = max(1.0, first_epoch_color_boost)
+            return float(base * cosmo_w * boost * nudge)
 
     def redshift_boost(
         self,

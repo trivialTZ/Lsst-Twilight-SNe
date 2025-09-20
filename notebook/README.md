@@ -10,7 +10,7 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 
 - **Science constraints**: target altitude, Moon separation (scaled by Moon altitude/phase), twilight sky brightness, and typical post-discovery visibility windows by SN type.
 - **Engineering constraints**: slew and settle times, readout, filter-change overheads, carousel capacity, and per-window time caps.
-- **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth), batching by the first filter, and greedy routing to minimize combined slew and filter-change cost.
+- **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth), batching by the first filter with a dynamic batch order (filters with more first‑filter demand go first; palette provides tie‑breaks), and greedy routing to minimize combined slew and filter-change cost.
 - **Guard spacing**: a minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If natural overheads are shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
 
 ### Cadence constraint (per-filter)
@@ -95,6 +95,29 @@ In all of the above, ``<run_label>`` defaults to ``hybrid`` matching the
 default priority strategy.
 
 ---
+
+## Band Diversity and First‑Filter Cycle
+
+Short twilight windows can starve specific bands (typically g). The notebook’s configuration supports two complementary controls to keep bands balanced while preserving per‑filter cadence gating:
+
+### Band‑diversity mode (per‑filter)
+- Enable a per‑filter bonus that favors under‑observed bands within a recent window:
+  - `diversity_enable=True`
+  - `diversity_target_per_filter=1` (or 2)
+  - `diversity_window_days=5.0`
+  - `diversity_alpha=0.3` (strength of the multiplier)
+- This does not bypass cadence gates; it only reorders eligible filters.
+- In diversity mode, `first_epoch_color_boost` is interpreted as a “first epoch in this band” nudge.
+
+### First‑filter cycle (per window/day)
+- Alternate the first batch’s filter by window and day to ensure each band regularly leads a window when time is tight:
+  - `first_filter_cycle_enable=True`
+  - Morning: `first_filter_cycle_morning=['g','r']`
+  - Evening: `first_filter_cycle_evening=['z','i']`
+- The selected filter is placed at the head of the per‑window batch order; remaining filters follow the palette (e.g., `palette_morning=['g','r','i','z']`, `palette_evening=['z','i','r','g']`).
+
+With these two levers active, the planner tends to produce a much more even distribution across g/r/i/z without relaxing cadence or over‑swapping filters.
+
 
 ## Notebook Parameter Highlights
 

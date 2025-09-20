@@ -9,9 +9,19 @@ from .tw_cosmo import C_KMS, CosmoParams, FisherSetup, jacobian_mu
 
 
 def fisher_from_binned(df_bin: pd.DataFrame, setup: FisherSetup) -> np.ndarray:
-    """Compute Fisher matrix for binned sample; marginalize over M last."""
+    """Compute Fisher matrix for a binned catalog and marginalize over M.
+
+    This is robust to empty bins (``N<=0``) and missing/invalid
+    uncertainties by assigning zero weight to such bins instead of
+    propagating NaNs into the Fisher matrix.
+    """
     z = df_bin["z"].to_numpy(float)
-    w = (df_bin["N"].to_numpy(float)) / (df_bin["sigma_mu"].to_numpy(float) ** 2)
+    N = df_bin["N"].to_numpy(float)
+    s = df_bin["sigma_mu"].to_numpy(float)
+    # Safe weights: only bins with N>0 and finite, positive sigma contribute
+    finite = np.isfinite(N) & np.isfinite(s) & (s > 0) & (N > 0)
+    w = np.zeros_like(N, dtype=float)
+    w[finite] = N[finite] / (s[finite] ** 2)
     J = jacobian_mu(z, setup.fid, setup)  # last column dμ/dM
     W = np.diag(w)
     F_full = J.T @ W @ J
@@ -123,11 +133,11 @@ def print_forecast_summary(res: dict, *, verbose: bool = True) -> None:
     if not verbose:
         return
     labs = res["WFD"]["labels"]
-    sig_wfd = {p: np.sqrt(res["WFD"]["cov"][i, i]) for i, p in enumerate(labs)}
-    sig_tw = {p: np.sqrt(res["WFD+Twilight"]["cov"][i, i]) for i, p in enumerate(labs)}
+    sig_wfd = {p: float(np.sqrt(res["WFD"]["cov"][i, i])) for i, p in enumerate(labs)}
+    sig_tw = {p: float(np.sqrt(res["WFD+Twilight"]["cov"][i, i])) for i, p in enumerate(labs)}
     print("1σ parameter uncertainties")
     for p in labs:
-        print(
-            f"  {p:>3s}: WFD={sig_wfd[p]:.4g}  WFD+Twilight={sig_tw[p]:.4g}"
-            f"  improvement x{sig_wfd[p] / sig_tw[p]:.2f}"
-        )
+        s1 = sig_wfd[p]
+        s2 = sig_tw[p]
+        ratio = s1 / s2 if (np.isfinite(s2) and s2 > 0) else float("nan")
+        print(f"  {p:>3s}: WFD={s1:.4g}  WFD+Twilight={s2:.4g}  improvement x{ratio:.2f}")

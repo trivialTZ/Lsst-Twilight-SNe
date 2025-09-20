@@ -181,6 +181,14 @@ def ross_qc_with_report(
     phot_lo: pd.DataFrame,
     phot_hi_path: Path | None = None,
     phot_lo_path: Path | None = None,
+    # SALT2 / fit-level thresholds (None → skip that cut)
+    fitprob_min: float | None = 0.05,
+    x1_abs_max: float | None = 3.0,
+    c_abs_max: float | None = 0.3,
+    pkmjderr_max: float | None = 1.0,
+    x1err_max: float | None = 1.0,
+    cerr_max: float | None = 0.05,
+    # Light-curve sampling checks
     phase_days: Tuple[float, float] = (-10.0, 10.0),
     snr_thresh: float = 5.0,
     require_pm10_snr5: bool = True,
@@ -222,27 +230,72 @@ def ross_qc_with_report(
         return mask
 
     m_all = pd.Series(True, index=fit_all.index)
-    m_fitprob = (
-        fit_all["FITPROB"].fillna(0) > 0.05
-        if "FITPROB" in fit_all.columns
-        else pd.Series(True, index=fit_all.index)
+    # FITPROB
+    if fitprob_min is None or ("FITPROB" not in fit_all.columns):
+        m_fitprob = pd.Series(True, index=fit_all.index)
+    else:
+        m_fitprob = fit_all["FITPROB"].fillna(0) > float(fitprob_min)
+    tag_fitprob = (
+        "FITPROB (skip)" if fitprob_min is None else f"FITPROB>{float(fitprob_min):.2f}"
     )
-    keep_and_print(m_fitprob, "FITPROB cut")
+    keep_and_print(m_fitprob, tag_fitprob)
     m_all &= m_fitprob
-    m_x1 = np.abs(pd.to_numeric(fit_all.get("x1", np.nan), errors="coerce")) <= 3.0
-    keep_and_print(m_x1, "x1 range")
+    # |x1|
+    if x1_abs_max is None:
+        m_x1 = pd.Series(True, index=fit_all.index)
+    else:
+        m_x1 = (
+            np.abs(pd.to_numeric(fit_all.get("x1", np.nan), errors="coerce"))
+            <= float(x1_abs_max)
+        )
+    tag_x1 = "x1 (skip)" if x1_abs_max is None else f"|x1|<={float(x1_abs_max):.2f}"
+    keep_and_print(m_x1, tag_x1)
     m_all &= m_x1
-    m_c = np.abs(pd.to_numeric(fit_all.get("c", np.nan), errors="coerce")) <= 0.3
-    keep_and_print(m_c, "c range")
+    # |c|
+    if c_abs_max is None:
+        m_c = pd.Series(True, index=fit_all.index)
+    else:
+        m_c = (
+            np.abs(pd.to_numeric(fit_all.get("c", np.nan), errors="coerce"))
+            <= float(c_abs_max)
+        )
+    tag_c = "c (skip)" if c_abs_max is None else f"|c|<={float(c_abs_max):.2f}"
+    keep_and_print(m_c, tag_c)
     m_all &= m_c
-    m_pkmjd = pd.to_numeric(fit_all.get("PKMJDERR", np.nan), errors="coerce") <= 1.0
-    keep_and_print(m_pkmjd, "PKMJDERR<=1d")
+    # PKMJDERR
+    if pkmjderr_max is None:
+        m_pkmjd = pd.Series(True, index=fit_all.index)
+    else:
+        m_pkmjd = (
+            pd.to_numeric(fit_all.get("PKMJDERR", np.nan), errors="coerce")
+            <= float(pkmjderr_max)
+        )
+    tag_pkmjd = (
+        "PKMJDERR (skip)" if pkmjderr_max is None else f"PKMJDERR<={float(pkmjderr_max):.1f}d"
+    )
+    keep_and_print(m_pkmjd, tag_pkmjd)
     m_all &= m_pkmjd
-    m_x1e = pd.to_numeric(fit_all.get("x1ERR", np.nan), errors="coerce") <= 1.0
-    keep_and_print(m_x1e, "x1ERR<=1")
+    # x1ERR
+    if x1err_max is None:
+        m_x1e = pd.Series(True, index=fit_all.index)
+    else:
+        m_x1e = (
+            pd.to_numeric(fit_all.get("x1ERR", np.nan), errors="coerce")
+            <= float(x1err_max)
+        )
+    tag_x1e = "x1ERR (skip)" if x1err_max is None else f"x1ERR<={float(x1err_max):.2f}"
+    keep_and_print(m_x1e, tag_x1e)
     m_all &= m_x1e
-    m_ce = pd.to_numeric(fit_all.get("cERR", np.nan), errors="coerce") <= 0.05
-    keep_and_print(m_ce, "cERR<=0.05")
+    # cERR
+    if cerr_max is None:
+        m_ce = pd.Series(True, index=fit_all.index)
+    else:
+        m_ce = (
+            pd.to_numeric(fit_all.get("cERR", np.nan), errors="coerce")
+            <= float(cerr_max)
+        )
+    tag_ce = "cERR (skip)" if cerr_max is None else f"cERR<={float(cerr_max):.2f}"
+    keep_and_print(m_ce, tag_ce)
     m_all &= m_ce
     ids_hi = set(head_hi["ID_int"].dropna().astype("Int64"))
     ids_lo = set(head_lo["ID_int"].dropna().astype("Int64"))
