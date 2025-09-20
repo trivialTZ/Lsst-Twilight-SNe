@@ -18,7 +18,7 @@ pip install -r requirements.txt
 ```bash
 python -m twilight_planner_pkg.main --csv your.csv --out results \
     --start 2024-01-01 --end 2024-01-07 \
-    --lat -30.2446 --lon -70.7494 --height 2663 \
+    --lat -30.2446 --lon -70.7494 --height 2647 \
     --evening-twilight 18:00 --morning-twilight 05:00 \
     --filters griz --exp g:5,r:5,i:5,z:5 \
     --min_alt 20 --evening_cap auto --morning_cap auto \
@@ -26,6 +26,10 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
     --hybrid-detections 2 --hybrid-exposure 300 \
     --simlib-out results/night.SIMLIB --simlib-survey LSST_TWILIGHT
 ```
+
+The CLI convenience option `--min_alt` defaults to 20°, whereas the underlying
+`PlannerConfig` default is 30°; set the flag explicitly if you need the higher
+cut.
 
 ``--max_sn`` accepts numbers or "inf"/"none"/"unlimited"; the default is
 unlimited and lets per-window time caps govern the final count.
@@ -35,7 +39,7 @@ To force LSST-only light curves for all SNe:
 ```bash
 python -m twilight_planner_pkg.main --csv your.csv --out results \
     --start 2024-01-01 --end 2024-01-07 \
-    --lat -30.2446 --lon -70.7494 --height 2663 \
+    --lat -30.2446 --lon -70.7494 --height 2647 \
     --strategy lc --lc-detections 5 --lc-exposure 300
 ```
 
@@ -43,7 +47,7 @@ To restrict the input catalog to Type Ia-like objects, add `--only-ia`:
 
 ```bash
 python -m twilight_planner_pkg.main --csv your.csv --out results \
-    --start 2024-01-01 --end 2024-01-07 --lat -30.2446 --lon -70.7494 --height 2663 \
+    --start 2024-01-01 --end 2024-01-07 --lat -30.2446 --lon -70.7494 --height 2647 \
     --filters griz --exp g:5,r:5,i:5,z:5 --only-ia
 ```
 
@@ -51,14 +55,13 @@ python -m twilight_planner_pkg.main --csv your.csv --out results \
 
 ## Priority Modes
 
-1. **Discovery‑optimized** — maximize breadth with minimal repeats
-2. **Hybrid (default)** — quick color (≥2 detections in ≥2 filters or ≥300 s total).
+1. **Hybrid (`hybrid`, default)** — quick color (≥2 detections in ≥2 filters or ≥300 s total).
    - If Type Ia: escalate to the light‑curve goal
    - Else: drop priority (reallocate time)
    - Low‑z boost: among candidates still needing observations, lower‑redshift
      SNe are gently favored as a tie‑breaker (configurable; on by default)
-3. **LSST‑only light curves** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
-4. **`unique_first`** — maximize distinct SNe per night; repeats get a negative
+2. **LSST‑only light curves (`lc`)** — pursue a full LC for every SN (≥5 detections or ≥300 s across ≥2 filters)
+3. **Unique-first (`unique_first`)** — maximize distinct SNe per night; repeats get a negative
    score after the first detection (dropped before capping). After
    ``unique_lookback_days`` the optional ``unique_first_resume_score`` can revive
    targets. Default lookback is 999 d.
@@ -98,8 +101,10 @@ Input catalogs with columns like `redshift`, `z`, `zspec`, `zphot`, `zbest`, or
 
 ### Band diversity mode
 
-- Set `diversity_enable=True` to prefer under‑observed individual filters using
-  a linear multiplier `1 + diversity_alpha * max(0, target_per_filter − count)`
+- Band-diversity weighting is enabled by default; set `diversity_enable=False`
+  to fall back to the blue/red group boost.
+- When active, the planner prefers under‑observed individual filters using a
+  linear multiplier `1 + diversity_alpha * max(0, target_per_filter − count)`
   within a sliding window of `diversity_window_days`.
 - The “first‑epoch color” knob is re‑interpreted in this mode as
   “first‑epoch in this band” and remains useful to seed missing bands.
@@ -120,7 +125,7 @@ Input catalogs with columns like `redshift`, `z`, `zspec`, `zphot`, `zbest`, or
 from twilight_planner_pkg.config import PlannerConfig
 from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
 
-cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2663)
+cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2647)
 # Default hybrid mode includes a gentle low‑z boost; to disable:
 # cfg.redshift_boost_enable = False
 plan_twilight_range_with_caps(
@@ -161,7 +166,9 @@ used for the filename prefix.
   and (if present) a numeric `redshift` column are normalized/added
 
 ### Eligibility
-- A target must rise above `min_alt_deg` (default 20°) at some sampled time
+- A target must rise above `min_alt_deg` at some sampled time. The
+  `PlannerConfig` default is 30°, while the CLI convenience option `--min_alt`
+  defaults to 20° unless overridden.
 - Supernovae without a valid `discovery_datetime` are skipped
 - Visibility window lasts `ceil(1.2 × days)` after discovery where `days`
   comes from `typical_days_by_type` or a default fallback
@@ -169,7 +176,10 @@ used for the filename prefix.
 > ### Key selection criteria recap:
 >
 > - A supernova must have a valid discovery date within the configured observation window.
-> - Must be observable at altitude ≥ `min_alt_deg` (default 20°) during at least one twilight window where the Sun altitude lies between `twilight_sun_alt_min_deg` and `twilight_sun_alt_max_deg` (defaults −18° to 0°).
+> - Must be observable at altitude ≥ `min_alt_deg` (30° by default when using
+>   `PlannerConfig`; the CLI helper starts at 20°) during at least one twilight
+>   window where the Sun altitude lies between `twilight_sun_alt_min_deg` and
+>   `twilight_sun_alt_max_deg` (defaults −18° to 0°).
 > - Eligibility duration after discovery is scaled from a `typical_days_by_type` value (or a default if type unknown) and multiplied by 1.2 to provide a buffer.
 > - Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
 
@@ -235,8 +245,9 @@ used for the filename prefix.
 
 ### Non-linearity & Saturation Policy
 
-- Hard pixel saturation cap: **100&nbsp;ke⁻/pixel**
-- Non-linear warning region: **80–100&nbsp;ke⁻/pixel**
+- Hard pixel saturation cap: **80&nbsp;ke⁻/pixel** (`PhotomConfig.npe_pixel_saturate`
+  and `PlannerConfig.simlib_npe_pixel_saturate`)
+- Non-linear warning region: **64–80&nbsp;ke⁻/pixel** (`PhotomConfig.npe_pixel_warn_nonlinear`)
 - The planner flags exposures with `warn_nonlinear` when predicted charge
   falls in the warning band and sets `saturation_guard_applied` when the
   exposure is shortened to respect the hard cap.
@@ -247,10 +258,10 @@ used for the filename prefix.
 The planner now applies the Sun-altitude–aware sky brightness when computing
 safe exposure times, not just when reporting sky values.  In bright twilight
 the background per pixel rises rapidly, so exposures are automatically
-shortened before detector saturation.  The hard 100 ke⁻ cap and 80–100 ke⁻
-warning band are evaluated against the maximum of source and sky electrons.
-Any configured `sun_alt_exposure_ladder` sets an initial guess; the capping
-logic then enforces detector safety.
+shortened before detector saturation.  The hard 80 ke⁻ cap and 64–80 ke⁻ warning
+band are evaluated against the maximum of source and sky electrons. Any
+configured `sun_alt_exposure_ladder` sets an initial guess; the capping logic
+then enforces detector safety.
 
 #### Discovery-magnitude fallback (default enabled)
 
@@ -261,18 +272,20 @@ photometry.
 
 - If the catalog contains a `discoverymag` column, the scheduler builds a
   per-band map as follows (configurable via `PlannerConfig`):
-  - `discovery_policy = "atlas_transform"` (default): if `discmagfilter` is
-    ATLAS `cyan`/`orange` (`c`/`o`), convert to r-band using a simple
-    color relation (assumed `g-r`, default 0.0). Copy that r to other bands with
-    a small safety margin (default 0.2 mag). If `discmagfilter` is `r`/`g`, use
-    it directly (with `g→r` using the same assumed color). Unknown filters fall
-    back to a conservative copy with margin.
+  - `discovery_policy = "atlas_priors"` (default): combine ATLAS `cyan`/`orange`
+    transforms with conservative color-prior intervals and optional
+    redshift-based peak estimates. For each planned band the brightest
+    (i.e., most saturation-prone) value allowed by the priors is chosen.
+  - `discovery_policy = "atlas_transform"`: apply only the linear ATLAS
+    `c`/`o`→r conversion and copy to other bands with a safety margin.
   - `discovery_policy = "copy"`: copy `discoverymag` to all planned bands with
     the safety margin.
-- Knobs:
-  - `use_discovery_fallback` (default `True`)
-  - `discovery_assumed_gr` (default `0.0`)
-  - `discovery_margin_mag` (default `0.2`)
+- Key knobs: `use_discovery_fallback` (default `True`),
+  `discovery_assumed_gr` (default `0.0`), `discovery_margin_mag` (default
+  `0.2`), `discovery_color_priors_min/max`,
+  `discovery_non_ia_widen_mag`, `discovery_y_extra_margin_mag`, and the
+  redshift-based guard parameters (`peak_extra_bright_margin_mag`,
+  `Kcorr_approx_mag`, `Kcorr_approx_mag_by_filter`, SALT2 cosmology knobs).
 
 This fallback is applied only when a discovery-magnitude column exists in the
 input. Otherwise the behavior is unchanged.
@@ -302,21 +315,22 @@ X(h) = \left[\cos z + 0.50572 \left(96.07995^\circ - z\right)^{-1.6364}\right]^{
 
 ```
 
-Eligibility requires $h \ge h_{\min}$ (default $20^\circ$) at some sampled time in a twilight window.
+Eligibility requires $h \ge h_{\min}$ at some sampled time in a twilight window
+(`PlannerConfig` default $30^\circ$; CLI helper default $20^\circ$).
 
 ### 2) Moon Separation (Graded Policy)
 
-Let $\Delta\theta_{\rm Moon}$ be the angular separation from the Moon, $f\in[0,1]$ the Moon illuminated fraction, and $h_{\rm Moon}$ the Moon altitude. The planner uses a graded minimum separation:
+Let $\Delta\theta_{\rm Moon}$ be the angular separation from the Moon, $f\in[0,1]$ the Moon illuminated fraction, and $h_{\rm Moon}$ the Moon altitude. The baseline per-filter requirements come from `PlannerConfig.min_moon_sep_by_filter` (defaults: $u:80^\circ$, $g:50^\circ$, $r:35^\circ$, $i:30^\circ$, $z:25^\circ$, $y:20^\circ$). These baselines are multiplied by the moon-separation weight
 
 ```math
-
-\Delta\theta_{\min}(f,h_{\rm Moon}) := \Delta\theta_0 \Big[ 1 - \alpha f \Big] \Big[ 1 - \beta \max(0, \sin h_{\rm Moon}) \Big],
-
+W(f, h_{\rm Moon}) = \begin{cases}
+0, & h_{\rm Moon} \le -10^\circ, \\
+\tfrac{h_{\rm Moon}+10}{10} \times \mathrm{clip}(0.3 + 0.7 f, 0.3, 1.0), & -10^\circ < h_{\rm Moon} < 0^\circ, \\
+1, & h_{\rm Moon} \ge 0^\circ,
+\end{cases}
 ```
 
-with band‑dependent $\Delta\theta_0$ (e.g., $g:30^\circ$, $r:25^\circ$, $i:20^\circ$, $z:15^\circ$) and gentle coefficients $(\alpha,\beta)$ (defaults $\sim 0.3$).
-
-If the Moon is below the horizon ($h_{\rm Moon} < 0^\circ$), the constraint is waived.
+where `clip` limits the factor to the indicated interval. The effective requirement is $\Delta\theta_{\min} = \Delta\theta_0 \times W(f, h_{\rm Moon})$. When the Moon is sufficiently far below the horizon ($h_{\rm Moon} \le -10^\circ$) the weight is zero and the separation constraint is fully relaxed.
 
 ### 3) Photometric Kernel (Zeropoint, Extinction, Sky, SNR)
 
@@ -416,7 +430,7 @@ The pixel is considered saturated if the sum exceeds the full‑well threshold:
 N_{\rm tot} = N_{\rm src,cen} + N_{\rm host/pix} + N_{\rm sky/pix} > N_{\rm sat}.
 ```
 
-We shorten the exposure time linearly to bring $N_{\rm tot}$ under $N_{\rm sat}$ and flag frames exceeding a non‑linearity warning threshold (default 80 ke⁻). Defaults for $N_{\rm sat}$ are 100 ke⁻, adjustable via configuration.
+We shorten the exposure time linearly to bring $N_{\rm tot}$ under $N_{\rm sat}$ and flag frames exceeding a non‑linearity warning threshold (default 64 ke⁻). Defaults for $N_{\rm sat}$ are 80 ke⁻ (configurable via `PhotomConfig.npe_pixel_saturate` or `PlannerConfig.simlib_npe_pixel_saturate`).
 
 If only rest‑frame host surface brightness is available, we apply Tolman dimming (and optional K‑correction) to obtain the observed value:
 
@@ -489,6 +503,13 @@ Priors and margins are configurable via `PlannerConfig`:
 - `discovery_color_priors_min`, `discovery_color_priors_max`
 - `discovery_non_ia_widen_mag`
 - `discovery_y_extra_margin_mag`
+
+When a redshift column is present, the planner additionally evaluates a
+SALT2-based peak magnitude estimate (configurable via `MB_absolute`,
+`SALT2_alpha`, `SALT2_beta`, cosmology parameters, and `Kcorr_approx_mag` knobs)
+and subtracts `peak_extra_bright_margin_mag`. The fallback adopts the brightest
+value available between the discovery- and redshift-based estimates for each
+band.
 
 This fallback only affects the saturation guard; science photometry is
 unchanged. Per‑band magnitudes in the input take precedence when present.
@@ -643,19 +664,23 @@ When `--simlib-out` is provided, the planner writes `S:` rows with the following
 
 - `MJD` — mid‑exposure JD − 2400000.5
 
-- `BAND` — LSST band
+- `ID+NEXPOSE` — sequential epoch ID with optional `*NEXP` multiplier
+
+- `FLT` — LSST band (y is emitted as uppercase `Y` per SNANA convention)
 
 - `GAIN` — electrons/ADU (if using electrons, set gain consistently)
 
-- `READNOISE` — e⁻ (per pixel)
+- `NOISE` — per-pixel read noise in ADU (after gain conversion)
 
-- `SKYSIG` — e⁻/px (per exposure)
+- `SKYSIG` — sky RMS per pixel in ADU for the exposure
 
-- `PSF_FWHM` — arcsec
+- `PSF1`, `PSF2`, `PSFRATIO` — SNANA Gaussian PSF parameters (pixels)
 
-- `ZPTAVG` — effective zeropoint for the exposure (1‑s ZP adjusted by extinction and any instrumental constants)
+- `ZPTAVG`, `ZPTERR` — effective zeropoint and its uncertainty (mag)
 
-- `MAG` — -99 (simulation; true flux provided elsewhere)
+The writer still buffers an internal `mag` field (default −99) for
+compatibility, but it is not emitted because SNANA derives flux from the light
+curve model.
 
 ---
 
@@ -675,7 +700,7 @@ default priority strategy.
 - `priority.py` — per‑SN visit logging with unified cadence/cosmology/color bonus; hybrid→LC escalation (Ia keep priority; non‑Ia drop after quick color)
 - `scheduler.py` — nightly visibility, scoring, per‑window scheduling, palette rotation, swap‑cost amortization, and time accounting; applies `sun_alt_policy` and optional exposure ladder
 - `astro_utils.py` — twilight windows, airmass, Sun/Moon geometry, slews
-- `filter_policy.py` — 5σ/m5 heuristic with Sun/Moon penalties; g‑band only in the darkest twilight with extra headroom
+- `filter_policy.py` — m₅/SNR feasibility with Sun/Moon-aware sky brightness; intersects with `sun_alt_policy`
 - `photom_rubin.py` — Rubin‑tuned photometric kernel with source+sky saturation guard
 - `sky_model.py` — twilight/dark sky providers with Sun-altitude brightening; optional `rubin_sim.skybrightness`
 - `simlib_writer.py` — minimal SNANA SIMLIB exporter
@@ -705,7 +730,7 @@ Below is a compact table summarizing key default values, with direct links to th
 | Parameter | Default Value | Source & Link |
 | --- | --- | --- |
 | Sun altitude for twilight | `twilight_sun_alt_min_deg` to `twilight_sun_alt_max_deg` (default −18° to 0°) | — |
-| Minimum target altitude | 20° | — |
+| Minimum target altitude | 30° (`PlannerConfig`; CLI `--min_alt` default 20°) | — |
 | Hybrid detections threshold | 2 detections or 300 s | — |
 | Light‑curve (LC) threshold | 5 detections or 300 s | — |
 | Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
@@ -713,15 +738,15 @@ Below is a compact table summarizing key default values, with direct links to th
 | Filter change overhead | 120 s | [DMTN-065](https://dmtn-065.lsst.io) |
 | Inter-exposure minimum | `inter_exposure_min_s = 15 s` | thermal/operational margin |
 | Pixel scale | 0.2 arcsec/px | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
-| Site location (lat, lon, alt) | −30.2446°, −70.7494°, 2663 m | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
+| Site location (lat, lon, alt) | −30.2446°, −70.7494°, 2647 m | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Shutter open/close time | 1 s | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Read noise | ≈6 e⁻ (typ. 5.4–6.2; requirement ≤9) | [Rubin camera specs](https://www.rubinobservatory.org), [LCA-48-J](https://project.lsst.org/lsst-camera/lca-48-j) |
-| Gain | 1 e⁻/ADU (measured ≈1.5–1.7; 1 acceptable per SMTN‑002) | [SMTN-002](https://smtn-002.lsst.io) |
+| Gain | 1.6 e⁻/ADU (typical Rubin measurement) | [SMTN-002](https://smtn-002.lsst.io) |
 | Dark‑sky brightness (u:g:r:i:z:y) | 23.05, 22.25, 21.20, 20.46, 19.61, 18.60 mag/arcsec² | [SMTN-002](https://smtn-002.lsst.io) |
 | Airmass formula | Kasten–Young (1989) | [Kasten & Young, Appl. Opt. 28, 4735–4738 (1989)](https://doi.org/10.1364/AO.28.004735) |
 | Horizon airmass (~90°) | ≲ 38 | [Wiki Kasten–Young accuracy](https://en.wikipedia.org/wiki/Air_mass_(astronomy)#Kasten_and_Young) |
 | Carousel capacity (filters) | 5 | — |
-| Saturation threshold | ≈1 × 10⁵ e⁻ (PTC turnoff 103 ke⁻ e2v / 129 ke⁻ ITL) | [Rubin camera specs](https://www.rubinobservatory.org) |
+| Saturation threshold | 8 × 10⁴ e⁻ hard cap; warn above 6.4 × 10⁴ e⁻ | [Rubin camera specs](https://www.rubinobservatory.org) |
 
 ---
 
