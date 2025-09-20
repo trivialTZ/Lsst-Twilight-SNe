@@ -13,7 +13,7 @@ class SimlibHeader:
     PIXSIZE: float = 0.200
     NPE_PIXEL_SATURATE: int = 80000
     PHOTFLAG_SATURATE: int = 2048
-    PSF_UNIT: str = "PIXEL"
+    PSF_UNIT: str = "NEA_PIXEL"
 
     def __post_init__(self) -> None:
         # SNANA expects the y-band to be written as an uppercase 'Y'
