@@ -81,7 +81,6 @@ class SimlibWriter:
         w(f"PIXSIZE:  {h.PIXSIZE:.3f}\n")
         w(f"NPE_PIXEL_SATURATE: {h.NPE_PIXEL_SATURATE}\n")
         w(f"PHOTFLAG_SATURATE:  {h.PHOTFLAG_SATURATE}\n")
-        w(f"PSF_UNIT:  {h.PSF_UNIT}\n")
         w("\n")
 
     def start_libid(
