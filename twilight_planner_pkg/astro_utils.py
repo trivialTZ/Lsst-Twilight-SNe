@@ -370,6 +370,7 @@ def pick_first_filter_for_target(
     moon_sep_ok: Dict[str, bool] | None = None,
     current_mag: Dict[str, float] | None = None,
     current_filter: str | None = None,
+    now_mjd: float | None = None,
 ) -> str | None:
     """Decide which filter to use first for the SN ``name``.
 
@@ -394,16 +395,156 @@ def pick_first_filter_for_target(
     if not candidates:
         return None
 
-    if hist and not getattr(hist, "escalated", False):
-        for f in candidates:
-            if f not in getattr(hist, "filters", set()):
-                return f
+    # 0) User-supplied hook (if provided). Prefer strict call signature, then
+    #    fall back to a simpler variant for convenience.
+    try:
+        hook = getattr(cfg, "pick_first_filter", None)
+    except Exception:
+        hook = None
+    if callable(hook):
+        context = {
+            "tracker": tracker,
+            "cfg": cfg,
+            "sun_alt_deg": sun_alt_deg,
+            "moon_sep_ok": dict(moon_sep_ok or {}),
+            "current_mag": dict(current_mag or {}),
+            "current_filter": current_filter,
+            "best_time_mjd": now_mjd,
+        }
+        choice: str | None = None
+        try:
+            choice = hook(name, candidates, cfg, context=context)
+        except TypeError:
+            try:
+                choice = hook(name, candidates, cfg)  # type: ignore[misc]
+            except Exception:
+                choice = None
+        except Exception:
+            choice = None
+        if isinstance(choice, str) and choice in candidates:
+            return choice
 
-    twilight_pref = ["y", "z", "i", "r", "g", "u"]
-    ordered = [f for f in twilight_pref if f in candidates]
-    if current_filter in ordered and ordered.index(current_filter) == 0:
+    weight_map: Dict[str, float] = {}
+    try:
+        weight_map = dict(getattr(cfg, "first_filter_bonus_weights", {}) or {})
+    except Exception:
+        weight_map = {}
+
+    def _weight_for(filt: str) -> float:
+        try:
+            return float(weight_map.get(filt, 1.0))
+        except Exception:
+            return 1.0
+
+    def _bonus_for(filt: str) -> float:
+        if now_mjd is None:
+            return 1.0
+        try:
+            target_d = float(getattr(cfg, "cadence_days_target", 3.0))
+        except Exception:
+            target_d = 3.0
+        try:
+            sigma_d = float(getattr(cfg, "cadence_bonus_sigma_days", 0.5))
+        except Exception:
+            sigma_d = 0.5
+        try:
+            cadence_weight = float(getattr(cfg, "cadence_bonus_weight", 0.25))
+        except Exception:
+            cadence_weight = 0.25
+        try:
+            first_epoch_weight = float(getattr(cfg, "cadence_first_epoch_bonus_weight", 0.0))
+        except Exception:
+            first_epoch_weight = 0.0
+        try:
+            target_pairs = int(getattr(cfg, "color_target_pairs", 2))
+        except Exception:
+            target_pairs = 2
+        try:
+            window_days = float(getattr(cfg, "color_window_days", 5.0))
+        except Exception:
+            window_days = 5.0
+        try:
+            alpha = float(getattr(cfg, "color_alpha", 0.3))
+        except Exception:
+            alpha = 0.3
+        try:
+            first_epoch_boost = float(getattr(cfg, "first_epoch_color_boost", 1.5))
+        except Exception:
+            first_epoch_boost = 1.5
+        diversity_enable = bool(getattr(cfg, "diversity_enable", False))
+        try:
+            diversity_target = int(getattr(cfg, "diversity_target_per_filter", 1))
+        except Exception:
+            diversity_target = 1
+        try:
+            diversity_window = float(getattr(cfg, "diversity_window_days", 5.0))
+        except Exception:
+            diversity_window = 5.0
+        try:
+            diversity_alpha = float(getattr(cfg, "diversity_alpha", 0.3))
+        except Exception:
+            diversity_alpha = 0.3
+
+        cosmo_weights = getattr(cfg, "cosmo_weight_by_filter", {}) or {}
+
+        try:
+            bonus = tracker.compute_filter_bonus(
+                name,
+                filt,
+                float(now_mjd),
+                target_d,
+                sigma_d,
+                cadence_weight,
+                first_epoch_weight,
+                cosmo_weights,
+                target_pairs,
+                window_days,
+                alpha,
+                first_epoch_boost,
+                diversity_enable=diversity_enable,
+                diversity_target_per_filter=diversity_target,
+                diversity_window_days=diversity_window,
+                diversity_alpha=diversity_alpha,
+            )
+        except Exception:
+            bonus = 1.0
+        return float(bonus)
+
+    def _score(filt: str) -> float:
+        weight = _weight_for(filt)
+        bonus = _bonus_for(filt)
+        bias = 1e-6 if current_filter and current_filter == filt else 0.0
+        return float(bonus * weight) + bias
+
+    def _ordered(filters: List[str]) -> List[str]:
+        if not filters:
+            return []
+        user_order = []
+        try:
+            user_order = list(getattr(cfg, "first_filter_order", []) or [])
+        except Exception:
+            user_order = []
+        default_tail = ["y", "z", "i", "r", "g", "u"]
+        twilight_pref = user_order + [f for f in default_tail if f not in user_order]
+        index_map = {f: i for i, f in enumerate(twilight_pref)}
+        try:
+            return sorted(
+                filters,
+                key=lambda f: (-_score(f), index_map.get(f, len(twilight_pref))),
+            )
+        except Exception:
+            return [f for f in twilight_pref if f in filters] or list(filters)
+
+    if hist and not getattr(hist, "escalated", False):
+        unseen = [f for f in candidates if f not in getattr(hist, "filters", set())]
+        ordered_unseen = _ordered(unseen)
+        if ordered_unseen:
+            return ordered_unseen[0]
+
+    ordered_candidates = _ordered(candidates)
+    if current_filter in ordered_candidates and ordered_candidates.index(current_filter) == 0:
         return current_filter
-    return ordered[0] if ordered else candidates[0]
+    return ordered_candidates[0] if ordered_candidates else candidates[0]
 
 
 def slew_time_seconds(

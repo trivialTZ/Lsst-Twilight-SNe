@@ -468,6 +468,7 @@ def _prepare_window_candidates(
         policy_allowed = [f for f in allowed if moon_sep_ok.get(f, False)]
         if not policy_allowed:
             continue
+        now_mjd_for_bonus = Time(current_time_utc).mjd
         first = pick_first_filter_for_target(
             row["Name"],
             row.get("SN_type_raw"),
@@ -478,10 +479,10 @@ def _prepare_window_candidates(
             moon_sep_ok=moon_sep_ok,
             current_mag=mag_lookup.get(row["Name"]),
             current_filter=current_filter_by_window.get(idx_w),
+            now_mjd=now_mjd_for_bonus,
         )
         if first is None:
             continue
-        now_mjd_for_bonus = Time(current_time_utc).mjd
         if cad_on:
             rest = sorted(
                 [f for f in policy_allowed if f != first],
@@ -695,10 +696,9 @@ def _attempt_schedule_one(
     guard_internal_per = max(0.0, cfg.inter_exposure_min_s - internal_gap)
     guard_internal_total = guard_internal_per * max(0, len(filters_used) - 1)
     guard_s = guard_first_s + guard_internal_total
+    # filter_changes_s already includes cross + internal; don't add cross again
     elapsed_overhead = (
-        max(timing["slew_s"], cfg.readout_s)
-        + timing.get("filter_changes_s", 0.0)
-        + timing.get("cross_filter_change_s", 0.0)
+        max(timing["slew_s"], cfg.readout_s) + timing.get("filter_changes_s", 0.0)
     )
     total_with_guard = elapsed_overhead + timing["exposure_s"] + guard_s
     if window_sum + total_with_guard > cap_s:
@@ -859,9 +859,9 @@ def _attempt_schedule_one(
     if filters_used:
         state = filters_used[-1]
 
+    # Accumulate total filter-change time once (cross + internal)
     summary_updates = {
-        "window_filter_change_s_delta": timing.get("filter_changes_s", 0.0)
-        + timing.get("cross_filter_change_s", 0.0),
+        "window_filter_change_s_delta": timing.get("filter_changes_s", 0.0),
         "internal_changes_delta": max(0, len(filters_used) - 1),
         "slew_time": timing["slew_s"],
         "airmass": air,

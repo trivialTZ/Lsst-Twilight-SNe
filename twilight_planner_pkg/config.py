@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import warnings
 from math import inf
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Callable
 
 
 @dataclass
@@ -63,6 +63,24 @@ class PlannerConfig:
     auto_color_pairing: bool = True
     """If True, automatically add an opposite-colour filter when the cap allows."""
     start_filter: str | None = None
+    # Optional override of the first-filter priority order. If provided, this
+    # list is used (in order) as the preference when choosing the first filter
+    # for a target; any remaining bands fall back to a default red-to-blue
+    # ordering. Leave as None to use the built-in default.
+    first_filter_order: Optional[List[str]] = None
+    # Optional per-filter weights applied when ranking first-filter candidates
+    # via the cadence/diversity bonus. Values >1.0 favour a filter; values <1.0
+    # down-weight it. When ``None`` the default weight of 1.0 is used for all
+    # filters and the historical ordering applies.
+    first_filter_bonus_weights: Optional[Dict[str, float]] = None
+    # Optional user-supplied hook to select the first filter. When set to a
+    # callable, it is invoked as
+    #   fn(name, allowed_filters, cfg, context={...}) → filter | None
+    # The context dictionary includes keys: 'tracker', 'sun_alt_deg',
+    # 'moon_sep_ok', 'current_mag', and 'current_filter'. If the hook raises
+    # or returns an invalid band, the scheduler falls back to the default
+    # policy.
+    pick_first_filter: Optional[Callable[..., Optional[str]]] = None
     sun_alt_policy: List[Tuple[float, float, List[str]]] = field(
         default_factory=lambda: [
             (-18.0, -15.0, ["y", "z", "i"]),
@@ -481,6 +499,20 @@ class PlannerConfig:
         )
         self.palette_evening = _norm_filter_list(self.palette_evening)
         self.palette_morning = _norm_filter_list(self.palette_morning)
+        # Normalise user-specified first-filter order if provided
+        ffo = getattr(self, "first_filter_order", None)
+        ffo_norm = _norm_filter_list(ffo) if ffo else []
+        self.first_filter_order = ffo_norm or None
+        # Normalise per-filter weight mapping (if provided)
+        ffw = getattr(self, "first_filter_bonus_weights", None)
+        ffw_norm = _norm_filter_dict(ffw) if ffw else {}
+        cleaned_weights: dict[str, float] = {}
+        for key, val in ffw_norm.items():
+            try:
+                cleaned_weights[key] = float(val)
+            except Exception:
+                continue
+        self.first_filter_bonus_weights = cleaned_weights or None
 
         policy_norm: list[tuple[float, float, list[str]]] = []
         for low, high, flist in self.sun_alt_policy:
