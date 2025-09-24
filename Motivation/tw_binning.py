@@ -10,6 +10,166 @@ import pandas as pd
 from .tw_constants import DZ_DEFAULT, Z_MAX_DEFAULT, Z_TW_MAX_DEFAULT, Z_TW_MIN_DEFAULT
 
 
+# σ_int(c) grid derived from Motivation/data/FITOPT000_MUOPT000.FITRES
+# using robust MAD scatter in equal-count color windows following the
+# BS21 analysis recipe (see Motivation/data/sigma_int_color.py).
+_SIGMA_INT_COLOR_CENTERS = np.array(
+    [
+        -0.30,
+        -0.29,
+        -0.28,
+        -0.27,
+        -0.26,
+        -0.25,
+        -0.24,
+        -0.23,
+        -0.22,
+        -0.21,
+        -0.20,
+        -0.19,
+        -0.18,
+        -0.17,
+        -0.16,
+        -0.15,
+        -0.14,
+        -0.13,
+        -0.12,
+        -0.11,
+        -0.10,
+        -0.09,
+        -0.08,
+        -0.07,
+        -0.06,
+        -0.05,
+        -0.04,
+        -0.03,
+        -0.02,
+        -0.01,
+        0.0,
+        0.01,
+        0.02,
+        0.03,
+        0.04,
+        0.05,
+        0.06,
+        0.07,
+        0.08,
+        0.09,
+        0.10,
+        0.11,
+        0.12,
+        0.13,
+        0.14,
+        0.15,
+        0.16,
+        0.17,
+        0.18,
+        0.19,
+        0.20,
+        0.21,
+        0.22,
+        0.23,
+        0.24,
+        0.25,
+        0.26,
+        0.27,
+        0.28,
+        0.29,
+        0.30,
+    ],
+    dtype=float,
+)
+
+_SIGMA_INT_COLOR_VALUES = np.array(
+    [
+        0.16642185,
+        0.16642185,
+        0.16642185,
+        0.16642185,
+        0.16642185,
+        0.16642185,
+        0.16642185,
+        0.1647987,
+        0.16167194,
+        0.1590642,
+        0.15662178,
+        0.15357066,
+        0.1500981,
+        0.14577584,
+        0.13981851,
+        0.12880488,
+        0.11359442,
+        0.10363266,
+        0.09524205,
+        0.09262461,
+        0.08891656,
+        0.08796724,
+        0.09010543,
+        0.08494435,
+        0.08729228,
+        0.09406961,
+        0.09241226,
+        0.1030234,
+        0.09525565,
+        0.10110439,
+        0.11705488,
+        0.12325214,
+        0.13039753,
+        0.13903228,
+        0.1360722,
+        0.13626762,
+        0.13844767,
+        0.1369876,
+        0.13686772,
+        0.15317435,
+        0.15935812,
+        0.17103491,
+        0.17902357,
+        0.19332936,
+        0.20446487,
+        0.21450821,
+        0.22303603,
+        0.2264977,
+        0.23251645,
+        0.23990584,
+        0.24604105,
+        0.2545365,
+        0.26145664,
+        0.26573578,
+        0.26959421,
+        0.27126735,
+        0.27219691,
+        0.27313039,
+        0.27375337,
+        0.27375337,
+        0.27375337,
+        0.27375337,
+    ],
+    dtype=float,
+)
+
+_SIGMA_INT_COLOR_DEFAULT = float(np.nanmedian(_SIGMA_INT_COLOR_VALUES))
+
+
+def _sigma_int_from_color(c: np.ndarray) -> np.ndarray:
+    """Interpolate intrinsic scatter as a function of SALT2 color."""
+
+    c = np.asarray(c, dtype=float)
+    sigma = np.full(c.shape, _SIGMA_INT_COLOR_DEFAULT, dtype=float)
+    mask = np.isfinite(c)
+    if not np.any(mask):
+        return sigma
+    clipped = np.clip(
+        c[mask], _SIGMA_INT_COLOR_CENTERS[0], _SIGMA_INT_COLOR_CENTERS[-1]
+    )
+    sigma[mask] = np.interp(
+        clipped,
+        _SIGMA_INT_COLOR_CENTERS,
+        _SIGMA_INT_COLOR_VALUES,
+    )
+    return sigma
+
+
 def nz_hist(z: np.ndarray, z_edges: np.ndarray) -> np.ndarray:
     """Histogram counts per redshift bin."""
     h, _ = np.histogram(z, bins=z_edges)
@@ -37,7 +197,7 @@ def sigma_mu_per_sn(
     *,
     alpha: float = 0.14,
     beta: float = 3.1,
-    sigma_int: float = 0.08,
+    sigma_int: float | str = "color_binned",
     sigma_vpec_kms: float = 300.0,
 ) -> pd.Series:
     """Compute per-SN σ_μ using full SALT2 covariances + lensing + vpec.
@@ -48,8 +208,11 @@ def sigma_mu_per_sn(
         FITRES-like table with SALT2 columns.
     alpha, beta : float, optional
         Stretch/color coefficients (fallback if not present in df).
-    sigma_int : float, optional
-        Intrinsic scatter added in quadrature.
+    sigma_int : float | str, optional
+        Intrinsic scatter added in quadrature. If set to ``"color_binned"``
+        (the default) the intrinsic term is interpolated from the
+        FITOPT000_MUOPT000.FITRES residuals as a function of SALT2 color.
+        Supply a float to recover the previous constant-scatter behavior.
     sigma_vpec_kms : float, optional
         Peculiar velocity dispersion in km/s.
 
@@ -67,6 +230,7 @@ def sigma_mu_per_sn(
     cov_mB_x1 = _num_series(df, "COV_mB_x1", 0.0)
     cov_mB_c = _num_series(df, "COV_mB_c", 0.0)
     z = _num_series(df, "z", np.nan).astype(float)
+    color = _num_series(df, "c", np.nan).astype(float)
 
     # SALT2 error propagation with full covariances
     mu2 = (
@@ -84,7 +248,19 @@ def sigma_mu_per_sn(
         sigma_vpec_kms / (299792.458 * np.maximum(z, 1e-3))
     )
 
-    mu2 = mu2 + (sigma_int ** 2) + (sig_lens ** 2) + (sig_vpec ** 2)
+    if isinstance(sigma_int, str):
+        if sigma_int.lower() != "color_binned":
+            raise ValueError(
+                "sigma_int string must be 'color_binned' or a numeric value"
+            )
+        sigma_int_series = pd.Series(
+            _sigma_int_from_color(color.to_numpy(dtype=float, na_value=np.nan)),
+            index=df.index,
+        )
+    else:
+        sigma_int_series = pd.Series(float(sigma_int), index=df.index)
+
+    mu2 = mu2 + sigma_int_series.pow(2) + (sig_lens ** 2) + (sig_vpec ** 2)
     return np.sqrt(np.maximum(mu2, 0.0))
 
 
