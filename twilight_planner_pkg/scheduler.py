@@ -101,6 +101,35 @@ def _fmt_window(start: datetime | None, end: datetime | None, tz_local: tzinfo) 
     )
 
 
+def _fmt_window_local(
+    start: datetime | None, end: datetime | None, tz_local: tzinfo
+) -> str:
+    """Return a concise local-time summary for a twilight window."""
+
+    if start is None or end is None:
+        return "na"
+
+    start_ts = pd.Timestamp(start)
+    if start_ts.tzinfo is None:
+        start_ts = start_ts.tz_localize("UTC")
+    end_ts = pd.Timestamp(end)
+    if end_ts.tzinfo is None:
+        end_ts = end_ts.tz_localize("UTC")
+
+    start_local = start_ts.tz_convert(tz_local)
+    end_local = end_ts.tz_convert(tz_local)
+    offset_td = start_local.utcoffset() or timedelta(0)
+    sign = "+" if offset_td >= timedelta(0) else "-"
+    offset_td = abs(offset_td)
+    hours = int(offset_td.total_seconds() // 3600)
+    minutes = int((offset_td.total_seconds() % 3600) // 60)
+    offset_str = f"UTC{sign}{hours:02d}:{minutes:02d}"
+    return (
+        f"local {start_local.strftime('%H:%M')} \u2192 {end_local.strftime('%H:%M')} "
+        f"{offset_str}"
+    )
+
+
 def _mid_sun_alt_of_window(window: dict, site: EarthLocation) -> float:
     """Return Sun altitude in degrees at the midpoint of ``window``."""
     mid = window["start"] + (window["end"] - window["start"]) / 2
@@ -205,6 +234,7 @@ def _log_day_status(
     morning_end: datetime | None,
     tz_local: tzinfo,
     verbose: bool,
+    window_usage: dict[str, dict] | None = None,
 ) -> None:
     """Print nightly eligibility and twilight window information."""
     if not verbose:
@@ -213,12 +243,32 @@ def _log_day_status(
         f"{day_iso}: eligible={eligible} visible={visible} "
         f"planned_total={planned_total}"
     )
-    print(
-        f"  evening_twilight: " f"{_fmt_window(evening_start, evening_end, tz_local)}"
-    )
-    print(
-        f"  morning_twilight: " f"{_fmt_window(morning_start, morning_end, tz_local)}"
-    )
+    usage = window_usage or {}
+
+    def _print_window(label: str, start: datetime | None, end: datetime | None) -> None:
+        window_str = _fmt_window_local(start, end, tz_local)
+        print(f"  {label}_twilight: {window_str}")
+        metrics = usage.get(label)
+        if not metrics:
+            return
+        parts: list[str] = []
+        window_use = metrics.get("window_use_pct")
+        if window_use is not None:
+            parts.append(f"Time use: {window_use:.1f}%")
+        observing = metrics.get("observing_s")
+        if observing is not None:
+            parts.append(f"Observing time: {observing:.1f}s")
+        filter_change = metrics.get("filter_change_s")
+        if filter_change is not None:
+            parts.append(f"Filter change time: {filter_change:.1f}s")
+        filters_used = metrics.get("filters_used")
+        if filters_used:
+            parts.append(f"Filters used: {filters_used}")
+        if parts:
+            print("    " + ", ".join(parts))
+
+    _print_window("evening", evening_start, evening_end)
+    _print_window("morning", morning_start, morning_end)
 
 
 def _cap_candidates_per_window(
@@ -1196,6 +1246,7 @@ def plan_twilight_range_with_caps(
         cap_source_by_window: Dict[int, str] = {}
         evening_idx: int | None = None
         morning_idx: int | None = None
+        window_usage_for_log: dict[str, dict] = {}
         for idx_w, w in enumerate(windows):
             current_filter_by_window[idx_w] = cfg.start_filter
             swap_count_by_window[idx_w] = 0
@@ -2536,20 +2587,58 @@ def plan_twilight_range_with_caps(
                 "pct_sne_with_blue_red_pair": pct_diff,
             }
             cap_source = cap_source_by_window.get(idx_w, "none")
-            nights_rows.append(
-                _build_window_summary_row(
-                    day.date().isoformat(),
-                    window_label_out,
-                    win,
-                    idx_w,
-                    ws_summary,
-                    cap_s,
-                    cap_source,
-                    cfg,
-                    site,
-                    pernight_rows_for_window,
-                )
+            summary_row = _build_window_summary_row(
+                day.date().isoformat(),
+                window_label_out,
+                win,
+                idx_w,
+                ws_summary,
+                cap_s,
+                cap_source,
+                cfg,
+                site,
+                pernight_rows_for_window,
             )
+            nights_rows.append(summary_row)
+            key_for_log: str | None = None
+            if window_label_out.startswith("evening"):
+                key_for_log = "evening"
+            elif window_label_out.startswith("morning"):
+                key_for_log = "morning"
+            if key_for_log:
+                util_raw = summary_row.get("window_utilization")
+                observing_raw = summary_row.get("sum_time_s")
+                filter_change_raw = summary_row.get("filter_change_s_total")
+                filters_used_raw = summary_row.get("filters_used_csv")
+                window_use_pct = None
+                try:
+                    if util_raw is not None and not pd.isna(util_raw):
+                        window_use_pct = float(util_raw) * 100.0
+                except Exception:
+                    window_use_pct = None
+                observing_s = None
+                try:
+                    if observing_raw is not None and not pd.isna(observing_raw):
+                        observing_s = float(observing_raw)
+                except Exception:
+                    observing_s = None
+                filter_change_s = None
+                try:
+                    if filter_change_raw is not None and not pd.isna(filter_change_raw):
+                        filter_change_s = float(filter_change_raw)
+                except Exception:
+                    filter_change_s = None
+                filters_used: str | None
+                if isinstance(filters_used_raw, str) and filters_used_raw.strip():
+                    filters_used = filters_used_raw
+                else:
+                    filters_used = None
+                window_usage_for_log[key_for_log] = {
+                    "window_use_pct": window_use_pct,
+                    "observing_s": observing_s,
+                    "filter_change_s": filter_change_s,
+                    "filters_used": filters_used,
+                }
             if override_applied:
                 cfg.exposure_by_filter = original_exp
 
@@ -2569,6 +2658,7 @@ def plan_twilight_range_with_caps(
             morning_end,
             tz_local,
             verbose,
+            window_usage_for_log,
         )
 
         # Stream to disk at end of day to cap memory
