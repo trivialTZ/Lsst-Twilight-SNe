@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from twilight_planner_pkg.config import PlannerConfig
-from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
+from twilight_planner_pkg.scheduler import _log_day_status, plan_twilight_range_with_caps
 
 
 def test_verbose_output_includes_local_times(tmp_path, monkeypatch, capsys):
@@ -82,11 +82,49 @@ def test_verbose_output_includes_local_times(tmp_path, monkeypatch, capsys):
     )
     out = capsys.readouterr().out
 
-    assert (
-        "  evening_twilight: 2024-01-02T00:16:00+00:00 \u2192 2024-01-02T00:46:00+00:00 (local 19:33 \u2192 20:03 UTC-04:43)"
-        in out
+    assert "  evening_twilight: local 19:33 \u2192 20:03 UTC-04:43" in out
+    assert "  morning_twilight: local 04:19 \u2192 04:49 UTC-04:43" in out
+
+
+def test_log_day_status_prints_usage(capsys):
+    """_log_day_status should include usage metrics when provided."""
+
+    tz = timezone.utc
+    start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=20)
+    morning_start = datetime(2024, 1, 1, 8, 0, tzinfo=timezone.utc)
+    morning_end = morning_start + timedelta(minutes=30)
+    usage = {
+        "evening": {
+            "window_use_pct": 75.0,
+            "observing_s": 450.0,
+            "filter_change_s": 30.0,
+            "filters_used": "g,r",
+        },
+        "morning": {
+            "window_use_pct": 50.0,
+            "observing_s": 300.0,
+            "filter_change_s": 10.0,
+            "filters_used": "i",
+        },
+    }
+
+    _log_day_status(
+        "2024-01-01",
+        5,
+        4,
+        3,
+        start,
+        end,
+        morning_start,
+        morning_end,
+        tz,
+        True,
+        usage,
     )
-    assert (
-        "  morning_twilight: 2024-01-02T09:02:00+00:00 \u2192 2024-01-02T09:32:00+00:00 (local 04:19 \u2192 04:49 UTC-04:43)"
-        in out
-    )
+
+    out = capsys.readouterr().out
+    assert "Time use: 75.0%" in out
+    assert "Observing time: 450.0s" in out
+    assert "Filter change time: 30.0s" in out
+    assert "Filters used: g,r" in out
