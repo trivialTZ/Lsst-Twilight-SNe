@@ -92,3 +92,54 @@ References:
 - Encourage occasional color pairs in a single visit: set `filters_per_visit_cap ≥ 2` and leave `auto_color_pairing=True`.
 - Make Moon avoidance stricter in a band: raise `min_moon_sep_by_filter[band]`.
 
+## Cross-Visit Target Switching
+
+This section details how the planner switches targets (and implicitly filters) between visits inside a window.
+
+- Candidate pool per window
+  - Build feasible filters per target (SNR/m5 → Sun-alt policy → Moon separation). Discard targets that end with an empty policy-allowed set.
+  - References: scheduler path `twilight_planner_pkg/scheduler.py:439-468`; refactor path `twilight_planner_pkg/scheduler_new.py:362-386`.
+
+- First-filter assignment per target
+  - Use the selection flow described above to assign `first_filter` and keep `policy_allowed` for each candidate.
+  - Reference: `twilight_planner_pkg/scheduler.py:471-525` (legacy) and `twilight_planner_pkg/scheduler_new.py:389-407` (refactor).
+
+- Batch by first_filter
+  - Group candidates by `first_filter` and create a per-window batch order (may be nudged by the first-filter cycle/palette mechanisms).
+  - Reference: `twilight_planner_pkg/scheduler.py:1560-1675`.
+
+- Cadence gating for costed selection
+  - Before computing costs, restrict a target’s usable filters to those passing `cadence_gate` at the current moment; this can affect which band is optimal for the cost model.
+  - Reference: `twilight_planner_pkg/scheduler.py:1687-1742`.
+
+- Cost model to pick the next target
+  - Slew cost: great-circle separation fed to `slew_time_seconds`.
+  - Carousel swap penalty: if the chosen band ≠ current `state_filter`, add an amortized swap penalty.
+    - Amortization: divide `filter_change_s` by k, estimated from time_left and a conservative per-visit wall-time; min amortization controlled by `swap_amortize_min`.
+    - Color-aware scaling: if the chosen band yields clear color benefit (boost > 1), scale penalty by `swap_cost_scale_color` (< 1) to encourage that swap.
+  - Hard limit: when `swap_count_by_window ≥ max_swaps_per_window`, any option that requires a swap is treated as infeasible (very high cost).
+  - References: `twilight_planner_pkg/scheduler.py:1676-1790` (slew + amortized swap + scaling), `:1766-1770` (swap cap).
+
+- Choose and execute
+  - Pick the minimum-cost target in the active batch; if none feasible, move to the next batch or stop when capped.
+  - Schedule the visit, update running clock, window sums, and emit plan/SIMLIB rows as configured.
+  - References: `twilight_planner_pkg/scheduler.py:1560-1660, 2611`.
+
+- State updates after a visit
+  - Update `state_filter` to the last used filter in the visit; increment `swap_count_by_window` if a cross-visit swap occurred.
+  - Track internal changes (within visit), slew times, sky mags, and the set of filters used for window KPIs.
+  - References: `twilight_planner_pkg/scheduler.py:1625-1634, 2570-2571`.
+
+- Backfill and repeats
+  - After the first pass, run backfill/repeats with the same cost model to utilize remaining time.
+  - A single extra swap beyond `max_swaps_per_window` is permitted during backfill if it prevents idle time.
+  - Reference: `twilight_planner_pkg/scheduler.py:1837` (extra swap context) and backfill loops `:2046+`.
+
+- Guards and pacing
+  - `inter_exposure_min_s` enforces minimum gap; it also feeds the per-visit time estimate used for swap amortization.
+  - `allow_filter_changes_in_twilight` must be true to permit carousel swaps inside twilight windows.
+  - References: `twilight_planner_pkg/scheduler.py:691, 1680-1699` (gap/time estimate), config at `twilight_planner_pkg/config.py:364`.
+
+- Strategy-neutral scoring
+  - The first-filter scoring embeds your cadence/diversity/cosmology priorities and any per-band weights. The cross-visit selector then balances those priorities against slew and swap costs.
+  - References: `twilight_planner_pkg/priority.py:147` (bonus), `twilight_planner_pkg/astro_utils.py:430-466` (weighted first-filter choice).
