@@ -85,7 +85,7 @@ def test_pick_first_filter_priority():
     f2 = pick_first_filter_for_target(
         "SN_B", "Ia", tracker, ["g", "r"], cfg, current_filter="g"
     )
-    assert f2 == "r"  # red preference in LC stage
+    assert f2 == "g"  # escalated target prefers to stay on current filter if viable
 
 
 def test_per_sn_cap_allows_one():
