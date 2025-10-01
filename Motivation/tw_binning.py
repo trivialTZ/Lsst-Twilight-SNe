@@ -143,7 +143,6 @@ _SIGMA_INT_COLOR_VALUES = np.array(
         0.27375337,
         0.27375337,
         0.27375337,
-        0.27375337,
     ],
     dtype=float,
 )
@@ -264,6 +263,84 @@ def sigma_mu_per_sn(
     return np.sqrt(np.maximum(mu2, 0.0))
 
 
+def sample_sigma_mu_promoted(
+    df_det_bin: pd.DataFrame | None,
+    df_fit_promoted_bin: pd.DataFrame | None,
+    n_needed: int,
+    *,
+    alpha: float = 0.14,
+    beta: float = 3.1,
+    sigma_int: float | str = "color_binned",
+    sigma_vpec_kms: float = 300.0,
+    f_tw_scale: float = 1.0,
+    z_fallback: float | None = None,
+    rng: np.random.Generator | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return arrays (sigma_mu, z) for `n_needed` promoted SNe in this bin.
+
+    Preference order:
+      (1) use SALT2 fit rows if provided (`df_fit_promoted_bin`),
+      (2) else, if detection rows include SALT2 error columns, compute via
+          :func:`sigma_mu_per_sn`,
+      (3) else, fallback to scaled WFD-like sigma using ``f_tw_scale`` and
+          ``z_fallback``.
+    """
+
+    if rng is None:
+        rng = np.random.default_rng(12345)
+
+    # Case 1: explicit promoted-fit rows
+    if df_fit_promoted_bin is not None and len(df_fit_promoted_bin) > 0:
+        s = sigma_mu_per_sn(
+            df_fit_promoted_bin,
+            alpha=alpha,
+            beta=beta,
+            sigma_int=sigma_int,
+            sigma_vpec_kms=sigma_vpec_kms,
+        ).to_numpy(dtype=float)
+        z = pd.to_numeric(
+            df_fit_promoted_bin.get("z", np.nan), errors="coerce"
+        ).to_numpy(dtype=float)
+        ok = np.isfinite(s) & (s > 0.0) & np.isfinite(z)
+        s, z = s[ok], z[ok]
+        if len(s) > 0:
+            idx = rng.integers(0, len(s), size=n_needed)
+            return s[idx], z[idx]
+
+    # Case 2: detection dataframe has SALT2-like columns
+    if df_det_bin is not None and len(df_det_bin) > 0:
+        cols = {
+            "mBERR",
+            "x1ERR",
+            "cERR",
+            "COV_x1_c",
+            "COV_mB_x1",
+            "COV_mB_c",
+            "z",
+        }
+        if cols.issubset(set(df_det_bin.columns)):
+            s = sigma_mu_per_sn(
+                df_det_bin,
+                alpha=alpha,
+                beta=beta,
+                sigma_int=sigma_int,
+                sigma_vpec_kms=sigma_vpec_kms,
+            ).to_numpy(dtype=float)
+            z = pd.to_numeric(df_det_bin.get("z", np.nan), errors="coerce").to_numpy(
+                dtype=float
+            )
+            ok = np.isfinite(s) & (s > 0.0) & np.isfinite(z)
+            s, z = s[ok], z[ok]
+            if len(s) > 0:
+                idx = rng.integers(0, len(s), size=n_needed)
+                return s[idx], z[idx]
+
+    # Case 3: fallback (filled by caller if NaNs remain). No noisy prints.
+    if z_fallback is None:
+        z_fallback = np.nan
+    return (np.full(n_needed, np.nan) * f_tw_scale), np.full(n_needed, z_fallback)
+
+
 def write_binned_catalogs(
     head_y1: pd.DataFrame,
     fit_qc_y1: pd.DataFrame,
@@ -324,6 +401,182 @@ def write_binned_catalogs(
     # compat filenames
     df_base.to_csv(derived_dir / "y1_cat_bin_base_fix.csv", index=False)
     df_tw.to_csv(derived_dir / "y1_cat_bin_tw_fix.csv", index=False)
+    return base_path, tw_path
+
+
+def write_binned_catalogs_v2(
+    derived_dir: Path,
+    head_y1: pd.DataFrame,
+    fit_qc_y1: pd.DataFrame,
+    *,
+    base_label: str,
+    dz: float = DZ_DEFAULT,
+    z_max: float = Z_MAX_DEFAULT,
+    sigma_agg: str = "ivar",
+    alpha: float = 0.14,
+    beta: float = 3.1,
+    sigma_int: float | str = "color_binned",
+    sigma_vpec_kms: float = 300.0,
+    f_tw_scale: float = 1.15,
+    fit_promoted_y1: pd.DataFrame | None = None,
+    rng: np.random.Generator | None = None,
+) -> tuple[Path, Path]:
+    """Improved writer that assigns per-SN σ_μ to Twilight-promoted objects.
+
+    The returned CSVs include an IVAR-weighted ``z_eff`` column and updated
+    ``sigma_mu`` based on per-SN uncertainties for both WFD and promoted SNe.
+    """
+
+    z_edges = np.arange(0.0, z_max + dz + 1e-12, dz)
+    z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
+
+    N_det = nz_hist(
+        pd.to_numeric(head_y1["z"], errors="coerce").to_numpy(dtype=float), z_edges
+    )
+    N_cos = nz_hist(
+        pd.to_numeric(fit_qc_y1["z"], errors="coerce").to_numpy(dtype=float), z_edges
+    )
+
+    band = (z_edges[:-1] >= Z_TW_MIN_DEFAULT) & (z_edges[1:] <= Z_TW_MAX_DEFAULT)
+    N_cos_tw = N_cos.copy()
+    N_cos_tw[band] = np.maximum(N_cos_tw[band], N_det[band])
+
+    # Per-SN σμ for WFD cosmology SNe
+    fit_qc_y1 = fit_qc_y1.copy()
+    fit_qc_y1["sigma_mu_sn"] = sigma_mu_per_sn(
+        fit_qc_y1,
+        alpha=alpha,
+        beta=beta,
+        sigma_int=sigma_int,
+        sigma_vpec_kms=sigma_vpec_kms,
+    )
+
+    # Optional per-SN σμ for explicit promoted-fit rows
+    if fit_promoted_y1 is not None and "sigma_mu_sn" not in fit_promoted_y1:
+        fit_promoted_y1 = fit_promoted_y1.copy()
+        fit_promoted_y1["sigma_mu_sn"] = sigma_mu_per_sn(
+            fit_promoted_y1,
+            alpha=alpha,
+            beta=beta,
+            sigma_int=sigma_int,
+            sigma_vpec_kms=sigma_vpec_kms,
+        )
+
+    sigma_bin_base = np.full_like(z_mid, np.nan, dtype=float)
+    z_eff_base = np.full_like(z_mid, np.nan, dtype=float)
+    sigma_bin_tw = np.full_like(z_mid, np.nan, dtype=float)
+    z_eff_tw = np.full_like(z_mid, np.nan, dtype=float)
+
+    if rng is None:
+        rng = np.random.default_rng(1234)
+
+    for k in range(len(z_mid)):
+        z_lo, z_hi = z_edges[k], z_edges[k + 1]
+
+        # WFD in this bin
+        m_wfd = (fit_qc_y1["z"] >= z_lo) & (fit_qc_y1["z"] < z_hi)
+        sig_wfd = pd.to_numeric(
+            fit_qc_y1.loc[m_wfd, "sigma_mu_sn"], errors="coerce"
+        ).astype(float)
+        z_wfd = pd.to_numeric(
+            fit_qc_y1.loc[m_wfd, "z"], errors="coerce"
+        ).astype(float)
+        ok_wfd = np.isfinite(sig_wfd) & (sig_wfd > 0.0) & np.isfinite(z_wfd)
+        sig_wfd = sig_wfd[ok_wfd].to_numpy()
+        z_wfd = z_wfd[ok_wfd].to_numpy()
+
+        if sig_wfd.size > 0:
+            iv = 1.0 / (sig_wfd ** 2)
+            ssum = iv.sum()
+            n = sig_wfd.size
+            if ssum > 0.0:
+                sigma_bin_base[k] = float(np.sqrt(n / ssum))
+                z_eff_base[k] = float((z_wfd * iv).sum() / ssum)
+
+        # Promoted counts needed
+        n_prom = int(max(0, N_cos_tw[k] - sig_wfd.size))
+        sig_all = sig_wfd.copy()
+        z_all = z_wfd.copy()
+
+        if n_prom > 0:
+            df_det_bin = head_y1[(head_y1["z"] >= z_lo) & (head_y1["z"] < z_hi)]
+            df_fit_prom_bin = None
+            if fit_promoted_y1 is not None:
+                df_fit_prom_bin = fit_promoted_y1[
+                    (fit_promoted_y1["z"] >= z_lo)
+                    & (fit_promoted_y1["z"] < z_hi)
+                ]
+            s_prom, z_prom = sample_sigma_mu_promoted(
+                df_det_bin=df_det_bin,
+                df_fit_promoted_bin=df_fit_prom_bin,
+                n_needed=n_prom,
+                alpha=alpha,
+                beta=beta,
+                sigma_int=sigma_int,
+                sigma_vpec_kms=sigma_vpec_kms,
+                f_tw_scale=f_tw_scale,
+                z_fallback=z_mid[k],
+                rng=rng,
+            )
+
+            if (not np.isfinite(s_prom).all()) or s_prom.size == 0:
+                med = float(np.nanmedian(sig_wfd)) if sig_wfd.size > 0 else 0.15
+                s_prom = np.full(n_prom, f_tw_scale * med, dtype=float)
+                z_prom = np.full(n_prom, z_mid[k], dtype=float)
+
+            sig_all = np.concatenate([sig_all, s_prom])
+            z_all = np.concatenate([z_all, z_prom])
+
+        if sig_all.size > 0:
+            iv = 1.0 / (sig_all ** 2)
+            ssum = iv.sum()
+            n = sig_all.size
+            if ssum > 0.0:
+                sigma_bin_tw[k] = float(np.sqrt(n / ssum))
+                z_eff_tw[k] = float((z_all * iv).sum() / ssum)
+
+    def _fill(values: np.ndarray, fill: float | np.ndarray | pd.Series) -> np.ndarray:
+        """Forward/back fill finite values, then fill remaining NaNs.
+
+        ``fill`` may be a scalar or a vector/Series matching the length of
+        ``values`` (e.g., using ``z_mid`` to fill ``z_eff_*``).
+        """
+        s = pd.Series(values).replace([np.inf, -np.inf], np.nan).astype(float)
+        s = s.fillna(method="ffill").fillna(method="bfill")
+        if np.isscalar(fill):
+            return s.fillna(fill).to_numpy(dtype=float)
+        # Vector-like: align by index
+        fill_series = pd.Series(fill, index=s.index)
+        return s.fillna(fill_series).to_numpy(dtype=float)
+
+    global_med = (
+        float(np.nanmedian(fit_qc_y1["sigma_mu_sn"]))
+        if "sigma_mu_sn" in fit_qc_y1
+        else 0.12
+    )
+
+    sigma_bin_base = _fill(sigma_bin_base, global_med)
+    sigma_bin_tw = _fill(sigma_bin_tw, global_med)
+    z_eff_base = _fill(z_eff_base, z_mid)
+    z_eff_tw = _fill(z_eff_tw, z_mid)
+
+    df_base = pd.DataFrame(
+        {"z": z_mid, "z_eff": z_eff_base, "N": N_cos, "sigma_mu": sigma_bin_base}
+    )
+    df_tw = pd.DataFrame(
+        {"z": z_mid, "z_eff": z_eff_tw, "N": N_cos_tw, "sigma_mu": sigma_bin_tw}
+    )
+
+    base_path = derived_dir / f"y1_cat_bin_base_{base_label}.csv"
+    tw_path = derived_dir / f"y1_cat_bin_tw_{base_label}.csv"
+
+    df_base.to_csv(base_path, index=False)
+    df_tw.to_csv(tw_path, index=False)
+
+    # Compatibility filenames
+    df_base.to_csv(derived_dir / "y1_cat_bin_base_fix.csv", index=False)
+    df_tw.to_csv(derived_dir / "y1_cat_bin_tw_fix.csv", index=False)
+
     return base_path, tw_path
 
 

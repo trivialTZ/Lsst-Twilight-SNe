@@ -15,7 +15,10 @@ def fisher_from_binned(df_bin: pd.DataFrame, setup: FisherSetup) -> np.ndarray:
     uncertainties by assigning zero weight to such bins instead of
     propagating NaNs into the Fisher matrix.
     """
-    z = df_bin["z"].to_numpy(float)
+    # Prefer IVAR-weighted redshift if provided by binning
+    z = pd.to_numeric(df_bin.get("z_eff", df_bin["z"]), errors="coerce").to_numpy(
+        float
+    )
     N = df_bin["N"].to_numpy(float)
     s = df_bin["sigma_mu"].to_numpy(float)
     # Safe weights: only bins with N>0 and finite, positive sigma contribute
@@ -65,6 +68,9 @@ def _sigma_mu_from_salt2_row(
         - 2.0 * alpha * beta * COV_x1_c
         + sigma_int**2
     )
+    # Add lensing contribution consistent with Section 5.1 modeling
+    # and with `sigma_mu_per_sn` in tw_binning.py
+    var += (0.055 * z) ** 2
     z_eff = max(z, 1e-4)
     var += (5.0 / np.log(10.0)) ** 2 * (sigma_vpec_kms / (C_KMS * z_eff)) ** 2
     return float(np.sqrt(var))

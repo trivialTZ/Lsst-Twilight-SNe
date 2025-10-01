@@ -33,7 +33,7 @@ def show_fig_y1_nz(
     N_det: np.ndarray,
     N_cos: np.ndarray,
     *,
-    N_cos_tw: np.ndarray,
+    N_cos_tw: np.ndarray | None = None,
     DZ: float,
     Z_TW_MIN: float,
     Z_TW_MAX: float,
@@ -42,8 +42,9 @@ def show_fig_y1_nz(
     plt.figure(figsize=(10, 6))
     plt.plot(z_mid, N_det, label=f"Detection (Y1, N={int(N_det.sum())})")
     plt.plot(z_mid, N_cos, label=f"Cosmology (Y1, N={int(N_cos.sum())})")
-    plt.plot(z_mid, N_cos_tw, label=f"Cosmo + Twilight (Y1, N={int(N_cos_tw.sum())})")
-    plt.axvspan(Z_TW_MIN, Z_TW_MAX, color="k", alpha=0.06, label="Twilight Promotion")
+    if N_cos_tw is not None:
+        plt.plot(z_mid, N_cos_tw, label=f"Twilight (Y1, N={int(N_cos_tw.sum())})")
+    plt.axvspan(Z_TW_MIN, Z_TW_MAX, color="k", alpha=0.06, label="Twilight Window")
     plt.xlim(0.0, Z_MAX)
     plt.ylim(bottom=0)
     plt.xlabel("Redshift z")
@@ -357,7 +358,8 @@ def plot_fs8_scan(
         ``{"vv": [[k, Pvv(k)]]}``. If None, a default will be computed
         with CLASS using Planck-like values and growth-rate normalization.
     sig_floor_list : array-like, optional
-        Values to add to ``dmu_error_base`` when scanning. Default is
+        Values of an additional per-SN error floor (mag) to be COMBINED IN
+        QUADRATURE with ``dmu_error_base`` when scanning. Default is
         linspace(0.035, 0.10, 6).
     zlim_list : array-like, optional
         Upper redshift limits to include in the scan (lower bound is ``zmin``).
@@ -472,8 +474,8 @@ def plot_fs8_scan(
             continue
         base_errors = sub["dmu_error_base"].to_numpy(dtype=float)
         for jj, sf in enumerate(sig_floor_list):
-            # Match DEBASS forecast convention: add an error floor linearly in magnitude
-            sub["dmu_error"] = base_errors + float(sf)
+            # Combine the additional floor in quadrature with baseline errors
+            sub["dmu_error"] = _np.sqrt(_np.square(base_errors) + float(sf) ** 2)
             sig_rms_grid[ii, jj] = float(
                 _np.sqrt(_np.mean(_np.square(sub["dmu_error"].to_numpy(dtype=float))))
             )
@@ -607,7 +609,9 @@ def compute_fs8_scan_grid(
             continue
         base_errors = sub["dmu_error_base"].to_numpy(dtype=float)
         for jj, sf in enumerate(sig_floor_list):
-            sub["dmu_error"] = base_errors + float(sf)
+            # Combine the floor in quadrature with the baseline per-SN error
+            # (baseline typically already includes SALT2 stat + sigma_int).
+            sub["dmu_error"] = _np.sqrt(_np.square(base_errors) + float(sf) ** 2)
             sig_rms_grid[ii, jj] = float(
                 _np.sqrt(_np.mean(_np.square(sub["dmu_error"].to_numpy(dtype=float))))
             )
