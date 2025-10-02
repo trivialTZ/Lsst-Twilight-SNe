@@ -586,6 +586,9 @@ def _attempt_schedule_one(
     )
     cfg.current_mag_by_filter = mag_lookup.get(t["Name"])
     cfg.current_alt_deg = t["max_alt_deg"]
+    # Persist current target coordinates for downstream sky model usage
+    cfg.current_ra_deg = float(t["RA_deg"]) if pd.notna(t.get("RA_deg", None)) else None
+    cfg.current_dec_deg = float(t["Dec_deg"]) if pd.notna(t.get("Dec_deg", None)) else None
     cfg.current_mjd = (
         Time(t["best_time_utc"]).mjd
         if isinstance(t["best_time_utc"], (datetime, pd.Timestamp))
@@ -1107,7 +1110,7 @@ def plan_twilight_range_with_caps(
         twilight_delta_mag=cfg.twilight_delta_mag,
     )
     try:
-        sky_provider = RubinSkyProvider()
+        sky_provider = RubinSkyProvider(site=site)
     except Exception:
         sky_provider = SimpleSkyProvider(sky_cfg, site=site)
     cfg.sky_provider = sky_provider

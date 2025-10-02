@@ -191,12 +191,41 @@ class SimpleSkyProvider:
 
 
 class RubinSkyProvider:
-    """Sky provider wrapping ``rubin_sim.skybrightness``."""
+    """Sky provider wrapping rubin_sim.skybrightness using RA/Dec when available.
 
-    def __init__(self, site: Optional[str] = None):
+    Behavior
+    --------
+    - If ``mjd``, ``ra_deg`` and ``dec_deg`` are provided, uses
+      ``SkyModel.set_ra_dec_mjd`` (preferred; full geometry).
+    - Otherwise, falls back to ``SkyModel.set_params`` with
+      ``airmass``, ``sun_alt`` and an optional Sun-relative azimuth
+      (supports both ``azs`` and ``azRelSun`` signatures across versions).
+
+    With ``mags=True`` the return value is a dict keyed by filter names whose
+    values are arrays; we extract the first element.
+    """
+
+    def __init__(self, site: EarthLocation | None = None):
         import rubin_sim.skybrightness as sb
 
-        self.model = sb.SkyModel() if site is None else sb.SkyModel(site=site)
+        # Try a few constructor signatures observed across versions.
+        errors: list[Exception] = []
+        self.model = None  # type: ignore[assignment]
+        for kwargs in (
+            {"mags": True},
+            {"mags": True, "filter_names": ["u","g","r","i","z","y"]},
+            {},
+        ):
+            try:
+                self.model = sb.SkyModel(**kwargs)
+                break
+            except Exception as e:  # pragma: no cover - depends on environment
+                errors.append(e)
+                self.model = None
+        if self.model is None:
+            # Surface the first error; caller will catch and fall back to toy.
+            raise errors[0]
+        self.site = site
 
     def sky_mag(
         self,
@@ -205,17 +234,121 @@ class RubinSkyProvider:
         dec_deg: float | None,
         band: str,
         airmass: float,
+        *,
+        sun_alt_deg: float | None = None,
+        az_sun_rel_deg: float = 90.0,
     ) -> float:
-        # Attempt to pass through geometry for a full sky model; fall back to
-        # airmass-only if the API does not accept additional keys.
-        params = {"filter": band, "airmass": airmass}
-        if mjd is not None:
-            params["mjd"] = mjd
-        if ra_deg is not None and dec_deg is not None:
-            params["ra"] = float(ra_deg)
-            params["dec"] = float(dec_deg)
+        import numpy as np
+
         try:
-            out = self.model.return_mags(params)
-            return float(out.get("mag_sky", out.get("sky", 22.0)))
+            # Path A: use full geometry if given
+            if mjd is not None and ra_deg is not None and dec_deg is not None:
+                # Some versions name arguments lon/lat, others ra/dec
+                try:
+                    self.model.set_ra_dec_mjd(
+                        lon=float(ra_deg), lat=float(dec_deg), mjd=float(mjd),
+                        degrees=True, filter_names=[band]
+                    )
+                except TypeError:
+                    self.model.set_ra_dec_mjd(
+                        ra=float(ra_deg), dec=float(dec_deg), mjd=float(mjd),
+                        degrees=True, filter_names=[band]
+                    )
+            else:
+                # Path B: parameterized twilight point used by our figures
+                if sun_alt_deg is None and mjd is not None:
+                    # Derive Sun altitude if only MJD is known
+                    from astropy.coordinates import AltAz, get_sun
+                    from astropy.time import Time
+                    import astropy.units as u
+                    # Prefer configured site if supplied; else fall back to Rubin site
+                    site = self.site or EarthLocation(
+                        lat=-30.2446 * u.deg, lon=-70.7494 * u.deg, height=2647 * u.m
+                    )
+                    t = Time(mjd, format="mjd", scale="utc")
+                    sun_alt_deg = float(
+                        get_sun(t).transform_to(AltAz(obstime=t, location=site)).alt.deg
+                    )
+                if sun_alt_deg is None:
+                    sun_alt_deg = -12.0
+                # Be resilient to API changes: try common signatures
+                set_params_ok = False
+                for kwargs in (
+                    dict(
+                        airmass=float(airmass),
+                        sun_alt=float(sun_alt_deg),
+                        azs=float(az_sun_rel_deg),
+                        degrees=True,
+                        filter_names=[band],
+                    ),
+                    dict(
+                        airmass=float(airmass),
+                        sun_alt=float(sun_alt_deg),
+                        azRelSun=float(az_sun_rel_deg),
+                        degrees=True,
+                        filter_names=[band],
+                    ),
+                    dict(
+                        airmass=float(airmass),
+                        sun_alt=float(sun_alt_deg),
+                        degrees=True,
+                        filter_names=[band],
+                    ),
+                ):
+                    try:
+                        self.model.set_params(**kwargs)
+                        set_params_ok = True
+                        break
+                    except TypeError:
+                        continue
+                if not set_params_ok:
+                    # Last-ditch: minimal required params
+                    self.model.set_params(airmass=float(airmass), sun_alt=float(sun_alt_deg))
+
+            mags = self.model.return_mags()
+            # rubin_sim returns a dict: { 'g': array([...]), ... }
+            arr = mags.get(band, None) if isinstance(mags, dict) else None
+            if arr is None:
+                # Some versions may return an object with attributes
+                try:
+                    arr = getattr(mags, band)
+                except Exception:
+                    return DEFAULT_DARK_SKY_MAG.get(band, 21.0)
+            return float(np.asarray(arr).ravel()[0])
         except Exception:
-            return float(self.model.return_mags({"filter": band, "airmass": airmass})["mag_sky"])
+            # Absolute fallback: return a reasonable dark-sky value
+            return DEFAULT_DARK_SKY_MAG.get(band, 21.0)
+
+
+def rubin_sim_mu_sky_by_sun_alt(
+    band: str,
+    sun_alt_deg: list[float] | tuple[float, ...] | "np.ndarray",
+    airmass: float = 1.2,
+) -> "np.ndarray":
+    """Vectorized rubin_sim sky μ via set_params/return_mags.
+
+    Safer wrapper that loops over altitudes with ``set_params``. If rubin_sim is
+    unavailable, raises ImportError so callers can fall back.
+    """
+    import numpy as np
+    try:
+        import rubin_sim.skybrightness as sb
+    except Exception as e:  # pragma: no cover - environment dependent
+        raise ImportError("rubin_sim is not installed or import failed") from e
+
+    model = sb.SkyModel(mags=True)
+    alts = np.atleast_1d(np.array(sun_alt_deg, dtype=float))
+    out = np.full_like(alts, np.nan, dtype=float)
+    for i, alt in enumerate(alts):
+        try:
+            model.set_params(airmass=float(airmass), sun_alt=float(alt), azs=90.0, degrees=True, filter_names=[band])
+            mags = model.return_mags()
+            arr = mags.get(band) if isinstance(mags, dict) else None
+            out[i] = float(np.asarray(arr).ravel()[0]) if arr is not None else np.nan
+        except Exception:
+            out[i] = np.nan
+    # Fill any NaNs with a constant fallback to avoid breaking plots
+    if np.any(~np.isfinite(out)):
+        fallback = DEFAULT_DARK_SKY_MAG.get(band, 21.0)
+        out = np.where(np.isfinite(out), out, fallback)
+    return out

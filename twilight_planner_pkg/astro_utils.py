@@ -733,8 +733,14 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         # Use the actual MJD (if provided) so the Sun-altitude–aware sky model
         # informs capping. Brighter twilight implies shorter safe exposures.
         mjd = getattr(cfg, "current_mjd", None)
+        ra_now = getattr(cfg, "current_ra_deg", None)
+        dec_now = getattr(cfg, "current_dec_deg", None)
         sky_mag = cfg.sky_provider.sky_mag(
-            mjd, None, None, band, airmass_from_alt_deg(cfg.current_alt_deg)
+            mjd,
+            ra_now if isinstance(ra_now, (int, float)) else None,
+            dec_now if isinstance(dec_now, (int, float)) else None,
+            band,
+            airmass_from_alt_deg(cfg.current_alt_deg),
         )
     else:
         sky_mag = 21.0
