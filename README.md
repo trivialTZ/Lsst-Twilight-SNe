@@ -10,14 +10,17 @@ experimenting with dynamic priority strategies.
 - `data/` – example input tables.
 - `notebook/` – Jupyter notebooks demonstrating the planner.
 - `twilight_outputs/` – sample planning results.
-- `main.py` – small wrapper that invokes the package CLI.
+
+Run the CLI via the package module:
+
+- `python -m twilight_planner_pkg.main` — command‑line planner entry point.
 
 The package is built in a modular fashion: separate modules handle
 configuration, astronomy utilities, per‑SN priority tracking, and the
 scheduler itself.  This structure makes it easy to swap in new
 strategies or extend the planner for different surveys.
 
-Recent additions provide a Rubin-style photometry model and a minimal
+Recent additions provide a Rubin‑style photometry model and a minimal
 SNANA SIMLIB writer. Planned exposures are capped to avoid pixel
 full‑well saturation by summing the central‑pixel electrons from the SN
 point source, local host‑galaxy surface brightness (per pixel), and sky
@@ -47,21 +50,22 @@ saturation guard.
 See `twilight_planner_pkg/README.md` for detailed usage instructions and
 module documentation.
 
-## Twilight strategy highlights
+## Twilight Strategy Highlights
 
-The planner follows a Sun-altitude policy inspired by twilight brightness.
-Redder filters cope better with bright twilight, while the ``g`` band is only
-considered in the darkest conditions:
+The planner follows a Sun‑altitude policy inspired by twilight brightness.
+Redder filters cope better with bright twilight. The default mapping in
+`PlannerConfig.sun_alt_policy` is:
 
-| Sun altitude (deg) | Allowed filters         |
-|--------------------|-------------------------|
-| -18 to -15         | g, r, i, z, y           |
-| -15 to -12         | r, i, z, y              |
-| -12 to 0           | i, r, z, y              |
+| Sun altitude (deg) | Allowed filters |
+|--------------------|-----------------|
+| -18 to -15         | y, z, i         |
+| -15 to -12         | z, i, r         |
+| -12 to 0           | i, z, y         |
 
-This mapping is configurable via `PlannerConfig.sun_alt_policy`, and
-`allowed_filters_for_window` adds a filter-specific 5σ/m₅ gate with extra
-headroom for ``g`` when the Sun is between −15° and −12°.
+This mapping is configurable, and feasibility is further pruned by the
+per‑band m₅/SNR gate (see below). There are no hard‑coded bans in the gating
+logic; the final set used in a window is the intersection of feasibility with
+the Sun‑alt policy.
 
 ### Band‑diversity mode (per‑filter balance)
 
@@ -96,6 +100,11 @@ evening and morning cycles) and a per-window swap cap further discourage
 unnecessary filter changes. Readout time is 2 s per exposure and slews follow a
 hybrid model (``3.5° in 4 s`` plus ``5.25°/s``).
 
+An inter‑exposure guard of 15 s is enforced. If the natural overhead
+(max of slew vs readout plus any cross‑filter change) is shorter than 15 s,
+idle time is inserted before the next exposure; this guard is accounted for in
+window cap checks and reported in summaries.
+
 Moon–target separations use Astropy's `get_body('moon')` in a shared AltAz
 frame. If the Moon is below the horizon, the separation requirement is
 automatically waived.
@@ -121,11 +130,10 @@ the overhead values above follow Rubin Observatory technical notes.
 - Sky brightness: when `rubin_sim.skybrightness` is available the exact Rubin
   model is used; otherwise a fallback combines a twilight term with a
   Krisciunas & Schaefer (1991) moon-scatter model.
-- Gate: a band is eligible when `m5 ≥ m_target` (SNR ≥ 5). There are **no
-  hard-coded bans**: the final decision is the intersection with
-  `sun_alt_policy`. If no band passes the m5/SNR gate, an empty set is
-  returned—there is no heuristic fallback. Per-filter Moon separations are
-  checked afterwards using the notebook-configured `min_moon_sep_by_filter`.
+- Gate: a band is eligible when `m5 ≥ m_target` (SNR ≥ 5). The final decision
+  is the intersection with `sun_alt_policy`. If no band passes the m5/SNR gate,
+  an empty set is returned—there is no heuristic fallback. Per‑filter Moon
+  separations are checked afterwards using `min_moon_sep_by_filter`.
 
 ## Minimal example
 
@@ -170,6 +178,13 @@ twilight timing and basic science metrics:
 window. It comes from `PlannerConfig.morning_cap_s` or `PlannerConfig.evening_cap_s`.
 When these are set to "auto" (the default), the cap equals the true duration of
 each window; otherwise a fixed number of seconds is used.
+
+For the true, serialized on‑sky order within each twilight window, use the
+sequence file:
+
+- `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv` — non‑overlapping
+  execution order with `order_in_window`, `sn_start_utc`, `sn_end_utc`, and
+  `filters_used_csv`. One row per SN visit (multi‑filter visits are a single row).
 
 ## Installation
 

@@ -22,6 +22,7 @@ def discover_sat_mask_from_headers(phot_path: Path) -> int | None:
                 if "PHOTFLAG_SATURATE" in h.header:
                     return int(h.header["PHOTFLAG_SATURATE"])
     except Exception:
+        print("no PHOTFLAG_SATURATE")
         pass
     return None
 

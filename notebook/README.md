@@ -139,7 +139,7 @@ With these two levers active, the planner tends to produce a much more even dist
 - **Run label:**
   `RUN_LABEL=None` — optional tag inserted into output filenames (e.g., "hybrid_strategy").
 - **Site:**
-  `LAT_DEG=-30.2446`, `LON_DEG=-70.7494`, `HEIGHT_M=2663` — Rubin site; required for correct twilight and airmass calculations.
+  `LAT_DEG=-30.2446`, `LON_DEG=-70.7494`, `HEIGHT_M=2647` — Rubin site; required for correct twilight and airmass calculations.
 - **Visibility:**  
   `MIN_ALT_DEG=20.0` — avoids the worst airmass while keeping more sky accessible in twilight.
 - **Filters & Hardware:**  
@@ -150,9 +150,9 @@ With these two levers active, the planner tends to produce a much more even dist
 - **Sun-altitude policy:**
 
   ```
-  (-18,-15): ["g","r","i","z","y"]
-  (-15,-12): ["r","i","z","y"]
-  (-12,  0): ["i","r","z","y"]
+  (-18, -15): ["y", "z", "i"]
+  (-15, -12): ["z", "i", "r"]
+  (-12,   0): ["i", "z", "y"]
   ```
 
   Only filters allowed by policy and present in `FILTERS` are considered. There
@@ -163,7 +163,7 @@ With these two levers active, the planner tends to produce a much more even dist
   `SLEW_SMALL_DEG=3.5`, `SLEW_SMALL_TIME_S=4.0`, `SLEW_RATE_DEG_PER_S=5.25`, `SLEW_SETTLE_S=1.0` — a simple piecewise model with a constant small-slew time and a linear rate for larger moves.
 - **Moon:**  
   `MIN_MOON_SEP_BY_FILTER={"g":50,"r":35,"i":30,"z":25, ...}` — tighter in blue to protect S/N; dynamically scaled by Moon altitude/phase; ignored when the Moon is set.  
-  `REQUIRE_SINGLE_TIME_FOR_ALL=True` — enforces a single “best time” per visit (if your build uses it), ensuring all filters (if >1) share the same epoch in a visit.
+  `REQUIRE_SINGLE_TIME_FOR_ALL_FILTERS=True` — enforces a single “best time” per visit, ensuring all filters (if >1) share the same epoch in a visit.
 - **Time caps:**  
   `PER_SN_CAP_S=120` — bounds per-SN work (slew + readout + exposure + filter changes).  
   `MORNING_CAP_S=600`, `EVENING_CAP_S=600` — roughly 10 minutes each; ensures plans pack into tight twilight windows.  
@@ -173,8 +173,8 @@ With these two levers active, the planner tends to produce a much more even dist
   `PRIORITY_STRATEGY="hybrid"` with `HYBRID_DETECTIONS=2`, `HYBRID_EXPOSURE=300s`, `LC_DETECTIONS=5`, `LC_EXPOSURE=300s`.  
   Starts broad with quick detections; escalates to deeper coverage for promising SNe.
 - **Photometry / Sky:**
-  `PIXEL_SCALE_ARCSEC=0.2` (Rubin pixel scale), `READ_NOISE_E=6` (typical 5.4–6.2 e⁻; requirement ≤9 e⁻ per LCA‑48‑J), `GAIN_E_PER_ADU=1` (measured ≈1.5–1.7 e⁻/ADU; using 1 acceptable per SMTN-002), `ZPT_ERR_MAG=0.01`, saturation threshold ≈1×10⁵ e⁻ (PTC turnoff 103 ke⁻ e2v / 129 ke⁻ ITL).
-  Dark-sky surface brightnesses {u:23.05, g:22.25, r:21.20, i:20.46, z:19.61, y:18.60} mag/arcsec² (SMTN‑002); prefer `rubin_sim.skybrightness` when available, `TWILIGHT_DELTA_MAG=2.5` is an approximate fallback. Airmass uses the Kasten–Young (1989) approximation.
+  `PIXEL_SCALE_ARCSEC=0.2` (Rubin pixel scale), `READ_NOISE_E=6` (typical 5.4–6.2 e⁻; requirement ≤9 e⁻ per LCA‑48‑J), `GAIN_E_PER_ADU=1.6` (measured ≈1.5–1.7 e⁻/ADU), `ZPT_ERR_MAG=0.01`, saturation threshold ≈8×10⁴ e⁻ by default.
+  Dark‑sky surface brightnesses {u:23.05, g:22.25, r:21.20, i:20.46, z:19.61, y:18.60} mag/arcsec² (SMTN‑002); prefer `rubin_sim.skybrightness` when available. `TWILIGHT_DELTA_MAG=2.5` is an approximate fallback. Airmass uses the Kasten–Young (1989) approximation.
 - **SIMLIB:**  
   `SIMLIB_OUT=None` (disabled in the example). Set e.g. `"twilight.simlib"` to generate a SIMLIB.
 - **Misc:**  
