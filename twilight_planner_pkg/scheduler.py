@@ -16,12 +16,14 @@ formula.  Exposure times may be overridden by
 
 from __future__ import annotations
 
+import itertools
 import math
 import warnings
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Dict, List
-from collections import Counter
+from typing import Dict, List, Optional, Tuple
+from collections import Counter, defaultdict
 
 import astropy.units as u
 import numpy as np
@@ -46,6 +48,7 @@ from .astro_utils import (
     airmass_from_alt_deg,
     allowed_filters_for_sun_alt,
     choose_filters_with_cap,
+    compute_capped_exptime,
     great_circle_sep_deg,
     parse_sn_type_to_window_days,
     pick_first_filter_for_target,
@@ -55,7 +58,7 @@ from .astro_utils import (
 )
 from .config import PlannerConfig
 from .constraints import effective_min_sep
-from .filter_policy import allowed_filters_for_window
+from .filter_policy import allowed_filters_for_window, _m5_scale
 from .io_utils import standardize_columns
 from .photom_rubin import PhotomConfig, compute_epoch_photom
 from .priority import PriorityTracker
@@ -179,6 +182,504 @@ def _is_low_z_ia(sn_type, redshift, cfg: PlannerConfig) -> bool:
             if t == m:
                 return True
     return False
+
+
+@dataclass
+class PairItem:
+    """Container for a candidate SN/filter pair used by the DP planner."""
+
+    name: str
+    filt: str
+    score: float
+    approx_time_s: float
+    density: float
+    snr_margin: float
+    exp_s: float
+    candidate: dict
+
+
+def _candidate_coord(target: dict) -> Optional[Tuple[float, float]]:
+    """Return ``(ra_deg, dec_deg)`` if both coordinates are finite."""
+
+    try:
+        ra = float(target.get("RA_deg"))
+        dec = float(target.get("Dec_deg"))
+    except Exception:
+        return None
+    if not np.isfinite(ra) or not np.isfinite(dec):
+        return None
+    return (ra, dec)
+
+
+def _compute_capped_exptime_for_pair(
+    target: dict,
+    filt: str,
+    cfg: PlannerConfig,
+    mag_lookup: Dict[str, Dict[str, float]],
+    default_exp: float,
+    now_mjd: float,
+) -> float:
+    """Return saturation-capped exposure for ``target`` in ``filt``."""
+
+    name = target.get("Name")
+    mag_map = mag_lookup.get(name, {}) if name is not None else {}
+    orig_mag = getattr(cfg, "current_mag_by_filter", None)
+    orig_alt = getattr(cfg, "current_alt_deg", None)
+    orig_ra = getattr(cfg, "current_ra_deg", None)
+    orig_dec = getattr(cfg, "current_dec_deg", None)
+    orig_mjd = getattr(cfg, "current_mjd", None)
+    orig_z = getattr(cfg, "current_redshift", None)
+    try:
+        cfg.current_mag_by_filter = mag_map
+        cfg.current_alt_deg = float(target.get("max_alt_deg", np.nan))
+        coord = _candidate_coord(target)
+        cfg.current_ra_deg = coord[0] if coord else None
+        cfg.current_dec_deg = coord[1] if coord else None
+        best_mjd = target.get("best_time_mjd")
+        cfg.current_mjd = best_mjd if isinstance(best_mjd, (float, int)) else now_mjd
+        redshift = target.get("redshift")
+        cfg.current_redshift = float(redshift) if redshift is not None else None
+        exp_s, _flags = compute_capped_exptime(filt, cfg)
+        return float(exp_s)
+    except Exception:
+        return float(default_exp)
+    finally:
+        cfg.current_mag_by_filter = orig_mag
+        cfg.current_alt_deg = orig_alt
+        cfg.current_ra_deg = orig_ra
+        cfg.current_dec_deg = orig_dec
+        cfg.current_mjd = orig_mjd
+        cfg.current_redshift = orig_z
+
+
+def _estimate_m5_for_pair(
+    target: dict,
+    filt: str,
+    cfg: PlannerConfig,
+    phot_cfg: PhotomConfig,
+    sky_provider,
+    sky_cfg: SkyModelConfig,
+    now_mjd: float,
+) -> Optional[float]:
+    """Return approximate 5σ depth for ``target`` in ``filt``."""
+
+    t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
+    seeing = (
+        float(phot_cfg.fwhm_eff.get(filt, 0.83))
+        if getattr(phot_cfg, "fwhm_eff", None)
+        else 0.83
+    )
+    k_band = 0.0
+    if getattr(phot_cfg, "k_m", None):
+        k_band = float(phot_cfg.k_m.get(filt, 0.0))
+    sun_alt = float(target.get("sun_alt_policy", np.nan))
+    moon_alt = float(target.get("moon_alt", np.nan))
+    moon_phase = float(target.get("moon_phase", np.nan))
+    moon_sep = float(target.get("moon_sep", np.nan))
+    airmass = float(target.get("airmass", np.nan))
+    coord = _candidate_coord(target)
+    if sky_provider is not None and not isinstance(sky_provider, SimpleSkyProvider):
+        try:
+            m_sky = float(
+                sky_provider.sky_mag(
+                    target.get("best_time_mjd") or now_mjd,
+                    coord[0] if coord else None,
+                    coord[1] if coord else None,
+                    filt,
+                    airmass,
+                )
+            )
+        except Exception:
+            m_sky = sky_mag_arcsec2(
+                filt,
+                sky_cfg,
+                sun_alt,
+                moon_alt,
+                moon_phase,
+                moon_sep,
+                airmass,
+                k_band=k_band,
+            )
+    else:
+        m_sky = sky_mag_arcsec2(
+            filt,
+            sky_cfg,
+            sun_alt,
+            moon_alt,
+            moon_phase,
+            moon_sep,
+            airmass,
+            k_band=k_band,
+        )
+    try:
+        return float(
+            _m5_scale(
+                filt,
+                m_sky_arcsec2=m_sky,
+                seeing_fwhm_arcsec=seeing,
+                airmass=airmass,
+                t_vis_s=t_vis,
+                k_m=k_band,
+            )
+        )
+    except Exception:
+        return None
+
+
+def _visit_unit_time(
+    exp_s: float,
+    prev_coord: Optional[Tuple[float, float]],
+    target_coord: Optional[Tuple[float, float]],
+    cfg: PlannerConfig,
+) -> float:
+    """Return guard-aware single-visit duration in seconds."""
+
+    if prev_coord and target_coord:
+        sep = great_circle_sep_deg(*prev_coord, *target_coord)
+    else:
+        sep = 0.0
+    slew = slew_time_seconds(
+        float(sep),
+        small_deg=cfg.slew_small_deg,
+        small_time=cfg.slew_small_time_s,
+        rate_deg_per_s=cfg.slew_rate_deg_per_s,
+        settle_s=cfg.slew_settle_s,
+    )
+    guard = max(cfg.inter_exposure_min_s, cfg.readout_s + slew)
+    return float(guard + exp_s)
+
+
+def _residual_slew_cost(
+    prev_coord: Optional[Tuple[float, float]],
+    target_coord: Optional[Tuple[float, float]],
+    cfg: PlannerConfig,
+) -> float:
+    """Return additional guard time required beyond the minimum for the slew."""
+
+    if not prev_coord or not target_coord:
+        return 0.0
+    sep = great_circle_sep_deg(*prev_coord, *target_coord)
+    slew = slew_time_seconds(
+        float(sep),
+        small_deg=cfg.slew_small_deg,
+        small_time=cfg.slew_small_time_s,
+        rate_deg_per_s=cfg.slew_rate_deg_per_s,
+        settle_s=cfg.slew_settle_s,
+    )
+    return float(max(0.0, cfg.readout_s + slew - cfg.inter_exposure_min_s))
+
+
+def _pair_score(
+    target: dict,
+    filt: str,
+    now_mjd: float,
+    tracker: PriorityTracker,
+    cfg: PlannerConfig,
+    cadence_params: dict,
+    mag_lookup: Dict[str, Dict[str, float]],
+    phot_cfg: PhotomConfig,
+    sky_cfg: SkyModelConfig,
+    sky_provider,
+    epsilon_snr: float,
+) -> tuple[float, float]:
+    """Return ``(score, snr_margin)`` for a candidate/filter pair."""
+
+    name = target["Name"]
+    strategy = getattr(cfg, "priority_strategy", "hybrid")
+    need = tracker.peek_score(name, target.get("sn_type"), strategy, now_mjd)
+    if need <= 0.0:
+        return (0.0, 0.0)
+    lowz_boost = 1.0
+    if getattr(cfg, "redshift_boost_enable", True):
+        lowz_boost *= tracker.redshift_boost(
+            target.get("redshift"),
+            getattr(cfg, "redshift_low_ref", 0.08),
+            getattr(cfg, "redshift_boost_max", 1.7),
+        )
+    if _is_low_z_ia(target.get("sn_type"), target.get("redshift"), cfg):
+        mult = getattr(cfg, "low_z_ia_priority_multiplier", 1.0)
+        try:
+            mult = float(mult)
+        except Exception:
+            mult = 1.0
+        lowz_boost *= max(mult, 0.0)
+    cad_bonus = 0.0
+    if cadence_params["cad_on"]:
+        cad_bonus = tracker.compute_filter_bonus(
+            name,
+            filt,
+            now_mjd,
+            cadence_params["cad_tgt_eff"],
+            cadence_params["cad_sig"],
+            cadence_params["cad_wt"],
+            cadence_params["cad_first"],
+            cfg.cosmo_weight_by_filter,
+            cfg.color_target_pairs,
+            cfg.color_window_days,
+            cfg.color_alpha,
+            cfg.first_epoch_color_boost,
+            diversity_enable=cadence_params["diversity_enable"],
+            diversity_target_per_filter=cadence_params["diversity_target"],
+            diversity_window_days=cadence_params["diversity_window"],
+            diversity_alpha=cadence_params["diversity_alpha"],
+        )
+    snr_margin = 0.0
+    if epsilon_snr > 0.0:
+        mag = mag_lookup.get(name, {}).get(filt)
+        m5 = _estimate_m5_for_pair(
+            target, filt, cfg, phot_cfg, sky_provider, sky_cfg, now_mjd
+        )
+        if mag is not None and m5 is not None:
+            snr_margin = max(0.0, float(m5) - float(mag))
+    score = float(need) * float(lowz_boost) * (1.0 + cad_bonus) * (
+        1.0 + epsilon_snr * snr_margin
+    )
+    return (score, snr_margin)
+
+
+def _build_global_pairs_for_window(
+    candidates: list[dict],
+    cfg: PlannerConfig,
+    tracker: PriorityTracker,
+    now_mjd: float,
+    prev_coord: Optional[Tuple[float, float]],
+    mag_lookup: Dict[str, Dict[str, float]],
+    cadence_params: dict,
+    phot_cfg: PhotomConfig,
+    sky_cfg: SkyModelConfig,
+    sky_provider,
+) -> dict[str, list[PairItem]]:
+    """Return per-filter ``PairItem`` lists sorted by density."""
+
+    epsilon_snr = float(getattr(cfg, "dp_snr_margin_epsilon", 0.0) or 0.0)
+    per_filter: dict[str, list[PairItem]] = defaultdict(list)
+    for target in candidates:
+        coord = _candidate_coord(target)
+        cad_tgt_eff = cadence_params["cad_tgt"]
+        if cadence_params["cad_on"] and _is_low_z_ia(
+            target.get("sn_type"), target.get("redshift"), cfg
+        ):
+            override = getattr(cfg, "low_z_ia_cadence_days_target", None)
+            if isinstance(override, (int, float)) and override > 0.0:
+                cad_tgt_eff = float(override)
+        cadence_params["cad_tgt_eff"] = cad_tgt_eff
+        policy_allowed = target.get("policy_allowed", [])
+        for filt in policy_allowed:
+            if cadence_params["cad_on"]:
+                if not tracker.cadence_gate(
+                    target["Name"],
+                    filt,
+                    now_mjd,
+                    cad_tgt_eff,
+                    cadence_params["cad_jit"],
+                ):
+                    continue
+            default_exp = cfg.exposure_by_filter.get(filt, 0.0)
+            exp_s = _compute_capped_exptime_for_pair(
+                target, filt, cfg, mag_lookup, default_exp, now_mjd
+            )
+            score, snr_margin = _pair_score(
+                target,
+                filt,
+                now_mjd,
+                tracker,
+                cfg,
+                cadence_params,
+                mag_lookup,
+                phot_cfg,
+                sky_cfg,
+                sky_provider,
+                epsilon_snr,
+            )
+            if score <= 0.0:
+                continue
+            approx_time = _visit_unit_time(exp_s, prev_coord, coord, cfg)
+            residual = _residual_slew_cost(prev_coord, coord, cfg)
+            density_den = max(approx_time + residual, 1e-3)
+            density = score / density_den
+            item = PairItem(
+                name=target["Name"],
+                filt=filt,
+                score=score,
+                approx_time_s=approx_time,
+                density=density,
+                snr_margin=snr_margin,
+                exp_s=exp_s,
+                candidate=target,
+            )
+            per_filter[filt].append(item)
+
+    for filt, items in per_filter.items():
+        items.sort(key=lambda it: it.density, reverse=True)
+    return per_filter
+
+
+def _prefix_scores(per_filter: dict[str, list[PairItem]]) -> dict[str, np.ndarray]:
+    """Return per-filter prefix sums of scores."""
+
+    prefixes: dict[str, np.ndarray] = {}
+    for filt, items in per_filter.items():
+        run = [0.0]
+        acc = 0.0
+        for it in items:
+            acc += it.score
+            run.append(acc)
+        prefixes[filt] = np.array(run, dtype=float)
+    return prefixes
+
+
+def _prefix_times(per_filter: dict[str, list[PairItem]]) -> dict[str, np.ndarray]:
+    """Return per-filter prefix sums of approximate visit durations."""
+
+    prefixes: dict[str, np.ndarray] = {}
+    for filt, items in per_filter.items():
+        run = [0.0]
+        acc = 0.0
+        for it in items:
+            acc += it.approx_time_s
+            run.append(acc)
+        prefixes[filt] = np.array(run, dtype=float)
+    return prefixes
+
+
+def _generate_filter_sequences(
+    filters: list[str], length: int, forced_first: str | None
+) -> list[list[str]]:
+    """Return candidate filter sequences respecting optional forced first filter."""
+
+    if length <= 0:
+        return []
+    sequences: list[list[str]] = []
+    for seq in itertools.product(filters, repeat=length):
+        if forced_first and seq[0] != forced_first:
+            continue
+        # Remove redundant consecutive duplicates which would imply zero-cost swaps.
+        if any(seq[i] == seq[i + 1] for i in range(length - 1)):
+            continue
+        sequences.append(list(seq))
+    return sequences
+
+
+def _plan_batches_by_dp(
+    per_filter: dict[str, list[PairItem]],
+    prefix_scores: dict[str, np.ndarray],
+    time_left_s: float,
+    cfg: PlannerConfig,
+    forced_first: str | None,
+) -> tuple[list[str], list[int], float]:
+    """Return optimal (filter sequence, visit counts, total score) via DP."""
+
+    if not per_filter:
+        return ([], [], 0.0)
+    filters = list(per_filter.keys())
+    t_units = {}
+    for filt, items in per_filter.items():
+        if items:
+            t_units[filt] = float(np.mean([it.approx_time_s for it in items]))
+        else:
+            t_units[filt] = float(
+                cfg.inter_exposure_min_s + cfg.exposure_by_filter.get(filt, 0.0)
+            )
+    exposures = [
+        max(0.0, t - cfg.inter_exposure_min_s) for t in t_units.values() if t > 0.0
+    ]
+    if exposures:
+        median_exp = float(np.median(exposures))
+    else:
+        median_exp = float(np.median(list(cfg.exposure_by_filter.values()) or [15.0]))
+    if getattr(cfg, "n_estimate_mode", "guard_plus_exp") == "per_filter":
+        t_ref = float(np.mean(list(t_units.values())))
+    else:
+        t_ref = float(cfg.inter_exposure_min_s + median_exp)
+    t_ref = max(t_ref, 1.0)
+    N = int(max(0, time_left_s // t_ref))
+    if N <= 0:
+        return ([], [], 0.0)
+    K = int(cfg.filter_change_s // t_ref)
+    if K <= 0:
+        K = 1
+    swaps_cap = min(
+        int(getattr(cfg, "max_swaps_per_window", 2)),
+        int(time_left_s // max(cfg.filter_change_s, 1.0)),
+        max(0, len(filters) - 1),
+    )
+    dp_max_swaps = getattr(cfg, "dp_max_swaps", None)
+    if isinstance(dp_max_swaps, int):
+        swaps_cap = min(swaps_cap, max(0, dp_max_swaps))
+
+    best_total = -np.inf
+    best_seq: list[str] | None = None
+    best_counts: list[int] | None = None
+    base_total = -np.inf
+    base_counts: list[int] | None = None
+    base_seq: list[str] | None = None
+
+    for swaps in range(0, swaps_cap + 1):
+        length = swaps + 1
+        sequences = _generate_filter_sequences(filters, length, forced_first)
+        if not sequences:
+            continue
+        visit_slots = N - swaps * K
+        if visit_slots <= 0:
+            continue
+        for seq in sequences:
+            dp = np.full((length, visit_slots + 1), -np.inf)
+            back = np.zeros((length, visit_slots + 1), dtype=int)
+            for n in range(visit_slots + 1):
+                Pf = prefix_scores[seq[0]]
+                max_items = len(Pf) - 1
+                use = min(n, max_items)
+                dp[0, n] = Pf[use]
+                back[0, n] = use
+            for j in range(1, length):
+                Pf = prefix_scores[seq[j]]
+                max_items = len(Pf) - 1
+                swap_mult = cfg.swap_boost if j > 0 else 1.0
+                for n in range(visit_slots + 1):
+                    best_val = -np.inf
+                    best_x = 0
+                    limit = min(n, max_items)
+                    for x in range(limit + 1):
+                        prev = dp[j - 1, n - x]
+                        if prev == -np.inf:
+                            continue
+                        val = prev + swap_mult * Pf[x]
+                        if val > best_val:
+                            best_val = val
+                            best_x = x
+                    dp[j, n] = best_val
+                    back[j, n] = best_x
+            total = float(dp[length - 1, visit_slots])
+            if total <= -np.inf:
+                continue
+            counts = [0] * length
+            n = visit_slots
+            for j in range(length - 1, -1, -1):
+                take = back[j, n]
+                counts[j] = int(take)
+                n -= take
+            if swaps == 0 and total > base_total:
+                base_total = total
+                base_seq = seq
+                base_counts = counts
+            if total > best_total:
+                best_total = total
+                best_seq = seq
+                best_counts = counts
+
+    if best_seq is None or best_counts is None:
+        return (base_seq or [], base_counts or [], max(base_total, 0.0))
+
+    theta = float(getattr(cfg, "dp_hysteresis_theta", 0.0) or 0.0)
+    if (
+        theta > 0.0
+        and base_seq is not None
+        and len(best_seq) > 1
+        and base_total > 0.0
+        and best_total < (1.0 + theta) * base_total
+    ):
+        return (base_seq, base_counts or [], base_total)
+    return (best_seq, best_counts, best_total)
 
 
 def _path_plan(
@@ -410,6 +911,7 @@ def _prepare_window_candidates(
     for _, row in group_df.iterrows():
         # Optionally evaluate policy at each target's best time instead of the window midpoint.
         sun_alt_for_policy = mid_sun_alt
+        best_time_mjd = None
         if getattr(cfg, "filter_policy_use_best_time_alt", False) and pd.notna(
             row.get("best_time_utc")
         ):
@@ -428,8 +930,22 @@ def _prepare_window_candidates(
                     .alt.to(u.deg)
                     .value
                 )
+                best_time_mjd = float(Time(t_best.to_pydatetime()).mjd)
             except Exception:
                 sun_alt_for_policy = mid_sun_alt
+                best_time_mjd = None
+        if best_time_mjd is None:
+            try:
+                bt = row.get("best_time_utc")
+                if pd.notna(bt):
+                    bt_ts = (
+                        pd.Timestamp(bt).tz_convert("UTC")
+                        if isinstance(bt, pd.Timestamp)
+                        else pd.Timestamp(bt).tz_localize("UTC")
+                    )
+                    best_time_mjd = float(Time(bt_ts.to_pydatetime()).mjd)
+            except Exception:
+                best_time_mjd = None
 
         ra_val = row.get("RA_deg")
         ra_float = float(ra_val) if pd.notna(ra_val) else None
@@ -513,6 +1029,7 @@ def _prepare_window_candidates(
             "RA_deg": row["RA_deg"],
             "Dec_deg": row["Dec_deg"],
             "best_time_utc": row["best_time_utc"],
+            "best_time_mjd": best_time_mjd,
             "max_alt_deg": row["max_alt_deg"],
             "priority_score": row["priority_score"],
             "redshift": (
@@ -526,6 +1043,10 @@ def _prepare_window_candidates(
             "policy_allowed": policy_allowed,
             "moon_sep_ok": moon_sep_ok,
             "moon_sep": float(row["_moon_sep"]),
+            "moon_alt": float(row["_moon_alt"]),
+            "moon_phase": float(row["_moon_phase"]),
+            "sun_alt_policy": float(sun_alt_for_policy),
+            "airmass": float(airmass_from_alt_deg(row["max_alt_deg"])),
         }
         candidates.append(cand)
 
@@ -1551,18 +2072,112 @@ def plan_twilight_range_with_caps(
                     cyc = list(getattr(cfg, "first_filter_cycle_evening", []))
                     if cyc:
                         first_override = cyc[day_idx % len(cyc)]
-            available = {c["first_filter"] for c in candidates}
-            counts = Counter(c["first_filter"] for c in candidates)
-            batch_order = sorted(
-                available,
-                key=lambda f: (
-                    -counts.get(f, 0),
-                    pal_rot.index(f) if f in pal_rot else 99,
-                ),
-            )
-            if first_override in batch_order:
-                batch_order.remove(first_override)
-                batch_order.insert(0, first_override)
+            assignments: dict[str, str] = {}
+            dp_filter_sequence: list[str] | None = None
+            dp_counts: list[int] | None = None
+            if candidates:
+                cadence_params_base = {
+                    "cad_on": cad_on,
+                    "cad_tgt": cad_tgt,
+                    "cad_sig": cad_sig,
+                    "cad_wt": cad_wt,
+                    "cad_first": cad_first,
+                    "cad_jit": cad_jit,
+                    "diversity_enable": getattr(cfg, "diversity_enable", False),
+                    "diversity_target": getattr(cfg, "diversity_target_per_filter", 1),
+                    "diversity_window": getattr(cfg, "diversity_window_days", 5.0),
+                    "diversity_alpha": getattr(cfg, "diversity_alpha", 0.3),
+                }
+                now_mjd_window = Time(
+                    pd.Timestamp(win["start"]).tz_convert("UTC")
+                ).mjd
+                per_filter_pairs = _build_global_pairs_for_window(
+                    candidates,
+                    cfg,
+                    tracker,
+                    now_mjd_window,
+                    None,
+                    mag_lookup,
+                    cadence_params_base.copy(),
+                    phot_cfg,
+                    sky_cfg,
+                    cfg.sky_provider,
+                )
+                if per_filter_pairs:
+                    prefix_scores = _prefix_scores(per_filter_pairs)
+                    forced_first = (
+                        first_override if first_override in per_filter_pairs else None
+                    )
+                    plan_seq, plan_counts, _ = _plan_batches_by_dp(
+                        per_filter_pairs,
+                        prefix_scores,
+                        window_caps.get(idx_w, 0.0),
+                        cfg,
+                        forced_first,
+                    )
+                    if plan_seq and plan_counts:
+                        dp_filter_sequence = list(plan_seq)
+                        dp_counts = list(plan_counts)
+                        assigned_per_filter: Counter = Counter()
+                        for filt, take in zip(plan_seq, plan_counts):
+                            if take <= 0:
+                                continue
+                            pool = per_filter_pairs.get(filt, [])
+                            for item in pool:
+                                if item.name in assignments:
+                                    continue
+                                assignments[item.name] = filt
+                                assigned_per_filter[filt] += 1
+                                if assigned_per_filter[filt] >= take:
+                                    break
+                        if assignments:
+                            selected_candidates: list[dict] = []
+                            deferred_candidates: list[dict] = []
+                            for cand in candidates:
+                                name = cand["Name"]
+                                assigned = assignments.get(name)
+                                if assigned:
+                                    policy_allowed = list(
+                                        dict.fromkeys(cand.get("policy_allowed", []))
+                                    )
+                                    reorder = [assigned] + [
+                                        f for f in policy_allowed if f != assigned
+                                    ]
+                                    # Preserve any extra filters from 'allowed'
+                                    extra_allowed = [
+                                        f
+                                        for f in cand.get("allowed", [])
+                                        if f not in reorder
+                                    ]
+                                    cand["first_filter"] = assigned
+                                    cand["policy_allowed"] = reorder
+                                    cand["allowed"] = reorder + extra_allowed
+                                    selected_candidates.append(cand)
+                                else:
+                                    deferred_candidates.append(cand)
+                            if selected_candidates:
+                                candidates = selected_candidates
+                                if deferred_candidates:
+                                    existing_names = {c["Name"] for c in backfill_candidates}
+                                    for cand in deferred_candidates:
+                                        if cand["Name"] not in existing_names:
+                                            backfill_candidates.append(cand)
+                                            existing_names.add(cand["Name"])
+            if dp_filter_sequence:
+                batch_order = dp_filter_sequence
+            else:
+                available = {c["first_filter"] for c in candidates}
+                counts = Counter(c["first_filter"] for c in candidates)
+                batch_order = sorted(
+                    available,
+                    key=lambda f: (
+                        -counts.get(f, 0),
+                        pal_rot.index(f) if f in pal_rot else 99,
+                    ),
+                )
+                if first_override in batch_order:
+                    batch_order.remove(first_override)
+                    batch_order.insert(0, first_override)
 
             cap_s = window_caps.get(idx_w, 0.0)
             window_sum = 0.0
@@ -1664,7 +2279,7 @@ def plan_twilight_range_with_caps(
                     )
                 return True
 
-            for filt in batch_order:
+            for idx_filt, filt in enumerate(batch_order):
                 if nightly_cap is not None and len(seen_ids) >= nightly_cap:
                     break
                 batch = [
@@ -1673,17 +2288,30 @@ def plan_twilight_range_with_caps(
                     if c["first_filter"] == filt and c["Name"] not in seen_ids
                 ]
                 min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
+                dp_limit = dp_counts[idx_filt] if (dp_counts and idx_filt < len(dp_counts)) else None
+                exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
+                est_visit_s_base = (
+                    max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
+                    + cfg.slew_small_time_s
+                    + cfg.slew_settle_s
+                )
+                if dp_limit is not None and idx_filt > 0:
+                    payoff_thresh = (
+                        float(cfg.min_batch_payoff_s)
+                        if getattr(cfg, "min_batch_payoff_s", None) is not None
+                        else float(cfg.filter_change_s)
+                    )
+                    if est_visit_s_base * max(dp_limit, 1) < payoff_thresh:
+                        continue
+                scheduled_in_segment = 0
                 while batch:
                     if nightly_cap is not None and len(seen_ids) >= nightly_cap:
                         break
+                    if dp_limit is not None and scheduled_in_segment >= dp_limit:
+                        break
                     time_left = float(cap_s - window_sum)
-                    exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
                     # conservative per-visit wall time used for swap amortization
-                    est_visit_s = (
-                        max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
-                        + cfg.slew_small_time_s
-                        + cfg.slew_settle_s
-                    )
+                    est_visit_s = est_visit_s_base
                     k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
                     k = max(1, min(len(batch), k_time))
                     amortized_penalty = cfg.filter_change_s / k
@@ -1794,6 +2422,7 @@ def plan_twilight_range_with_caps(
                         continue
                     if _attempt_schedule(t):
                         seen_ids.add(sn_id)
+                        scheduled_in_segment += 1
 
             progress = True
             while (

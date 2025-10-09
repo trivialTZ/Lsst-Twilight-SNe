@@ -184,6 +184,12 @@ class PlannerConfig:
     palette_morning: List[str] = field(default_factory=lambda: ["g", "r", "i", "z"])
     max_swaps_per_window: int = 2
     first_epoch_color_boost: float = 1.5
+    swap_boost: float = 0.95
+    dp_time_mode: bool = False
+    n_estimate_mode: Literal["guard_plus_exp", "per_filter"] = "guard_plus_exp"
+    dp_hysteresis_theta: float = 0.02
+    dp_max_swaps: Optional[int] = None
+    min_batch_payoff_s: Optional[float] = None
 
     # -- Redshift prioritization -----------------------------------------
     redshift_boost_enable: bool = True

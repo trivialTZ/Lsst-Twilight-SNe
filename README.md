@@ -105,6 +105,29 @@ An inter‑exposure guard of 15 s is enforced. If the natural overhead
 idle time is inserted before the next exposure; this guard is accounted for in
 window cap checks and reported in summaries.
 
+### DP filter planning (global SN/filter pool)
+
+Within each twilight window the planner now builds a **global pool of
+(supernova, filter)** candidates that pass the Sun-alt, Moon, cadence, and
+m₅/SNR feasibility gates.  Guard-aware visit durations combine the 15 s
+inter-exposure minimum, slew + settle time, and saturation-capped exposure
+(`compute_capped_exptime`).  A compact dynamic program allocates those visits
+across filters while charging the full **120 s Rubin filter-change penalty**.
+The DP works in “visit units”, choosing how many batches to execute in each
+filter so that only swaps with sufficient science payoff survive.  Key tuning
+knobs in `PlannerConfig`:
+
+- `swap_boost` — slight <1 multiplier applied to post-swap batches (default 0.95).
+- `dp_hysteresis_theta` — require a % improvement before accepting a swap plan.
+- `n_estimate_mode` — fast visit-count mode (`"guard_plus_exp"`) or per-filter visit units.
+- `dp_max_swaps` — optional hard cap for the DP (defaults to `max_swaps_per_window`).
+- `min_batch_payoff_s` — minimum wall-clock payoff needed to justify a swap (defaults to `filter_change_s` if unset).
+- `dp_time_mode` (experimental) — enable a time-budget DP instead of visit counts.
+
+The resulting filter sequence and per-filter visit counts drive the existing
+execution loop, which still routes within a batch by the usual score density
+heuristic (score divided by guard-aware visit cost) and honors cadence gates.
+
 Moon–target separations use Astropy's `get_body('moon')` in a shared AltAz
 frame. If the Moon is below the horizon, the separation requirement is
 automatically waived.

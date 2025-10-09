@@ -197,10 +197,77 @@ used for the filename prefix.
 - Rank by priority/altitude, drop non‑positive scores for ``unique_first``, then
 - apply a stratified cap per twilight window based on ``max_sn_per_night``
   (default infinity).
-- Within each window, schedule via greedy nearest‑neighbor on great‑circle distance
-  with a dynamic filter batch order: filters requested by more candidates as
-  their first filter are processed earlier (palette order provides tie‑breaks),
-  constrained by per‑SN and per‑window time caps.
+- Within each window, build a global pool of `(SN, filter)` pairs that pass Sun-altitude,
+  Moon, cadence, and m₅/SNR gates.  Guard-aware visit durations combine the 15 s
+  inter-exposure minimum, slew+settle, and saturation-capped exposure time. A compact
+  dynamic program allocates visits across filters, explicitly charging the 120 s
+  filter-change cost.  Only swaps that beat the “stay put” plan by the configured
+  hysteresis survive.  The resulting filter sequence and per-filter visit counts drive
+  the execution loop, which still picks concrete targets within a batch by score density
+  (score ÷ guard-aware visit time) and honors cadence gates.
+
+**Math + Data Model**
+
+- **Guard-Aware Visit Time**
+  - For a single-band visit to target `sn` in filter `f` with saturation-aware exposure, the scheduler uses
+    ```math
+    t_{\rm visit}(sn,f) = \max(\texttt{inter\_exposure\_min\_s},\ \texttt{readout\_s} + t_{\rm slew}(\mathrm{prev}\to sn)+\texttt{settle\_s}) + t^{\rm cap}_{\rm exp}(sn,f).
+    ```
+    Here `t_exp^cap(sn,f)` is computed via `compute_capped_exptime` (source+sky saturation guard). In practice the 15 s guard dominates unless slews are large. External filter changes are charged once per swap via `filter_change_s` (Rubin ≈ 120 s).
+
+- **Visit Units (N, K)**
+  - Define a reference per-visit duration for the DP:
+    - `n_estimate_mode="guard_plus_exp"` (default): `t_ref = inter_exposure_min_s + median(exposure_by_filter)` after capping heuristics.
+    - `n_estimate_mode="per_filter"`: use band-specific units `t_unit(f) ≈ inter_exposure_min_s + exposure_f`.
+  - With `T_left` seconds remaining in the window:
+    ```math
+    N = \left\lfloor \frac{T_{\rm left}}{t_{\rm ref}} \right\rfloor,\qquad
+    K = \left\lfloor \frac{\texttt{filter\_change\_s}}{t_{\rm ref}} \right\rfloor\ (\ge 1) .
+    ```
+    `N` is the approximate number of single-band visits affordable; each swap consumes about `K` visit slots. The implementation guards `K≥1`.
+
+- **Pair Score `score(sn,f)`**
+  - Components (implemented in `scheduler.py`):
+    - Need: `PriorityTracker.peek_score(name, sn_type, strategy, now_mjd)` → 0/1.
+    - Low‑z boost: `PriorityTracker.redshift_boost(...)` and optional `low_z_ia_priority_multiplier` for very‑low‑z Ia.
+    - Bonus: `PriorityTracker.compute_filter_bonus(...)` (cadence Gaussian, per-filter diversity or blue/red deficit, cosmology weights, first‑epoch nudge).
+    - Optional SNR-margin gain: `ε⋅max(0, m5−mag)` with `cfg.dp_snr_margin_epsilon ∈ [0, 0.2]`.
+  - Combined multiplicatively to keep non‑negativity and smooth scaling:
+    ```math
+    \mathrm{score}(sn,f) = \mathrm{need}\times\mathrm{lowz}\times\big(1+\mathrm{bonus}\big)\times\big(1+\epsilon\,\mathrm{snr\_margin}\big).
+    ```
+
+- **Per-Filter Density and Prefix Sums**
+  - For each filter `f`, build `C_f = [(sn, score, time)]` where `time ≈ t_unit(f)` for planning. During execution, the exact `t_visit(sn,f)` is re-checked with the real slew/guard.
+  - For ranking, apply a guard-aware residual slew (if a previous target exists):
+    ```math
+    \mathrm{residual\_slew}(sn) = \max\big(0,\ \texttt{readout\_s} + t_{\rm slew}(\mathrm{prev}\to sn)+\texttt{settle\_s} - \texttt{inter\_exposure\_min\_s}\big).
+    ```
+    ```math
+    \mathrm{density}(sn,f) = \frac{\mathrm{score}(sn,f)}{t_{\rm unit}(f) + \mathrm{residual\_slew}(sn)}.
+    ```
+    Sort `C_f` by `density` desc, then build a prefix array `P_f[n] =` sum of the top‑`n` scores (see `_prefix_scores`).
+
+- **DP Over Swaps and Per-Filter Visit Counts**
+  - Swaps `s` are bounded by
+    ```math
+    s_{\max} = \min\!\Big(\texttt{max\_swaps\_per\_window},\ \Big\lfloor \frac{T_{\rm left}}{\texttt{filter\_change\_s}}\Big\rfloor,\ |\mathcal{F}|-1\Big).
+    ```
+  - If first‑filter cycling is enabled for the window, the DP forces `f_1` to the cycle’s band when available.
+  - For a given `s`, remaining slots after swaps are `N' = N − s⋅K`. Over a filter sequence `(f_1,…,f_{s+1})`, allocate visit counts `(N_1,…,N_{s+1})` with `∑N_i=N'` using prefix sums:
+    - Base: `DP[1][n] = P_{f1}[n]`
+    - Transition with swap discount: `DP[j][n] = max_{0≤x≤n} DP[j−1][n−x] + swap_boost⋅P_{f_j}[x]`
+    Backtrack to recover `(N_1,…,N_{s+1})`, and keep the best total across all `s` and valid starting filters. A small hysteresis `dp_hysteresis_theta` prefers the no‑swap baseline unless the swap plan beats it by that fractional margin. An additional guard `min_batch_payoff_s` avoids paying a swap for trivially small batches.
+  - Note: the default visit‑count DP is the active path; a wall‑time DP (`dp_time_mode`) is reserved in config but not used by the current scheduler.
+
+Key tuning knobs for the planner:
+
+- `swap_boost` — discount applied to post-swap batches (default 0.95) to avoid churning.
+- `dp_hysteresis_theta` — require the swap plan to beat the stay-put plan by this fractional margin.
+- `n_estimate_mode` — choose `"guard_plus_exp"` (fast visit-count DP) or `"per_filter"` for band-specific visit units.
+- `dp_max_swaps` — optional additional cap layered on top of `max_swaps_per_window`.
+- `min_batch_payoff_s` — minimum wall-clock payoff needed to justify a swap (defaults to `filter_change_s` if unset).
+- `dp_time_mode` — reserved in config; not used by the current scheduler.
 
 ### Filter feasibility (m5 / SNR gating)
 
@@ -228,7 +295,7 @@ used for the filename prefix.
 > - LSST-only light curve strategy: Every SN is pursued until the LC goal is met.
 > - Unique-first strategy: Observe each SN at most once per night to maximize distinct targets.
 > - Candidates are ranked nightly first by need score (how far from meeting the active goal) and then by their maximum altitude within the twilight window.
-> - Scheduling within each window uses a greedy nearest-neighbor approach on sky position to minimize slew time, constrained by per-SN and per-window time caps.
+> - Per-window scheduling now runs a compact dynamic program over `(SN, filter)` pairs.  The DP chooses how many visits to allocate per filter (and how many swaps to pay) while charging the full 120 s filter-change overhead.  Execution then proceeds filter by filter, picking high score-density targets and enforcing per-SN/per-window caps.
 
 ### Slews & Overheads
 - Two‑regime slew: small moves ≤3.5° take ≈4 s; larger moves add $t_{\rm slew} \approx 4\,\mathrm{s} + \frac{\max(0,\Delta\theta-3.5^\circ)}{5.25^\circ/\mathrm{s}} + 1\,\mathrm{s}_{\rm settle}$

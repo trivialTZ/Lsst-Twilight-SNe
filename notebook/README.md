@@ -10,7 +10,7 @@ The planner schedules supernova (SN) observations during astronomical twilight b
 
 - **Science constraints**: target altitude, Moon separation (scaled by Moon altitude/phase), twilight sky brightness, and typical post-discovery visibility windows by SN type.
 - **Engineering constraints**: slew and settle times, readout, filter-change overheads, carousel capacity, and per-window time caps.
-- **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth), batching by the first filter with a dynamic batch order (filters with more first‑filter demand go first; palette provides tie‑breaks), and greedy routing to minimize combined slew and filter-change cost.
+- **Strategy**: hybrid priority scheme ("quick color → escalate" or light-curve depth) paired with a guard-aware dynamic program over `(SN, filter)` pairs. The DP allocates visits across filters while charging the 120 s carousel swap cost; execution inside each batch still uses the score-density / slew heuristic to pick individual targets.
 - **Guard spacing**: a minimum inter-exposure spacing of 15 s is enforced. Readout overlaps with slewing, so the natural inter-visit gap is max(slew, readout) + cross-filter-change. If natural overheads are shorter, idle guard time is inserted before the next exposure. Guard time is accounted for prior to window cap checks and reported in per-row and per-window summaries.
 
 ### Cadence constraint (per-filter)
@@ -65,7 +65,7 @@ For each window index `idx_w` present that night:
    - Enforce Sun‑alt policy via `allowed_filters_for_sun_alt(sun_alt, cfg)` (strict: anything outside policy is dropped).
    - For each allowed filter, check Moon separation with `effective_min_sep` (dynamic with Moon altitude/phase).
    - Choose the first filter for this target via `pick_first_filter_for_target(...)`, which accounts for priority stage, Moon OK flags, current carousel state, and (if available) the target’s current magnitudes. Discard the target if none qualifies.
-3. **Batch by first filter**: group targets by their chosen first filter. A rotating palette (`palette_evening`/`palette_morning` shifted by `palette_rotation_days`) sets the batch order; any remaining filters are appended by decreasing 5σ depth.
+3. **Plan filter sequence via DP**: build a global pool of `(SN, filter)` pairs that pass Sun-alt, Moon, cadence, and m₅/SNR gates. Estimate guard-aware visit durations (max of 15 s inter-exposure guard vs. readout+slew plus the saturation-capped exposure) and run a small dynamic program that decides how many visits to take in each filter while explicitly charging the 120 s filter-change penalty.  The DP respects `max_swaps_per_window`, optional cycle overrides, and the new knobs (`swap_boost`, `dp_hysteresis_theta`, `n_estimate_mode`, `dp_max_swaps`, `min_batch_payoff_s`, `dp_time_mode`). When the DP cannot improve on “stay in the current filter,” the notebook falls back to the palette order.
 4. **Greedy routing with time‑packing under the window cap**:
    - Maintain `window_sum`, previous target `prev`, and current loaded filter state.
    - Within each batch, repeatedly pick the next target by minimizing slew time plus a cross-target filter-change penalty. The penalty is amortized over the batch size, scaled down if the new filter supplies a missing color, and skipped when the swap cap for the window is reached. (This “cost” is for ordering only; the booked time comes from the next step.)
@@ -114,7 +114,7 @@ Short twilight windows can starve specific bands (typically g). The notebook’s
   - `first_filter_cycle_enable=True`
   - Morning: `first_filter_cycle_morning=['g','r']`
   - Evening: `first_filter_cycle_evening=['z','i']`
-- The selected filter is placed at the head of the per‑window batch order; remaining filters follow the palette (e.g., `palette_morning=['g','r','i','z']`, `palette_evening=['z','i','r','g']`).
+- The selected filter seeds the DP’s first segment.  If the DP finds a profitable swap plan, its filter sequence is used verbatim; otherwise the notebook falls back to the palette order (e.g., `palette_morning=['g','r','i','z']`, `palette_evening=['z','i','r','g']`).
 
 With these two levers active, the planner tends to produce a much more even distribution across g/r/i/z without relaxing cadence or over‑swapping filters.
 
@@ -172,6 +172,8 @@ With these two levers active, the planner tends to produce a much more even dist
 - **Priority strategy:**  
   `PRIORITY_STRATEGY="hybrid"` with `HYBRID_DETECTIONS=2`, `HYBRID_EXPOSURE=300s`, `LC_DETECTIONS=5`, `LC_EXPOSURE=300s`.  
   Starts broad with quick detections; escalates to deeper coverage for promising SNe.
+- **Filter planning (DP):**  
+  `SWAP_BOOST=0.95`, `DP_HYSTERESIS_THETA=0.02`, `N_ESTIMATE_MODE="guard_plus_exp"` (fast visit counts) or `"per_filter"` for band-specific units, optional `DP_MAX_SWAPS=None` (falls back to `MAX_SWAPS_PER_WINDOW`), and `MIN_BATCH_PAYOFF_S=None` (defaults to `FILTER_CHANGE_S` when unset).  `DP_TIME_MODE=False` keeps the cheaper visit-count DP; set to `True` to experiment with a time-budget variant.
 - **Photometry / Sky:**
   `PIXEL_SCALE_ARCSEC=0.2` (Rubin pixel scale), `READ_NOISE_E=6` (typical 5.4–6.2 e⁻; requirement ≤9 e⁻ per LCA‑48‑J), `GAIN_E_PER_ADU=1.6` (measured ≈1.5–1.7 e⁻/ADU), `ZPT_ERR_MAG=0.01`, saturation threshold ≈8×10⁴ e⁻ by default.
   Dark‑sky surface brightnesses {u:23.05, g:22.25, r:21.20, i:20.46, z:19.61, y:18.60} mag/arcsec² (SMTN‑002); prefer `rubin_sim.skybrightness` when available. `TWILIGHT_DELTA_MAG=2.5` is an approximate fallback. Airmass uses the Kasten–Young (1989) approximation.
