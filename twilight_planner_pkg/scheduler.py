@@ -160,10 +160,12 @@ def _is_low_z_ia(sn_type, redshift, cfg: PlannerConfig) -> bool:
         z = float(redshift) if redshift is not None else math.nan
     except Exception:
         z = math.nan
-    if not (
-        isinstance(cfg.low_z_ia_z_threshold, (int, float))
-        and z < cfg.low_z_ia_z_threshold
-    ):
+    z_thresh = getattr(cfg, "low_z_ia_z_threshold", PlannerConfig.low_z_ia_z_threshold)
+    try:
+        z_thresh_val = float(z_thresh)
+    except Exception:
+        z_thresh_val = math.nan
+    if not (np.isfinite(z_thresh_val) and z < z_thresh_val):
         return False
     if sn_type is None:
         return False
@@ -634,7 +636,7 @@ def _plan_batches_by_dp(
             for j in range(1, length):
                 Pf = prefix_scores[seq[j]]
                 max_items = len(Pf) - 1
-                swap_mult = cfg.swap_boost if j > 0 else 1.0
+                swap_mult = getattr(cfg, "swap_boost", 1.0) if j > 0 else 1.0
                 for n in range(visit_slots + 1):
                     best_val = -np.inf
                     best_x = 0
@@ -679,6 +681,23 @@ def _plan_batches_by_dp(
         and best_total < (1.0 + theta) * base_total
     ):
         return (base_seq, base_counts or [], base_total)
+
+    if (
+        base_seq is not None
+        and base_counts is not None
+        and len(base_seq) > 0
+        and len(best_seq) > 1
+        and base_total > 0.0
+        and base_seq[0] == best_seq[0]
+    ):
+        base_visits = int(sum(base_counts))
+        if base_visits > 0:
+            avg_base_score = base_total / base_visits
+            swap_count = max(0, len(best_seq) - 1)
+            opportunity_cost = avg_base_score * swap_count * K
+            improvement = best_total - base_total
+            if improvement <= opportunity_cost:
+                return (base_seq, base_counts, base_total)
     return (best_seq, best_counts, best_total)
 
 
