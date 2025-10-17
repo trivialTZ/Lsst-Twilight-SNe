@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, OrderedDict
 
 import astropy.units as u
 import numpy as np
@@ -78,6 +78,296 @@ warnings.filterwarnings(
     "ignore",
     message="Angular separation can depend on the direction of the transformation",
 )
+warnings.filterwarnings(
+    "ignore", message="Extrapolating twilight beyond a sun altitude of -11 degrees"
+)
+
+# ---------------------------
+# Per-window SKY / M5 caches
+# ---------------------------
+_CACHE_TOKEN: int = 0  # bumped per twilight window
+_SKY_CACHE: dict[tuple[int, int, int, str, int, int], float] = {}
+_M5_CACHE: dict[tuple[int, str, str, int], float] = {}
+# Persistent best-time m5 cache (cross-window)
+_M5BEST_LRU: OrderedDict[tuple[str, str, int], float] = OrderedDict()
+_M5BEST_DEFAULT_MAX = 30_000
+_M5BEST_KEEP_DAYS_DEFAULT = 5
+
+
+def _mjd_bucket(mjd: float, minutes: int = 1) -> int:
+    """Quantize MJD to a per-minute bucket for caching."""
+    return int(round(float(mjd) * 1440.0 / max(1, minutes)))
+
+
+def _mjd_day(mjd: float) -> int:
+    """Return integer day bucket for persistent caches."""
+    return int(math.floor(float(mjd)))
+
+
+def _m5best_key(name: str, filt: str, best_mjd: float) -> tuple[str, str, int]:
+    return (str(name), str(filt), _mjd_day(best_mjd))
+
+
+def _m5best_cache_get(name: str | None, filt: str, best_mjd: float) -> Optional[float]:
+    """Return cached best-time m5 if present, touching LRU order."""
+    if not name:
+        return None
+    key = _m5best_key(name, filt, best_mjd)
+    cached = _M5BEST_LRU.get(key)
+    if cached is not None:
+        _M5BEST_LRU.move_to_end(key)
+    return cached
+
+
+def _m5best_cache_put(
+    cfg: PlannerConfig, name: str, filt: str, best_mjd: float, value: float
+) -> None:
+    """Insert/update best-time m5 value, trimming LRU size."""
+    key = _m5best_key(name, filt, best_mjd)
+    _M5BEST_LRU[key] = float(value)
+    _M5BEST_LRU.move_to_end(key)
+    try:
+        max_items = int(getattr(cfg, "m5best_cache_max_items", _M5BEST_DEFAULT_MAX))
+    except Exception:
+        max_items = _M5BEST_DEFAULT_MAX
+    if max_items <= 0:
+        _M5BEST_LRU.clear()
+        return
+    while len(_M5BEST_LRU) > max_items:
+        _M5BEST_LRU.popitem(last=False)
+
+
+def _m5best_cache_prune_by_day(cfg: PlannerConfig, current_mjd: float) -> None:
+    """Drop stale best-time m5 entries beyond the configured day horizon."""
+    try:
+        keep_days = int(
+            getattr(cfg, "m5best_cache_keep_days", _M5BEST_KEEP_DAYS_DEFAULT)
+        )
+    except Exception:
+        keep_days = _M5BEST_KEEP_DAYS_DEFAULT
+    if keep_days <= 0:
+        _M5BEST_LRU.clear()
+        return
+    min_day = _mjd_day(current_mjd) - keep_days
+    for key in list(_M5BEST_LRU.keys()):
+        if key[2] < min_day:
+            del _M5BEST_LRU[key]
+
+
+def _finite_or_none(val) -> float | None:
+    """Return float(val) if finite; otherwise None."""
+    try:
+        out = float(val)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _cached_sky_mag(
+    *,
+    sky_provider,
+    sky_cfg: SkyModelConfig,
+    ra_deg: float | None,
+    dec_deg: float | None,
+    band: str,
+    airmass: float,
+    mjd: float,
+    minutes: int = 1,
+    sun_alt_deg: float | None = None,
+    moon_alt_deg: float | None = None,
+    moon_phase: float | None = None,
+    moon_sep_deg: float | None = None,
+    k_band: float = 0.0,
+) -> float:
+    """Sky μ (mag/arcsec²) cached per-minute for the target geometry."""
+
+    bucket = _mjd_bucket(mjd, minutes)
+    try:
+        ra_val = float(ra_deg) if ra_deg is not None else None
+    except Exception:
+        ra_val = None
+    if ra_val is None or not math.isfinite(ra_val):
+        ra_q = 0
+    else:
+        ra_q = int(round(ra_val * 1e4))
+    try:
+        dec_val = float(dec_deg) if dec_deg is not None else None
+    except Exception:
+        dec_val = None
+    if dec_val is None or not math.isfinite(dec_val):
+        dec_q = 0
+    else:
+        dec_q = int(round(dec_val * 1e4))
+    try:
+        X_val = float(airmass)
+    except Exception:
+        X_val = 1.2
+    if not math.isfinite(X_val):
+        X_val = 1.2
+    X_q = int(round(X_val * 100.0))
+    key = (_CACHE_TOKEN, bucket, ra_q, band, dec_q, X_q)
+    cached = _SKY_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        if sky_provider is None:
+            raise RuntimeError("no sky provider configured")
+        sky_val = float(
+            sky_provider.sky_mag(
+                float(mjd),
+                float(ra_deg) if ra_deg is not None else None,
+                float(dec_deg) if dec_deg is not None else None,
+                band,
+                X_val,
+            )
+        )
+    except Exception:
+        sky_val = float(
+            sky_mag_arcsec2(
+                band,
+                sky_cfg,
+                sun_alt_deg=sun_alt_deg,
+                moon_alt_deg=moon_alt_deg,
+                moon_phase=moon_phase,
+                moon_sep_deg=moon_sep_deg,
+                airmass=X_val,
+                k_band=float(k_band),
+            )
+        )
+
+    _SKY_CACHE[key] = sky_val
+    return sky_val
+
+
+def _cached_m5_at_time(
+    *,
+    target: dict,
+    filt: str,
+    cfg: PlannerConfig,
+    phot_cfg: PhotomConfig,
+    sky_provider,
+    sky_cfg: SkyModelConfig,
+    mjd: float,
+    minutes: int = 1,
+    site: EarthLocation | None = None,
+    tag_best: bool = False,
+) -> Optional[float]:
+    """Return (and cache) m5 for a target/filter at the given MJD."""
+
+    name_fields = (
+        target.get("Name"),
+        target.get("name"),
+        target.get("ID"),
+        target.get("id"),
+    )
+    name: str | None = None
+    for val in name_fields:
+        if val is None:
+            continue
+        try:
+            text = str(val).strip()
+        except Exception:
+            continue
+        if text:
+            name = text
+            break
+    if not name:
+        return None
+
+    bucket = _mjd_bucket(mjd, minutes)
+    m5_key = (_CACHE_TOKEN, name, filt, bucket)
+    cached = _M5_CACHE.get(m5_key)
+    if cached is not None:
+        return cached
+    if tag_best:
+        best_cached = _m5best_cache_get(name, filt, mjd)
+        if best_cached is not None:
+            return best_cached
+
+    coord = _candidate_coord(target)
+    if coord is None:
+        return None
+    ra_deg, dec_deg = coord
+    site_loc = site
+    if site_loc is None:
+        site_loc = getattr(cfg, "_site_location_cache", None)
+        if site_loc is None:
+            site_loc = EarthLocation(
+                lat=float(cfg.lat_deg) * u.deg,
+                lon=float(cfg.lon_deg) * u.deg,
+                height=float(cfg.height_m) * u.m,
+            )
+            setattr(cfg, "_site_location_cache", site_loc)
+
+    try:
+        obstime = Time(float(mjd), format="mjd", scale="utc")
+        altaz_frame = AltAz(obstime=obstime, location=site_loc)
+        sc = SkyCoord(float(ra_deg) * u.deg, float(dec_deg) * u.deg, frame="icrs")
+        alt_deg = float(sc.transform_to(altaz_frame).alt.deg)
+    except Exception:
+        alt_deg = _finite_or_none(target.get("max_alt_deg")) or float("nan")
+
+    alt_val = _finite_or_none(alt_deg)
+    if alt_val is not None:
+        airmass = airmass_from_alt_deg(alt_val)
+    else:
+        alt_fallback = _finite_or_none(target.get("max_alt_deg"))
+        if alt_fallback is not None:
+            airmass = airmass_from_alt_deg(alt_fallback)
+        else:
+            airmass = _finite_or_none(target.get("airmass")) or 1.2
+    if not math.isfinite(airmass) or airmass <= 0.0:
+        airmass = 1.2
+
+    seeing = (
+        float(phot_cfg.fwhm_eff.get(filt, 0.83))
+        if getattr(phot_cfg, "fwhm_eff", None)
+        else 0.83
+    )
+    k_band = (
+        float(phot_cfg.k_m.get(filt, 0.0)) if getattr(phot_cfg, "k_m", None) else 0.0
+    )
+    t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
+
+    sun_alt = _finite_or_none(target.get("sun_alt_policy"))
+    moon_alt = _finite_or_none(target.get("moon_alt"))
+    moon_phase = _finite_or_none(target.get("moon_phase"))
+    moon_sep = _finite_or_none(target.get("moon_sep"))
+
+    m_sky = _cached_sky_mag(
+        sky_provider=sky_provider,
+        sky_cfg=sky_cfg,
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+        band=filt,
+        airmass=airmass,
+        mjd=mjd,
+        minutes=minutes,
+        sun_alt_deg=sun_alt,
+        moon_alt_deg=moon_alt,
+        moon_phase=moon_phase,
+        moon_sep_deg=moon_sep,
+        k_band=k_band,
+    )
+    try:
+        m5_val = float(
+            _m5_scale(
+                filt,
+                m_sky_arcsec2=m_sky,
+                seeing_fwhm_arcsec=seeing,
+                airmass=airmass,
+                t_vis_s=t_vis,
+                k_m=k_band,
+            )
+        )
+    except Exception:
+        return None
+
+    _M5_CACHE[m5_key] = m5_val
+    if tag_best:
+        _m5best_cache_put(cfg, name, filt, mjd, m5_val)
+    return m5_val
 
 
 def _fmt_window(start: datetime | None, end: datetime | None, tz_local: tzinfo) -> str:
@@ -266,67 +556,31 @@ def _estimate_m5_for_pair(
 ) -> Optional[float]:
     """Return approximate 5σ depth for ``target`` in ``filt``."""
 
-    t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
-    seeing = (
-        float(phot_cfg.fwhm_eff.get(filt, 0.83))
-        if getattr(phot_cfg, "fwhm_eff", None)
-        else 0.83
+    best_mjd_val = _finite_or_none(target.get("best_time_mjd"))
+    tag_best = best_mjd_val is not None
+    mjd_use = best_mjd_val if tag_best else float(now_mjd)
+
+    site_loc = getattr(cfg, "_site_location_cache", None)
+    if site_loc is None:
+        site_loc = EarthLocation(
+            lat=float(cfg.lat_deg) * u.deg,
+            lon=float(cfg.lon_deg) * u.deg,
+            height=float(cfg.height_m) * u.m,
+        )
+        setattr(cfg, "_site_location_cache", site_loc)
+
+    return _cached_m5_at_time(
+        target=target,
+        filt=filt,
+        cfg=cfg,
+        phot_cfg=phot_cfg,
+        sky_provider=sky_provider,
+        sky_cfg=sky_cfg,
+        mjd=float(mjd_use),
+        minutes=1,
+        site=site_loc,
+        tag_best=tag_best,
     )
-    k_band = 0.0
-    if getattr(phot_cfg, "k_m", None):
-        k_band = float(phot_cfg.k_m.get(filt, 0.0))
-    sun_alt = float(target.get("sun_alt_policy", np.nan))
-    moon_alt = float(target.get("moon_alt", np.nan))
-    moon_phase = float(target.get("moon_phase", np.nan))
-    moon_sep = float(target.get("moon_sep", np.nan))
-    airmass = float(target.get("airmass", np.nan))
-    coord = _candidate_coord(target)
-    if sky_provider is not None and not isinstance(sky_provider, SimpleSkyProvider):
-        try:
-            m_sky = float(
-                sky_provider.sky_mag(
-                    target.get("best_time_mjd") or now_mjd,
-                    coord[0] if coord else None,
-                    coord[1] if coord else None,
-                    filt,
-                    airmass,
-                )
-            )
-        except Exception:
-            m_sky = sky_mag_arcsec2(
-                filt,
-                sky_cfg,
-                sun_alt,
-                moon_alt,
-                moon_phase,
-                moon_sep,
-                airmass,
-                k_band=k_band,
-            )
-    else:
-        m_sky = sky_mag_arcsec2(
-            filt,
-            sky_cfg,
-            sun_alt,
-            moon_alt,
-            moon_phase,
-            moon_sep,
-            airmass,
-            k_band=k_band,
-        )
-    try:
-        return float(
-            _m5_scale(
-                filt,
-                m_sky_arcsec2=m_sky,
-                seeing_fwhm_arcsec=seeing,
-                airmass=airmass,
-                t_vis_s=t_vis,
-                k_m=k_band,
-            )
-        )
-    except Exception:
-        return None
 
 
 def _visit_unit_time(
@@ -452,7 +706,7 @@ def _build_global_pairs_for_window(
     sky_cfg: SkyModelConfig,
     sky_provider,
 ) -> dict[str, list[PairItem]]:
-    """Return per-filter ``PairItem`` lists sorted by density."""
+    """Return per-filter ``PairItem`` lists sorted by score."""
 
     epsilon_snr = float(getattr(cfg, "dp_snr_margin_epsilon", 0.0) or 0.0)
     per_filter: dict[str, list[PairItem]] = defaultdict(list)
@@ -496,10 +750,10 @@ def _build_global_pairs_for_window(
             )
             if score <= 0.0:
                 continue
-            approx_time = _visit_unit_time(exp_s, prev_coord, coord, cfg)
-            residual = _residual_slew_cost(prev_coord, coord, cfg)
-            density_den = max(approx_time + residual, 1e-3)
-            density = score / density_den
+            # Use inter-exposure minimum plus exposure to approximate the visit time.
+            # Do not normalize scores by time; DP capacity is handled separately.
+            approx_time = float(cfg.inter_exposure_min_s + exp_s)
+            density = score
             item = PairItem(
                 name=target["Name"],
                 filt=filt,
@@ -513,7 +767,7 @@ def _build_global_pairs_for_window(
             per_filter[filt].append(item)
 
     for filt, items in per_filter.items():
-        items.sort(key=lambda it: it.density, reverse=True)
+        items.sort(key=lambda it: it.score, reverse=True)
     return per_filter
 
 
@@ -787,6 +1041,12 @@ def _log_day_status(
         filter_change = metrics.get("filter_change_s")
         if filter_change is not None:
             parts.append(f"Filter change time: {filter_change:.1f}s")
+        dp_time = metrics.get("dp_time_s")
+        if dp_time is not None:
+            parts.append(f"DP batch time used: {dp_time:.1f}s")
+        backfill_time = metrics.get("backfill_time_s")
+        if backfill_time is not None:
+            parts.append(f"backfill time used: {backfill_time:.1f}s")
         filters_used = metrics.get("filters_used")
         if filters_used:
             parts.append(f"Filters used: {filters_used}")
@@ -992,6 +1252,7 @@ def _prepare_window_candidates(
             mjd=Time(current_time_utc).mjd,
             ra_deg=ra_float,
             dec_deg=dec_float,
+            sky_lookup=_cached_sky_mag,
         )
         allowed = [f for f in allowed if f in cfg.filters]
         allowed_policy = _policy_filters_mid(sun_alt_for_policy, cfg)
@@ -1162,19 +1423,8 @@ def _attempt_schedule_one(
                 cad_tgt_eff = float(override)
     except Exception:
         pass
-    # Enforce single-filter visits when requested (primary DP batch execution).
-    if single_filter_mode:
-        cap_per_visit = 1
-        auto_color = False
-    else:
-        cap_per_visit = int(
-            getattr(
-                cfg,
-                "filters_per_visit_cap",
-                getattr(cfg, "max_filters_per_visit", 1),
-            )
-        )
-        auto_color = bool(getattr(cfg, "auto_color_pairing", True))
+    # Always execute single-filter visits (no automatic color pairing).
+    cap_per_visit = 1
 
     if cad_on:
         # Re-evaluate cadence at execution time:
@@ -1222,26 +1472,9 @@ def _attempt_schedule_one(
         first = (
             t["first_filter"] if t["first_filter"] in gated else max(gated, key=_bonus)
         )
-        rest = sorted([f for f in gated if f != first], key=_bonus, reverse=True)
-        filters_pref = [first]
-        if auto_color and cap_per_visit >= 2 and rest:
-            opp = tracker.RED if first in tracker.BLUE else tracker.BLUE
-            second = next((f for f in rest if f in opp), rest[0])
-            filters_pref.append(second)
-            rest = [f for f in rest if f != second]
-        filters_pref.extend(rest)
-        filters_pref = filters_pref[:cap_per_visit]
+        filters_pref = [first]  # single-filter only
     else:
-        filters_pref = [t["first_filter"]] + [
-            f for f in t["allowed"] if f != t["first_filter"]
-        ]
-        if auto_color and cap_per_visit >= 2 and len(filters_pref) > 1:
-            first = filters_pref[0]
-            rest = filters_pref[1:]
-            opp = tracker.RED if first in tracker.BLUE else tracker.BLUE
-            second = next((f for f in rest if f in opp), rest[0])
-            filters_pref = [first, second] + [f for f in rest if f != second]
-        filters_pref = filters_pref[:cap_per_visit]
+        filters_pref = [t["first_filter"]]  # single-filter only
     # When single_filter_mode is active we assume the carousel is already at the
     # desired filter for the visit (no cross-filter change at segment entry), so
     # we pass current_filter as the target's first_filter to suppress cross cost.
@@ -1571,6 +1804,8 @@ def _build_window_summary_row(
         "unique_targets_observed": int(unique_targets_observed),
         "repeat_fraction": round(repeat_fraction, 3),
         "sum_time_s": round(ws_summary["window_sum"], 1),
+        "dp_time_s": round(float(ws_summary.get("dp_time_s", 0.0)), 1),
+        "backfill_time_s": round(float(ws_summary.get("backfill_time_s", 0.0)), 1),
         "window_cap_s": int(cap_s),
         "swap_count": int(ws_summary.get("swap_count", 0)),
         "internal_filter_changes": int(ws_summary["internal_changes"]),
@@ -1662,8 +1897,31 @@ def plan_twilight_range_with_caps(
         Summary of time usage for each night and window.
     """
     Path(outdir).mkdir(parents=True, exist_ok=True)
+    # Opt-in lightweight timing (prints only if cfg.debug_timing=True)
+    try:
+        import time as _time  # local alias
+    except Exception:  # pragma: no cover
+        _time = None  # type: ignore
+    timing_enabled = bool(getattr(cfg, "debug_timing", False)) and (_time is not None)
+    class _Timer:
+        def __init__(self, enabled: bool):
+            self.enabled = enabled
+            self.last = _time.monotonic() if _time else 0.0
+        def mark(self, label: str):
+            if not self.enabled or _time is None:
+                return
+            now = _time.monotonic()
+            dt = now - self.last
+            print(f"[timing] {label}: {dt:.3f}s")
+            self.last = now
+        def reset(self):
+            if _time is not None:
+                self.last = _time.monotonic()
+    _t = _Timer(timing_enabled)
     raw = pd.read_csv(csv_path)
+    _t.mark("read_csv")
     df = standardize_columns(raw, cfg)
+    _t.mark("standardize_columns")
     # Optional: restrict to Ia-like types
     try:
         if getattr(cfg, "only_ia", False):
@@ -1677,6 +1935,7 @@ def plan_twilight_range_with_caps(
     from .io_utils import build_mag_lookup_with_fallback
 
     mag_lookup = build_mag_lookup_with_fallback(df, cfg)
+    _t.mark("build_mag_lookup_with_fallback")
 
     phot_cfg = PhotomConfig(
         pixel_scale_arcsec=cfg.pixel_scale_arcsec,
@@ -1700,6 +1959,7 @@ def plan_twilight_range_with_caps(
     except Exception:
         sky_provider = SimpleSkyProvider(sky_cfg, site=site)
     cfg.sky_provider = sky_provider
+    _t.mark("init_sky_provider")
 
     # Helpers for in-batch global ordering based on sky+airmass opportunity cost
     def _m5_at_time(t: dict, filt: str, mjd: float | None) -> Optional[float]:
@@ -1707,74 +1967,25 @@ def plan_twilight_range_with_caps(
         if mjd is None:
             return None
         try:
-            ra = float(t.get("RA_deg"))
-            dec = float(t.get("Dec_deg"))
+            mjd_val = float(mjd)
         except Exception:
             return None
-        try:
-            sc = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
-            alt = float(sc.transform_to(AltAz(obstime=Time(mjd, format="mjd"), location=site)).alt.deg)
-        except Exception:
-            alt = float(t.get("max_alt_deg", np.nan))
-        X = airmass_from_alt_deg(alt)
-        seeing = (
-            float(phot_cfg.fwhm_eff.get(filt, 0.83))
-            if getattr(phot_cfg, "fwhm_eff", None)
-            else 0.83
+        best_mjd_val = _finite_or_none(t.get("best_time_mjd"))
+        tag_best = bool(
+            best_mjd_val is not None and abs(best_mjd_val - mjd_val) < 5e-7
         )
-        k_band = 0.0
-        if getattr(phot_cfg, "k_m", None):
-            k_band = float(phot_cfg.k_m.get(filt, 0.0))
-        t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
-
-        # Sky brightness
-        m_sky: Optional[float]
-        m_sky = None
-        if sky_provider is not None:
-            try:
-                m_sky = float(sky_provider.sky_mag(float(mjd), ra, dec, filt, X))
-            except Exception:
-                m_sky = None
-        if m_sky is None or not math.isfinite(m_sky):
-            # Fallback: derive Sun/Moon geometry quickly; tolerate failures
-            try:
-                t_ = Time(mjd, format="mjd", scale="utc")
-                altaz = AltAz(obstime=t_, location=site)
-                sun_alt = float(get_sun(t_).transform_to(altaz).alt.deg)
-                from astropy.coordinates import get_body
-                moon_altaz = get_body("moon", t_).transform_to(altaz)
-                moon_alt = float(moon_altaz.alt.deg)
-                tgt_altaz = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs").transform_to(altaz)
-                moon_sep = float(moon_altaz.separation(tgt_altaz).deg)
-                phase = 0.5 * (1.0 - np.cos(np.deg2rad(moon_altaz.separation(get_sun(t_).transform_to(altaz)).deg)))
-            except Exception:
-                sun_alt = None  # type: ignore[assignment]
-                moon_alt = None  # type: ignore[assignment]
-                moon_sep = None  # type: ignore[assignment]
-                phase = None  # type: ignore[assignment]
-            m_sky = sky_mag_arcsec2(
-                filt,
-                sky_cfg,
-                sun_alt,
-                moon_alt,
-                phase,
-                moon_sep,
-                X,
-                k_band=k_band,
-            )
-        try:
-            return float(
-                _m5_scale(
-                    filt,
-                    m_sky_arcsec2=float(m_sky),
-                    seeing_fwhm_arcsec=seeing,
-                    airmass=X,
-                    t_vis_s=t_vis,
-                    k_m=k_band,
-                )
-            )
-        except Exception:
-            return None
+        return _cached_m5_at_time(
+            target=t,
+            filt=filt,
+            cfg=cfg,
+            phot_cfg=phot_cfg,
+            sky_provider=sky_provider,
+            sky_cfg=sky_cfg,
+            mjd=mjd_val,
+            minutes=1,
+            site=site,
+            tag_best=tag_best,
+        )
 
     def _opportunity_cost_seconds(t: dict, filt: str, est_visit_s: float, now_mjd: float) -> float:
         """Extra seconds required if observing now vs best-in-window.
@@ -1873,6 +2084,9 @@ def plan_twilight_range_with_caps(
     tz_local = _local_timezone_from_location(site)
 
     for day_idx, day in enumerate(nights_iter):
+        _t.reset()
+        if timing_enabled:
+            print(f"[timing] === {day.date()} start ===")
         # day-batched collectors (used when streaming)
         day_pernight_rows: List[Dict] = []
         day_sequence_rows: List[Dict] = []
@@ -1893,6 +2107,7 @@ def plan_twilight_range_with_caps(
             cfg.twilight_sun_alt_min_deg,
             cfg.twilight_sun_alt_max_deg,
         )
+        _t.mark("twilight_windows_for_local_night")
         if not windows:
             continue
         evening_start: datetime | None = None
@@ -1986,6 +2201,7 @@ def plan_twilight_range_with_caps(
             & (df["discovery_datetime"] <= cutoff)
             & (df["discovery_datetime"] >= min_allowed_disc_each)
         ].copy()
+        _t.mark("discovery_window_filtering")
         if subset.empty:
             _log_day_status(
                 day.date().isoformat(),
@@ -2013,6 +2229,7 @@ def plan_twilight_range_with_caps(
             precomp_by_idx[idx_w] = precompute_window_ephemerides(
                 (w["start"], w["end"]), site, cfg.twilight_step_min
             )
+        _t.mark("precompute_window_ephemerides")
         for _, row in subset.iterrows():
             sc = SkyCoord(row["RA_deg"] * u.deg, row["Dec_deg"] * u.deg, frame="icrs")
             max_alt, max_time, max_idx = -999.0, None, None
@@ -2056,12 +2273,14 @@ def plan_twilight_range_with_caps(
         subset["max_alt_deg"] = best_alts
         subset["best_time_utc"] = best_times
         subset["best_window_index"] = best_winidx
+        _t.mark("best_time_scan_with_moon")
 
         visible = subset[
             (subset["best_time_utc"].notna())
             & (subset["max_alt_deg"] >= cfg.min_alt_deg)
             & (subset["best_window_index"] >= 0)
         ].copy()
+        _t.mark("visible_subset")
         if visible.empty:
             _log_day_status(
                 day.date().isoformat(),
@@ -2090,6 +2309,7 @@ def plan_twilight_range_with_caps(
             ),
             axis=1,
         )
+        _t.mark("priority_scoring_base")
         # Optional low-redshift boost for tie-breaking under the default (hybrid) strategy
         if (
             getattr(cfg, "redshift_boost_enable", True)
@@ -2108,6 +2328,7 @@ def plan_twilight_range_with_caps(
                 return float(base * boost)
 
             visible["priority_score"] = visible.apply(_apply_zboost, axis=1)
+            _t.mark("priority_scoring_zboost")
         # Stronger low-z Ia multiplier (configurable; disabled if =1.0)
         if (
             float(getattr(cfg, "low_z_ia_priority_multiplier", 1.0)) > 1.0
@@ -2124,12 +2345,14 @@ def plan_twilight_range_with_caps(
                 return base
 
             visible["priority_score"] = visible.apply(_apply_lowz_ia, axis=1)
+            _t.mark("priority_scoring_lowz_ia")
         if cfg.priority_strategy == "unique_first":
             thr = float(getattr(cfg, "unique_first_drop_threshold", 0.0))
             visible = visible[visible["priority_score"] > thr].copy()
         visible.sort_values(
             ["priority_score", "max_alt_deg"], ascending=[False, False], inplace=True
         )
+        _t.mark("sort_visible")
         pre_counts = (
             visible.groupby("best_window_index").size().to_dict()
             if "best_window_index" in visible.columns
@@ -2138,6 +2361,7 @@ def plan_twilight_range_with_caps(
         top_global, cap_diag = _cap_candidates_per_window(
             visible, cfg, evening_cap_s_val, morning_cap_s_val
         )
+        _t.mark("cap_candidates_per_window")
         post_counts = (
             top_global.groupby("best_window_index").size().to_dict()
             if "best_window_index" in top_global.columns
@@ -2155,8 +2379,15 @@ def plan_twilight_range_with_caps(
             # Skip unlabeled (previous/next day) twilight windows entirely
             if window_labels.get(idx_w) is None:
                 continue
-
             win = windows[idx_w]
+            win_start_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
+            global _CACHE_TOKEN, _SKY_CACHE, _M5_CACHE
+            _CACHE_TOKEN += 1
+            _SKY_CACHE.clear()
+            _M5_CACHE.clear()
+            _m5best_cache_prune_by_day(
+                cfg, current_mjd=float(Time(win_start_utc.to_pydatetime()).mjd)
+            )
             window_label = window_labels.get(idx_w)
             window_label_out = window_label if window_label else f"W{idx_w}"
             cad_on = getattr(cfg, "cadence_enable", True) and getattr(
@@ -2188,6 +2419,7 @@ def plan_twilight_range_with_caps(
                 cfg.sky_provider,
                 sky_cfg,
             )
+            _t.mark(f"prepare_window_candidates[{window_label_out}]")
             # Backfill pool for this window (lower-priority visibles)
             backfill_group = backfill_pool[
                 backfill_pool["best_window_index"] == idx_w
@@ -2213,6 +2445,7 @@ def plan_twilight_range_with_caps(
                     sky_cfg,
                 )
                 backfill_candidates = bfill_list
+                _t.mark(f"prepare_backfill_candidates[{window_label_out}]")
             # If both are empty, skip this window
             if not candidates and not backfill_candidates:
                 if override_applied:
@@ -2268,6 +2501,7 @@ def plan_twilight_range_with_caps(
                     sky_cfg,
                     cfg.sky_provider,
                 )
+                _t.mark(f"build_global_pairs[{window_label_out}]")
                 if per_filter_pairs:
                     prefix_scores = _prefix_scores(per_filter_pairs)
                     forced_first = (
@@ -2280,6 +2514,7 @@ def plan_twilight_range_with_caps(
                         cfg,
                         forced_first,
                     )
+                    _t.mark(f"dp_plan_batches[{window_label_out}]")
                     if plan_seq and plan_counts:
                         dp_filter_sequence = list(plan_seq)
                         dp_counts = list(plan_counts)
@@ -2354,6 +2589,8 @@ def plan_twilight_range_with_caps(
             window_skymags: List[float] = []
             filters_used_set: set[str] = set()
             state = current_filter_by_window.get(idx_w)
+            # Aggregate SIMLIB write time per window for diagnostics
+            simlib_write_s: float = 0.0
 
             deferred: list[dict] = []
             # Allow a single extra carousel swap during backfill if otherwise
@@ -2371,6 +2608,10 @@ def plan_twilight_range_with_caps(
             # ---- NEW: per-window running clock (UTC) for true order ----
             current_time_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
             order_in_window = 0
+            # ---- Accounting: track DP vs backfill time usage ----
+            dp_time_used: float = 0.0
+            backfill_time_used: float = 0.0
+            current_phase: str = "primary"
 
             def _attempt_schedule(
                 t: dict,
@@ -2382,6 +2623,8 @@ def plan_twilight_range_with_caps(
                 nonlocal window_sum, prev, internal_changes, window_filter_change_s
                 nonlocal state, window_slew_times, window_airmasses, window_skymags
                 nonlocal filters_used_set, current_time_utc, order_in_window, libid_counter
+                nonlocal simlib_write_s
+                nonlocal dp_time_used, backfill_time_used, current_phase
                 sfm = bool(single_filter_mode) if single_filter_mode is not None else False
                 window_state = {
                     "allow_defer": allow_defer,
@@ -2414,6 +2657,11 @@ def plan_twilight_range_with_caps(
                 if not scheduled:
                     return False
                 window_sum += effects["time_used_s"]
+                # Attribute time to DP (primary) or backfill phases
+                if current_phase == "primary" and dp_filter_sequence is not None:
+                    dp_time_used += effects["time_used_s"]
+                else:
+                    backfill_time_used += effects["time_used_s"]
                 updates = effects["state_updates"]
                 current_time_utc = updates["current_time_utc"]
                 state = updates["state_filter"]
@@ -2440,6 +2688,7 @@ def plan_twilight_range_with_caps(
                 sequence_rows_window.extend(effects["sequence_rows"])
                 day_sequence_rows.extend(effects["sequence_rows"])  # day batch
                 if writer and effects["simlib_epochs"]:
+                    _sim_t0 = _time.monotonic() if timing_enabled else None
                     libid_counter = _emit_simlib(
                         writer,
                         libid_counter,
@@ -2453,6 +2702,8 @@ def plan_twilight_range_with_caps(
                             else None
                         ),
                     )
+                    if timing_enabled and _sim_t0 is not None:
+                        simlib_write_s += max(0.0, (_time.monotonic() - _sim_t0))
                 return True
 
             for idx_filt, filt in enumerate(batch_order):
@@ -2466,11 +2717,12 @@ def plan_twilight_range_with_caps(
                 min_amort = cfg.filter_change_s / max(cfg.swap_amortize_min, 1)
                 dp_limit = dp_counts[idx_filt] if (dp_counts and idx_filt < len(dp_counts)) else None
                 exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
-                est_visit_s_base = (
-                    max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
-                    + cfg.slew_small_time_s
-                    + cfg.slew_settle_s
-                )
+                est_visit_s_base = float(exp_s) + float(cfg.inter_exposure_min_s)
+                segment_swap_charged = True
+                if dp_filter_sequence is not None:
+                    segment_swap_charged = idx_filt == 0
+                    if idx_filt == 0 and state != filt:
+                        state = filt
                 if dp_limit is not None and idx_filt > 0:
                     payoff_thresh = (
                         float(cfg.min_batch_payoff_s)
@@ -2606,14 +2858,37 @@ def plan_twilight_range_with_caps(
                                         scale = cfg.swap_cost_scale_color
                                     penalty = max(amortized_penalty, min_amort) * scale
                                     cost += penalty
-                        costs.append(cost)
+                            costs.append(cost)
+                    if (not costs) or (min(costs) >= 1e8):
+                        if batch:
+                            existing_names = {c["Name"] for c in backfill_candidates}
+                            for t_rem in batch:
+                                if t_rem["Name"] not in existing_names:
+                                    backfill_candidates.append(t_rem)
+                                    existing_names.add(t_rem["Name"])
+                        batch.clear()
+                        break
                     j = int(np.argmin(costs))
+                    if (
+                        dp_filter_sequence is not None
+                        and not segment_swap_charged
+                        and (state is None or state != filt)
+                    ):
+                        swap_dur = float(cfg.filter_change_s)
+                        window_filter_change_s += swap_dur
+                        window_sum += swap_dur
+                        current_time_utc = current_time_utc + pd.to_timedelta(
+                            swap_dur, unit="s"
+                        )
+                        state = filt
+                        swap_count_by_window[idx_w] = swap_count_by_window.get(idx_w, 0) + 1
+                        segment_swap_charged = True
                     t = batch.pop(j)
                     sn_id = t["Name"]
                     if sn_id in seen_ids:
                         continue
-                    # In DP hard-batch mode, force single-filter execution and suppress
-                    # cross-filter change by setting state to the batch filter.
+                    # DP hard-batch: always execute as single-filter visits,
+                    # assuming the carousel is already at the segment filter.
                     if dp_filter_sequence is not None:
                         scheduled_ok = _attempt_schedule(
                             t,
@@ -2625,35 +2900,16 @@ def plan_twilight_range_with_caps(
                     if scheduled_ok:
                         seen_ids.add(sn_id)
                         scheduled_in_segment += 1
+            # Merge deferred DP items into the backfill pool; handle after DP completes.
+            if deferred:
+                existing_names = {c["Name"] for c in backfill_candidates}
+                for tdef in deferred:
+                    if tdef["Name"] not in existing_names:
+                        backfill_candidates.append(tdef)
+                        existing_names.add(tdef["Name"])
+                deferred.clear()
 
-            progress = True
-            while (
-                progress
-                and deferred
-                and window_sum < cap_s
-                and (nightly_cap is None or len(seen_ids) < nightly_cap)
-            ):
-                progress = False
-                # iterate over a snapshot so we can remove items during iteration
-                for t in list(deferred):
-                    sn_id = t["Name"]
-                    if sn_id in seen_ids:
-                        deferred.remove(t)
-                        continue
-                    if dp_filter_sequence is not None:
-                        ok = _attempt_schedule(
-                            t,
-                            allow_defer=False,
-                            single_filter_mode=True,
-                            state_for_call=t.get("first_filter"),
-                        )
-                    else:
-                        ok = _attempt_schedule(t, allow_defer=False)
-                    if ok:
-                        deferred.remove(t)
-                        seen_ids.add(sn_id)
-                        progress = True
-
+            _t.mark(f"schedule_primary_and_deferred[{window_label_out}]")
             # If time remains and the nightly cap allows, try backfilling with
             # additional visible candidates not in the primary capped set.
             if (
@@ -2661,6 +2917,7 @@ def plan_twilight_range_with_caps(
                 and (nightly_cap is None or len(seen_ids) < nightly_cap)
                 and backfill_candidates
             ):
+                current_phase = "backfill"
                 # Rebuild palette for backfill candidates (can differ from primary)
                 available_bf = {c["first_filter"] for c in backfill_candidates}
                 counts_bf = Counter(c["first_filter"] for c in backfill_candidates)
@@ -2674,6 +2931,13 @@ def plan_twilight_range_with_caps(
                 if first_override in batch_order_bf:
                     batch_order_bf.remove(first_override)
                     batch_order_bf.insert(0, first_override)
+                # Prefer current carousel state to avoid an immediate swap
+                if state is not None and state in batch_order_bf:
+                    try:
+                        batch_order_bf.remove(state)
+                    except ValueError:
+                        pass
+                    batch_order_bf.insert(0, state)
 
                 # Check if any backfill candidate can run without a swap under
                 # current cadence gating and carousel state. If none, we permit
@@ -2742,11 +3006,7 @@ def plan_twilight_range_with_caps(
                             break
                         time_left = float(cap_s - window_sum)
                         exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
-                        est_visit_s = (
-                            max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
-                            + cfg.slew_small_time_s
-                            + cfg.slew_settle_s
-                        )
+                        est_visit_s = float(exp_s) + float(cfg.inter_exposure_min_s)
                         k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
                         k = max(1, min(len(batch), k_time))
                         amortized_penalty = cfg.filter_change_s / k
@@ -2903,6 +3163,7 @@ def plan_twilight_range_with_caps(
                 and (nightly_cap is None or len(seen_ids) < nightly_cap)
                 and (candidates or backfill_candidates)
             ):
+                current_phase = "backfill"
                 repeat_candidates = [
                     c
                     for c in (candidates + backfill_candidates)
@@ -2921,6 +3182,13 @@ def plan_twilight_range_with_caps(
                     if first_override in batch_order_rep:
                         batch_order_rep.remove(first_override)
                         batch_order_rep.insert(0, first_override)
+                    # Prefer current carousel state to minimize swap entering repeats
+                    if state is not None and state in batch_order_rep:
+                        try:
+                            batch_order_rep.remove(state)
+                        except ValueError:
+                            pass
+                        batch_order_rep.insert(0, state)
                     # Determine if a swap is unavoidable for repeats under current state
                     try:
                         now_mjd_rep = Time(current_time_utc).mjd
@@ -3001,11 +3269,7 @@ def plan_twilight_range_with_caps(
                                 break
                             time_left = float(cap_s - window_sum)
                             exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
-                            est_visit_s = (
-                                max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
-                                + cfg.slew_small_time_s
-                                + cfg.slew_settle_s
-                            )
+                            est_visit_s = float(exp_s) + float(cfg.inter_exposure_min_s)
                             k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
                             k = max(1, min(len(batch), k_time))
                             amortized_penalty = cfg.filter_change_s / k
@@ -3129,6 +3393,8 @@ def plan_twilight_range_with_caps(
                                 limit = int(getattr(cfg, "max_swaps_per_window", 999))
                                 if swap_count_by_window.get(idx_w, 0) > limit:
                                     backfill_extra_swap_used = True
+            _t.mark(f"schedule_repeats[{window_label_out}]")
+            _t.mark(f"schedule_backfill[{window_label_out}]")
 
             # Final last-resort relaxed backfill: only if time remains and
             # otherwise we'd leave the window under-utilized. This ignores
@@ -3141,6 +3407,7 @@ def plan_twilight_range_with_caps(
                 and (nightly_cap is None or len(seen_ids) < nightly_cap)
                 and (candidates or backfill_candidates)
             ):
+                current_phase = "backfill"
                 # Permit relaxed mode to revisit already observed targets, but
                 # keep unseen SNe ahead of repeats when picking the next visit.
                 relaxed_pool = list(candidates + backfill_candidates)
@@ -3156,6 +3423,13 @@ def plan_twilight_range_with_caps(
                             pal_rot.index(f) if f in pal_rot else 99,
                         ),
                     )
+                    # Prefer current state to avoid an immediate swap in relaxed mode
+                    if state is not None and state in batch_order_relax:
+                        try:
+                            batch_order_relax.remove(state)
+                        except ValueError:
+                            pass
+                        batch_order_relax.insert(0, state)
                     if first_override in batch_order_relax:
                         batch_order_relax.remove(first_override)
                         batch_order_relax.insert(0, first_override)
@@ -3169,11 +3443,7 @@ def plan_twilight_range_with_caps(
                                 break
                             time_left = float(cap_s - window_sum)
                             exp_s = float(cfg.exposure_by_filter.get(filt, 0.0))
-                            est_visit_s = (
-                                max(cfg.inter_exposure_min_s, cfg.readout_s + exp_s)
-                                + cfg.slew_small_time_s
-                                + cfg.slew_settle_s
-                            )
+                            est_visit_s = float(exp_s) + float(cfg.inter_exposure_min_s)
                             k_time = max(1, int(time_left // max(est_visit_s, 1.0)))
                             k = max(1, min(len(batch), k_time))
                             amortized_penalty = cfg.filter_change_s / k
@@ -3325,6 +3595,7 @@ def plan_twilight_range_with_caps(
                                 nonlocal window_sum, prev, internal_changes, window_filter_change_s
                                 nonlocal state, window_slew_times, window_airmasses, window_skymags
                                 nonlocal filters_used_set, current_time_utc, order_in_window, libid_counter
+                                nonlocal simlib_write_s
                                 window_state = {
                                     "allow_defer": False,
                                     "deferred": deferred,
@@ -3386,6 +3657,7 @@ def plan_twilight_range_with_caps(
                                     effects["sequence_rows"]
                                 )  # day batch
                                 if writer and effects["simlib_epochs"]:
+                                    _sim_t0b = _time.monotonic() if timing_enabled else None
                                     libid_counter = _emit_simlib(
                                         writer,
                                         libid_counter,
@@ -3399,12 +3671,15 @@ def plan_twilight_range_with_caps(
                                             else None
                                         ),
                                     )
+                                    if timing_enabled and _sim_t0b is not None:
+                                        simlib_write_s += max(0.0, (_time.monotonic() - _sim_t0b))
                                 return True
 
                             if _attempt_schedule_relaxed(t):
                                 if already_seen_main:
                                     repeat_counts[sn_id] = repeat_counts.get(sn_id, 0) + 1
                                 seen_ids.add(sn_id)
+            _t.mark(f"backfill_relaxed[{window_label_out}]")
             used_filters_csv = ",".join(sorted(filters_used_set))
             win = windows[idx_w]
             # Build window-local rows without scanning full history
@@ -3445,7 +3720,10 @@ def plan_twilight_range_with_caps(
                 "window_airmasses": window_airmasses,
                 "window_skymags": window_skymags,
                 "used_filters_csv": used_filters_csv,
+                "dp_time_s": dp_time_used,
+                "backfill_time_s": backfill_time_used,
                 "n_candidates": len(group),
+                "simlib_write_s": simlib_write_s,
                 "quota_assigned": (
                     cap_diag.get("quota_evening")
                     if idx_w == evening_idx
@@ -3471,6 +3749,7 @@ def plan_twilight_range_with_caps(
                 pernight_rows_for_window,
             )
             nights_rows.append(summary_row)
+            _t.mark(f"window_complete[{window_label_out}]")
             key_for_log: str | None = None
             if window_label_out.startswith("evening"):
                 key_for_log = "evening"
@@ -3481,6 +3760,8 @@ def plan_twilight_range_with_caps(
                 observing_raw = summary_row.get("sum_time_s")
                 filter_change_raw = summary_row.get("filter_change_s_total")
                 filters_used_raw = summary_row.get("filters_used_csv")
+                dp_time_raw = summary_row.get("dp_time_s")
+                backfill_time_raw = summary_row.get("backfill_time_s")
                 window_use_pct = None
                 try:
                     if util_raw is not None and not pd.isna(util_raw):
@@ -3499,6 +3780,18 @@ def plan_twilight_range_with_caps(
                         filter_change_s = float(filter_change_raw)
                 except Exception:
                     filter_change_s = None
+                dp_time_s = None
+                try:
+                    if dp_time_raw is not None and not pd.isna(dp_time_raw):
+                        dp_time_s = float(dp_time_raw)
+                except Exception:
+                    dp_time_s = None
+                backfill_time_s = None
+                try:
+                    if backfill_time_raw is not None and not pd.isna(backfill_time_raw):
+                        backfill_time_s = float(backfill_time_raw)
+                except Exception:
+                    backfill_time_s = None
                 filters_used: str | None
                 if isinstance(filters_used_raw, str) and filters_used_raw.strip():
                     filters_used = filters_used_raw
@@ -3508,6 +3801,8 @@ def plan_twilight_range_with_caps(
                     "window_use_pct": window_use_pct,
                     "observing_s": observing_s,
                     "filter_change_s": filter_change_s,
+                    "dp_time_s": dp_time_s,
+                    "backfill_time_s": backfill_time_s,
                     "filters_used": filters_used,
                 }
             if override_applied:
@@ -3531,6 +3826,7 @@ def plan_twilight_range_with_caps(
             verbose,
             window_usage_for_log,
         )
+        _t.mark("log_day_status")
 
         # Stream to disk at end of day to cap memory
         if stream_per_sn and day_pernight_rows:
@@ -3555,6 +3851,9 @@ def plan_twilight_range_with_caps(
             seq_header_written = True
             seq_count += len(df_seq_day)
             day_sequence_rows.clear()
+        _t.mark("build_summaries_and_stream")
+        if timing_enabled:
+            print(f"[timing] === {day.date()} end ===")
 
     pernight_df = pd.DataFrame(pernight_rows) if not stream_per_sn else pd.DataFrame()
     nights_df = pd.DataFrame(nights_rows)

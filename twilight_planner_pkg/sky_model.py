@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -272,6 +273,8 @@ class RubinSkyProvider:
             # Surface the first error; caller will catch and fall back to toy.
             raise errors[0]
         self.site = site
+        # Clip threshold for the parametric twilight component (deg)
+        self.sun_alt_min_deg: float = -11.0
 
     def sky_mag(
         self,
@@ -285,7 +288,12 @@ class RubinSkyProvider:
         az_sun_rel_deg: float = 90.0,
     ) -> float:
         import numpy as np
-
+        _catch = warnings.catch_warnings()
+        _catch.__enter__()
+        warnings.filterwarnings(
+            "ignore",
+            message="Extrapolating twilight beyond a sun altitude of -11 degrees",
+        )
         try:
             # Path A: use full geometry if given
             if mjd is not None and ra_deg is not None and dec_deg is not None:
@@ -317,6 +325,8 @@ class RubinSkyProvider:
                     )
                 if sun_alt_deg is None:
                     sun_alt_deg = -12.0
+                if sun_alt_deg < self.sun_alt_min_deg:
+                    sun_alt_deg = self.sun_alt_min_deg
                 # Be resilient to API changes: try common signatures
                 set_params_ok = False
                 for kwargs in (
@@ -364,6 +374,11 @@ class RubinSkyProvider:
         except Exception:
             # Absolute fallback: return a reasonable dark-sky value
             return DEFAULT_DARK_SKY_MAG.get(band, 21.0)
+        finally:
+            try:
+                _catch.__exit__(None, None, None)
+            except Exception:
+                pass
 
 
 def rubin_sim_mu_sky_by_sun_alt(

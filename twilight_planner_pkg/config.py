@@ -190,6 +190,12 @@ class PlannerConfig:
     dp_hysteresis_theta: float = 0.02
     dp_max_swaps: Optional[int] = None
     min_batch_payoff_s: Optional[float] = None
+    # In DP hard-batch execution, treat only the first segment as already
+    # positioned at its filter (no initial cross-filter swap cost). Subsequent
+    # DP segments will incur normal swap cost based on carousel state.
+    # Default False preserves legacy behaviour where every DP segment suppressed
+    # cross-filter cost.
+    dp_free_first_swap_only: bool = False
 
     # -- Redshift prioritization -----------------------------------------
     redshift_boost_enable: bool = True

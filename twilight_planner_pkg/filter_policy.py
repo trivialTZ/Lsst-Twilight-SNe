@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, Callable
 
 from .sky_model import SkyModelConfig, SimpleSkyProvider, sky_mag_arcsec2
 
@@ -82,6 +82,7 @@ def allowed_filters_for_window(
     mjd: Optional[float] = None,
     ra_deg: Optional[float] = None,
     dec_deg: Optional[float] = None,
+    sky_lookup: Optional[Callable[..., float]] = None,
 ) -> List[str]:
     """Select filters that are predicted to reach the target's magnitude.
 
@@ -170,12 +171,44 @@ def allowed_filters_for_window(
             k_band = float(phot_cfg.k_m.get(filt, 0.0))
 
         # Sky brightness per band
-        if use_provider is not None:
+        m_sky: Optional[float] = None
+        if (
+            sky_lookup is not None
+            and mjd is not None
+            and ra_deg is not None
+            and dec_deg is not None
+        ):
             try:
                 m_sky = float(
-                    use_provider.sky_mag(mjd, ra_deg, dec_deg, filt, airmass)
+                    sky_lookup(
+                        sky_provider=use_provider,
+                        sky_cfg=sky_cfg_local,
+                        ra_deg=float(ra_deg),
+                        dec_deg=float(dec_deg),
+                        band=filt,
+                        airmass=float(airmass),
+                        mjd=float(mjd),
+                        minutes=1,
+                        sun_alt_deg=float(sun_alt_deg),
+                        moon_alt_deg=float(moon_alt_deg),
+                        moon_phase=float(moon_phase),
+                        moon_sep_deg=float(moon_sep_deg),
+                        k_band=float(k_band),
+                    )
                 )
             except Exception:
+                m_sky = None
+        if m_sky is None:
+            if use_provider is not None:
+                try:
+                    m_sky = float(
+                        use_provider.sky_mag(
+                            mjd, ra_deg, dec_deg, filt, airmass  # type: ignore[arg-type]
+                        )
+                    )
+                except Exception:
+                    m_sky = None
+            if m_sky is None:
                 m_sky = sky_mag_arcsec2(
                     filt,
                     sky_cfg_local,
@@ -186,17 +219,6 @@ def allowed_filters_for_window(
                     airmass,
                     k_band=k_band,
                 )
-        else:
-            m_sky = sky_mag_arcsec2(
-                filt,
-                sky_cfg_local,
-                sun_alt_deg,
-                moon_alt_deg,
-                moon_phase,
-                moon_sep_deg,
-                airmass,
-                k_band=k_band,
-            )
 
         m5 = _m5_scale(
             filt,
