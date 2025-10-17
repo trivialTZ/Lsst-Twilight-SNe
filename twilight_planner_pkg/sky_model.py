@@ -162,7 +162,13 @@ class SkyProvider(Protocol):
 
 
 class SimpleSkyProvider:
-    """Sky provider using :func:`sky_mag_arcsec2` with optional Sun altitude."""
+    """Sky provider using sky_mag_arcsec2 with Sun+Moon at (RA,Dec,MJD).
+
+    When full geometry (MJD, RA/Dec and site) is available, compute Sun and
+    Moon terms at the target position and time. If any of those are missing,
+    fall back to the historical Sun‑only behavior using the configured
+    twilight offset.
+    """
 
     def __init__(self, cfg: SkyModelConfig, site: EarthLocation | None = None):
         self.cfg = cfg
@@ -176,17 +182,57 @@ class SimpleSkyProvider:
         band: str,
         airmass: float,
     ) -> float:
-        sun_alt_deg: float | None = None
-        if mjd is not None and self.site is not None:
-            t = Time(mjd, format="mjd", scale="utc")
-            sun_alt_deg = float(
-                get_sun(t).transform_to(AltAz(obstime=t, location=self.site)).alt.deg
+        # If time/site are missing, keep the simpler Sun‑only path
+        if mjd is None or self.site is None or ra_deg is None or dec_deg is None:
+            sun_alt_deg: float | None = None
+            if mjd is not None and self.site is not None:
+                t = Time(mjd, format="mjd", scale="utc")
+                sun_alt_deg = float(
+                    get_sun(t)
+                    .transform_to(AltAz(obstime=t, location=self.site))
+                    .alt.deg
+                )
+            return sky_mag_arcsec2(
+                band,
+                self.cfg,
+                sun_alt_deg=sun_alt_deg,
+                airmass=airmass,
             )
+
+        # Full geometry at (RA,Dec,MJD): include Moon altitude, separation and phase
+        import numpy as np
+        from astropy.coordinates import get_body, SkyCoord
+        import astropy.units as u
+
+        t = Time(mjd, format="mjd", scale="utc")
+        altaz = AltAz(obstime=t, location=self.site)
+        sc = SkyCoord(float(ra_deg) * u.deg, float(dec_deg) * u.deg, frame="icrs")
+        tgt_altaz = sc.transform_to(altaz)
+        sun_altaz = get_sun(t).transform_to(altaz)
+        moon_altaz = get_body("moon", t).transform_to(altaz)
+
+        sun_alt_deg = float(sun_altaz.alt.deg)
+        moon_alt_deg = float(moon_altaz.alt.deg)
+        moon_sep_deg = float(moon_altaz.separation(tgt_altaz).deg)
+        # Fractional illumination in [0,1] from Sun–Moon angle
+        phase = 0.5 * (1.0 - np.cos(np.deg2rad(moon_altaz.separation(sun_altaz).deg)))
+
+        # Prefer the passed airmass if finite; otherwise compute from current altitude
+        try:
+            X = float(airmass)
+        except Exception:
+            X = float("nan")
+        if not math.isfinite(X) or X < 1.0:
+            X = airmass_from_alt_deg(float(tgt_altaz.alt.deg))
+
         return sky_mag_arcsec2(
             band,
             self.cfg,
             sun_alt_deg=sun_alt_deg,
-            airmass=airmass,
+            moon_alt_deg=moon_alt_deg,
+            moon_phase=phase,
+            moon_sep_deg=moon_sep_deg,
+            airmass=X,
         )
 
 

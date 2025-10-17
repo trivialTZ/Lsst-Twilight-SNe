@@ -1110,6 +1110,7 @@ def _attempt_schedule_one(
         pass
 
     allow_defer: bool = window_state.get("allow_defer", True)
+    single_filter_mode: bool = bool(window_state.get("single_filter_mode", False))
     relax_cadence: bool = window_state.get("relax_cadence", False)
     deferred: list[dict] = window_state.get("deferred", [])
     window_sum: float = window_state.get("window_sum", 0.0)
@@ -1161,10 +1162,30 @@ def _attempt_schedule_one(
                 cad_tgt_eff = float(override)
     except Exception:
         pass
-    cap_per_visit = int(getattr(cfg, "filters_per_visit_cap", getattr(cfg, "max_filters_per_visit", 1)))
-    auto_color = bool(getattr(cfg, "auto_color_pairing", True))
+    # Enforce single-filter visits when requested (primary DP batch execution).
+    if single_filter_mode:
+        cap_per_visit = 1
+        auto_color = False
+    else:
+        cap_per_visit = int(
+            getattr(
+                cfg,
+                "filters_per_visit_cap",
+                getattr(cfg, "max_filters_per_visit", 1),
+            )
+        )
+        auto_color = bool(getattr(cfg, "auto_color_pairing", True))
 
     if cad_on:
+        # Re-evaluate cadence at execution time:
+        # - The DP step used a snapshot of time when building pairs, but actual
+        #   execution time (now_mjd) advances as we schedule/defer items.
+        # - Cadence eligibility depends on the actual observation time and the
+        #   last-visit history per filter, so a target can flip from gated-out
+        #   to permitted (or vice versa) between planning and execution.
+        # - In relaxed mode we intentionally ignore cadence gating to utilize
+        #   leftover time near the end of a window/backfill, trading strict
+        #   cadence for increased utilization.
         if relax_cadence:
             gated = list(t["policy_allowed"])  # ignore cadence gate in relaxed mode
         else:
@@ -1221,12 +1242,18 @@ def _attempt_schedule_one(
             second = next((f for f in rest if f in opp), rest[0])
             filters_pref = [first, second] + [f for f in rest if f != second]
         filters_pref = filters_pref[:cap_per_visit]
+    # When single_filter_mode is active we assume the carousel is already at the
+    # desired filter for the visit (no cross-filter change at segment entry), so
+    # we pass current_filter as the target's first_filter to suppress cross cost.
+    effective_current_filter = (
+        t["first_filter"] if single_filter_mode else state
+    )
     filters_used, timing = choose_filters_with_cap(
         filters_pref,
         sep,
         cfg.per_sn_cap_s,
         cfg,
-        current_filter=state,
+        current_filter=effective_current_filter,
         filters_per_visit_cap=cap_per_visit,
     )
     if not filters_used:
@@ -1293,19 +1320,29 @@ def _attempt_schedule_one(
     epochs: list[dict] = []
     sky_mags: list[float] = []
     air = 0.0
+    # Altitude at the actual visit start time
+    try:
+        sc_now = SkyCoord(float(t["RA_deg"]) * u.deg, float(t["Dec_deg"]) * u.deg, frame="icrs")
+        alt_now_deg = float(
+            sc_now.transform_to(AltAz(obstime=Time(sn_start_utc), location=site)).alt.deg
+        )
+    except Exception:
+        alt_now_deg = float(t.get("max_alt_deg", np.nan))
+    air = airmass_from_alt_deg(alt_now_deg)
+    # Update current context for any downstream consumers
+    cfg.current_alt_deg = alt_now_deg
+    cfg.current_ra_deg = float(t["RA_deg"]) if pd.notna(t.get("RA_deg", None)) else None
+    cfg.current_dec_deg = float(t["Dec_deg"]) if pd.notna(t.get("Dec_deg", None)) else None
+    cfg.current_mjd = visit_mjd
     for f in filters_used:
         exp_s = timing.get("exp_times", {}).get(f, cfg.exposure_by_filter.get(f, 0.0))
         flags = timing.get("flags_by_filter", {}).get(f, set())
-        alt_deg = float(t["max_alt_deg"])
-        air = airmass_from_alt_deg(alt_deg)
         mjd = visit_mjd
         if sky_provider:
-            sky_mag = sky_provider.sky_mag(
-                mjd, t["RA_deg"], t["Dec_deg"], f, airmass_from_alt_deg(alt_deg)
-            )
+            sky_mag = sky_provider.sky_mag(mjd, t["RA_deg"], t["Dec_deg"], f, air)
         else:
             sky_mag = sky_mag_arcsec2(f, sky_cfg)
-        eph = compute_epoch_photom(f, exp_s, alt_deg, sky_mag, phot_cfg)
+        eph = compute_epoch_photom(f, exp_s, alt_now_deg, sky_mag, phot_cfg)
         sky_mags.append(sky_mag)
         if writer_or_none:
             epochs.append(
@@ -1350,7 +1387,7 @@ def _attempt_schedule_one(
             "filter": f,
             "t_exp_s": round(exp_s, 1),
             "airmass": round(air, 3),
-            "alt_deg": round(alt_deg, 2),
+            "alt_deg": round(alt_now_deg, 2),
             "sky_mag_arcsec2": round(sky_mag, 2),
             "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
             "ZPT": round(eph.ZPTAVG, 3),
@@ -1402,9 +1439,12 @@ def _attempt_schedule_one(
         pernight_rows.append(row)
 
     swap_count_delta = 0
-    if state is not None and filters_used:
-        if state != filters_used[0]:
-            swap_count_delta = 1
+    # Do not count swaps for primary DP batches executing in single-filter mode
+    # (we assume the carousel is already at the requested filter for the batch).
+    if not single_filter_mode:
+        if state is not None and filters_used:
+            if state != filters_used[0]:
+                swap_count_delta = 1
     if filters_used:
         state = filters_used[-1]
 
@@ -1660,6 +1700,106 @@ def plan_twilight_range_with_caps(
     except Exception:
         sky_provider = SimpleSkyProvider(sky_cfg, site=site)
     cfg.sky_provider = sky_provider
+
+    # Helpers for in-batch global ordering based on sky+airmass opportunity cost
+    def _m5_at_time(t: dict, filt: str, mjd: float | None) -> Optional[float]:
+        """Return m5 at (RA,Dec,MJD) for ``t``/``filt`` using current configs."""
+        if mjd is None:
+            return None
+        try:
+            ra = float(t.get("RA_deg"))
+            dec = float(t.get("Dec_deg"))
+        except Exception:
+            return None
+        try:
+            sc = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
+            alt = float(sc.transform_to(AltAz(obstime=Time(mjd, format="mjd"), location=site)).alt.deg)
+        except Exception:
+            alt = float(t.get("max_alt_deg", np.nan))
+        X = airmass_from_alt_deg(alt)
+        seeing = (
+            float(phot_cfg.fwhm_eff.get(filt, 0.83))
+            if getattr(phot_cfg, "fwhm_eff", None)
+            else 0.83
+        )
+        k_band = 0.0
+        if getattr(phot_cfg, "k_m", None):
+            k_band = float(phot_cfg.k_m.get(filt, 0.0))
+        t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
+
+        # Sky brightness
+        m_sky: Optional[float]
+        m_sky = None
+        if sky_provider is not None:
+            try:
+                m_sky = float(sky_provider.sky_mag(float(mjd), ra, dec, filt, X))
+            except Exception:
+                m_sky = None
+        if m_sky is None or not math.isfinite(m_sky):
+            # Fallback: derive Sun/Moon geometry quickly; tolerate failures
+            try:
+                t_ = Time(mjd, format="mjd", scale="utc")
+                altaz = AltAz(obstime=t_, location=site)
+                sun_alt = float(get_sun(t_).transform_to(altaz).alt.deg)
+                from astropy.coordinates import get_body
+                moon_altaz = get_body("moon", t_).transform_to(altaz)
+                moon_alt = float(moon_altaz.alt.deg)
+                tgt_altaz = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs").transform_to(altaz)
+                moon_sep = float(moon_altaz.separation(tgt_altaz).deg)
+                phase = 0.5 * (1.0 - np.cos(np.deg2rad(moon_altaz.separation(get_sun(t_).transform_to(altaz)).deg)))
+            except Exception:
+                sun_alt = None  # type: ignore[assignment]
+                moon_alt = None  # type: ignore[assignment]
+                moon_sep = None  # type: ignore[assignment]
+                phase = None  # type: ignore[assignment]
+            m_sky = sky_mag_arcsec2(
+                filt,
+                sky_cfg,
+                sun_alt,
+                moon_alt,
+                phase,
+                moon_sep,
+                X,
+                k_band=k_band,
+            )
+        try:
+            return float(
+                _m5_scale(
+                    filt,
+                    m_sky_arcsec2=float(m_sky),
+                    seeing_fwhm_arcsec=seeing,
+                    airmass=X,
+                    t_vis_s=t_vis,
+                    k_m=k_band,
+                )
+            )
+        except Exception:
+            return None
+
+    def _opportunity_cost_seconds(t: dict, filt: str, est_visit_s: float, now_mjd: float) -> float:
+        """Extra seconds required if observing now vs best-in-window.
+
+        Uses Δm5 between the target's best time and now. Caps extreme values via
+        cfg.inbatch_cost_cap_s when present (default 600s).
+        """
+        m5_now = _m5_at_time(t, filt, now_mjd)
+        best_ts = t.get("best_time_utc")
+        if isinstance(best_ts, pd.Timestamp):
+            best_mjd = Time(best_ts.tz_convert("UTC")).mjd
+        elif best_ts is not None:
+            try:
+                best_mjd = Time(pd.Timestamp(best_ts).tz_localize("UTC")).mjd
+            except Exception:
+                best_mjd = None
+        else:
+            best_mjd = None
+        m5_best = _m5_at_time(t, filt, best_mjd) if best_mjd is not None else m5_now
+        if m5_now is None or m5_best is None:
+            return 0.0
+        delta_m = max(0.0, float(m5_best) - float(m5_now))
+        opp = float(est_visit_s) * (10 ** (0.8 * delta_m) - 1.0)
+        cap = float(getattr(cfg, "inbatch_cost_cap_s", 600.0))
+        return float(min(max(0.0, opp), cap))
 
     writer = None
     if cfg.simlib_out:
@@ -2232,22 +2372,33 @@ def plan_twilight_range_with_caps(
             current_time_utc = pd.Timestamp(win["start"]).tz_convert("UTC")
             order_in_window = 0
 
-            def _attempt_schedule(t: dict, allow_defer: bool = True) -> bool:
+            def _attempt_schedule(
+                t: dict,
+                allow_defer: bool = True,
+                *,
+                single_filter_mode: bool | None = None,
+                state_for_call: str | None = None,
+            ) -> bool:
                 nonlocal window_sum, prev, internal_changes, window_filter_change_s
                 nonlocal state, window_slew_times, window_airmasses, window_skymags
                 nonlocal filters_used_set, current_time_utc, order_in_window, libid_counter
+                sfm = bool(single_filter_mode) if single_filter_mode is not None else False
                 window_state = {
                     "allow_defer": allow_defer,
                     "deferred": deferred,
                     "window_sum": window_sum,
                     "cap_s": cap_s,
-                    "state": state,
+                    # In single-filter DP batch mode we treat the carousel as already
+                    # positioned at the batch filter; pass that here to suppress any
+                    # cross-filter change cost inside the batch.
+                    "state": (state_for_call if sfm and state_for_call else state),
                     "prev": prev,
                     "current_time_utc": current_time_utc,
                     "order_in_window": order_in_window,
                     "day": day,
                     "window_label_out": window_label_out,
                     "mag_lookup": mag_lookup,
+                    "single_filter_mode": sfm,
                 }
                 scheduled, effects = _attempt_schedule_one(
                     t,
@@ -2370,7 +2521,15 @@ def plan_twilight_range_with_caps(
                                 t["Name"], f, now_mjd_cost, cad_tgt_for_t, cad_jit
                             )
                         ]
-                        if gated_for_cost:
+                        hard_batches = dp_filter_sequence is not None
+                        if hard_batches:
+                            # In DP hard-batch mode we require the batch filter to be
+                            # cadence-eligible now; otherwise treat as ineligible.
+                            if filt not in gated_for_cost:
+                                first_tmp = None
+                            else:
+                                first_tmp = filt
+                        elif gated_for_cost:
 
                             def _bonus_cost(f: str) -> float:
                                 return tracker.compute_filter_bonus(
@@ -2409,7 +2568,7 @@ def plan_twilight_range_with_caps(
                                 t["Dec_deg"],
                             )
                         )
-                        cost = slew_time_seconds(
+                        slew_s = slew_time_seconds(
                             sep,
                             small_deg=cfg.slew_small_deg,
                             small_time=cfg.slew_small_time_s,
@@ -2418,34 +2577,52 @@ def plan_twilight_range_with_caps(
                         )
                         if first_tmp is None:
                             cost = 1e9
-                        elif state is not None and state != first_tmp:
-                            if swap_count_by_window.get(idx_w, 0) >= int(
-                                getattr(cfg, "max_swaps_per_window", 999)
-                            ):
-                                cost = 1e9
-                            else:
-                                scale = 1.0
-                                if (
-                                    tracker.cosmology_boost(
-                                        t["Name"],
-                                        first_tmp,
-                                        now_mjd_cost,
-                                        cfg.color_target_pairs,
-                                        cfg.color_window_days,
-                                        cfg.color_alpha,
-                                    )
-                                    > 1.0
+                        else:
+                            now_mjd_cost = Time(current_time_utc).mjd
+                            opp_s = _opportunity_cost_seconds(t, first_tmp, est_visit_s, now_mjd_cost)
+                            w_slew = float(getattr(cfg, "inbatch_slew_weight", 0.3))
+                            cost = opp_s + w_slew * float(slew_s)
+                            # In hard-batch mode ignore carousel state mismatch and any
+                            # swap penalty; otherwise apply original penalty logic.
+                            hard_batches = dp_filter_sequence is not None
+                            if (not hard_batches) and (state is not None and state != first_tmp):
+                                if swap_count_by_window.get(idx_w, 0) >= int(
+                                    getattr(cfg, "max_swaps_per_window", 999)
                                 ):
-                                    scale = cfg.swap_cost_scale_color
-                                penalty = max(amortized_penalty, min_amort) * scale
-                                cost += penalty
+                                    cost = 1e9
+                                else:
+                                    scale = 1.0
+                                    if (
+                                        tracker.cosmology_boost(
+                                            t["Name"],
+                                            first_tmp,
+                                            now_mjd_cost,
+                                            cfg.color_target_pairs,
+                                            cfg.color_window_days,
+                                            cfg.color_alpha,
+                                        )
+                                        > 1.0
+                                    ):
+                                        scale = cfg.swap_cost_scale_color
+                                    penalty = max(amortized_penalty, min_amort) * scale
+                                    cost += penalty
                         costs.append(cost)
                     j = int(np.argmin(costs))
                     t = batch.pop(j)
                     sn_id = t["Name"]
                     if sn_id in seen_ids:
                         continue
-                    if _attempt_schedule(t):
+                    # In DP hard-batch mode, force single-filter execution and suppress
+                    # cross-filter change by setting state to the batch filter.
+                    if dp_filter_sequence is not None:
+                        scheduled_ok = _attempt_schedule(
+                            t,
+                            single_filter_mode=True,
+                            state_for_call=filt,
+                        )
+                    else:
+                        scheduled_ok = _attempt_schedule(t)
+                    if scheduled_ok:
                         seen_ids.add(sn_id)
                         scheduled_in_segment += 1
 
@@ -2463,7 +2640,16 @@ def plan_twilight_range_with_caps(
                     if sn_id in seen_ids:
                         deferred.remove(t)
                         continue
-                    if _attempt_schedule(t, allow_defer=False):
+                    if dp_filter_sequence is not None:
+                        ok = _attempt_schedule(
+                            t,
+                            allow_defer=False,
+                            single_filter_mode=True,
+                            state_for_call=t.get("first_filter"),
+                        )
+                    else:
+                        ok = _attempt_schedule(t, allow_defer=False)
+                    if ok:
                         deferred.remove(t)
                         seen_ids.add(sn_id)
                         progress = True
@@ -2497,6 +2683,12 @@ def plan_twilight_range_with_caps(
                 except Exception:
                     now_mjd_bf = None
 
+                # During backfill, the schedule has progressed and the current
+                # time/state may differ from the DP planning snapshot. Re-check
+                # cadence here so we only pull candidates that are cadence-eligible
+                # at the exact backfill time (now_mjd_bf). This avoids scheduling
+                # a pair that was eligible earlier (or in a different order) but
+                # is no longer eligible after prior visits/deferrals.
                 def _passes_cad(t: dict) -> bool:
                     if not cad_on or now_mjd_bf is None:
                         return True
@@ -2632,7 +2824,7 @@ def plan_twilight_range_with_caps(
                                     t["Dec_deg"],
                                 )
                             )
-                            cost = slew_time_seconds(
+                            slew_s = slew_time_seconds(
                                 sep,
                                 small_deg=cfg.slew_small_deg,
                                 small_time=cfg.slew_small_time_s,
@@ -2641,28 +2833,33 @@ def plan_twilight_range_with_caps(
                             )
                             if first_tmp is None:
                                 cost = 1e9
-                            elif state is not None and state != first_tmp:
-                                limit = int(getattr(cfg, "max_swaps_per_window", 999))
-                                if swap_count_by_window.get(idx_w, 0) >= limit and not (
-                                    allow_extra_swap and not backfill_extra_swap_used
-                                ):
-                                    cost = 1e9
-                                else:
-                                    scale = 1.0
-                                    if (
-                                        tracker.cosmology_boost(
-                                            t["Name"],
-                                            first_tmp,
-                                            now_mjd_cost,
-                                            cfg.color_target_pairs,
-                                            cfg.color_window_days,
-                                            cfg.color_alpha,
-                                        )
-                                        > 1.0
+                            else:
+                                now_mjd_cost = Time(current_time_utc).mjd
+                                opp_s = _opportunity_cost_seconds(t, first_tmp, est_visit_s, now_mjd_cost)
+                                w_slew = float(getattr(cfg, "inbatch_slew_weight", 0.3))
+                                cost = opp_s + w_slew * float(slew_s)
+                                if state is not None and state != first_tmp:
+                                    limit = int(getattr(cfg, "max_swaps_per_window", 999))
+                                    if swap_count_by_window.get(idx_w, 0) >= limit and not (
+                                        allow_extra_swap and not backfill_extra_swap_used
                                     ):
-                                        scale = cfg.swap_cost_scale_color
-                                    penalty = max(amortized_penalty, min_amort) * scale
-                                    cost += penalty
+                                        cost = 1e9
+                                    else:
+                                        scale = 1.0
+                                        if (
+                                            tracker.cosmology_boost(
+                                                t["Name"],
+                                                first_tmp,
+                                                now_mjd_cost,
+                                                cfg.color_target_pairs,
+                                                cfg.color_window_days,
+                                                cfg.color_alpha,
+                                            )
+                                            > 1.0
+                                        ):
+                                            scale = cfg.swap_cost_scale_color
+                                        penalty = max(amortized_penalty, min_amort) * scale
+                                        cost += penalty
                             costs.append(cost)
                         j = int(np.argmin(costs))
                         t = batch.pop(j)
@@ -2730,6 +2927,13 @@ def plan_twilight_range_with_caps(
                     except Exception:
                         now_mjd_rep = None
 
+                    # For repeat visits within the same window, cadence must be
+                    # assessed again at the repeat decision point. The effective
+                    # "now" (now_mjd_rep) has advanced and earlier actions may
+                    # have updated last-visit times, so eligibility can change.
+                    # Re-checking here keeps repeats consistent with per-filter
+                    # cadence policy while permitting relaxed behavior elsewhere
+                    # when configured.
                     def _passes_cad_rep(t: dict) -> bool:
                         if not cad_on or now_mjd_rep is None:
                             return True
@@ -2855,7 +3059,7 @@ def plan_twilight_range_with_caps(
                                         t["Dec_deg"],
                                     )
                                 )
-                                cost = slew_time_seconds(
+                                slew_s = slew_time_seconds(
                                     sep,
                                     small_deg=cfg.slew_small_deg,
                                     small_time=cfg.slew_small_time_s,
@@ -2864,35 +3068,40 @@ def plan_twilight_range_with_caps(
                                 )
                                 if first_tmp is None:
                                     cost = 1e9
-                                elif state is not None and state != first_tmp:
-                                    limit = int(
-                                        getattr(cfg, "max_swaps_per_window", 999)
-                                    )
-                                    if swap_count_by_window.get(
-                                        idx_w, 0
-                                    ) >= limit and not (
-                                        allow_extra_swap_rep
-                                        and not backfill_extra_swap_used
-                                    ):
-                                        cost = 1e9
-                                    else:
-                                        scale = 1.0
-                                        if (
-                                            tracker.cosmology_boost(
-                                                t["Name"],
-                                                first_tmp,
-                                                now_mjd_cost,
-                                                cfg.color_target_pairs,
-                                                cfg.color_window_days,
-                                                cfg.color_alpha,
-                                            )
-                                            > 1.0
-                                        ):
-                                            scale = cfg.swap_cost_scale_color
-                                        penalty = (
-                                            max(amortized_penalty, min_amort) * scale
+                                else:
+                                    now_mjd_cost = Time(current_time_utc).mjd
+                                    opp_s = _opportunity_cost_seconds(t, first_tmp, est_visit_s, now_mjd_cost)
+                                    w_slew = float(getattr(cfg, "inbatch_slew_weight", 0.3))
+                                    cost = opp_s + w_slew * float(slew_s)
+                                    if state is not None and state != first_tmp:
+                                        limit = int(
+                                            getattr(cfg, "max_swaps_per_window", 999)
                                         )
-                                        cost += penalty
+                                        if swap_count_by_window.get(
+                                            idx_w, 0
+                                        ) >= limit and not (
+                                            allow_extra_swap_rep
+                                            and not backfill_extra_swap_used
+                                        ):
+                                            cost = 1e9
+                                        else:
+                                            scale = 1.0
+                                            if (
+                                                tracker.cosmology_boost(
+                                                    t["Name"],
+                                                    first_tmp,
+                                                    now_mjd_cost,
+                                                    cfg.color_target_pairs,
+                                                    cfg.color_window_days,
+                                                    cfg.color_alpha,
+                                                )
+                                                > 1.0
+                                            ):
+                                                scale = cfg.swap_cost_scale_color
+                                            penalty = (
+                                                max(amortized_penalty, min_amort) * scale
+                                            )
+                                            cost += penalty
                                 costs.append(cost)
                             j = int(np.argmin(costs))
                             t = batch.pop(j)
@@ -3020,7 +3229,7 @@ def plan_twilight_range_with_caps(
                                         t["Dec_deg"],
                                     )
                                 )
-                                cost = slew_time_seconds(
+                                slew_s = slew_time_seconds(
                                     sep,
                                     small_deg=cfg.slew_small_deg,
                                     small_time=cfg.slew_small_time_s,
@@ -3029,30 +3238,35 @@ def plan_twilight_range_with_caps(
                                 )
                                 if first_tmp is None:
                                     cost = 1e9
-                                elif state is not None and state != first_tmp:
-                                    limit = int(
-                                        getattr(cfg, "max_swaps_per_window", 999)
-                                    )
-                                    if swap_count_by_window.get(idx_w, 0) >= limit:
-                                        cost = 1e9
-                                    else:
-                                        scale = 1.0
-                                        if (
-                                            tracker.cosmology_boost(
-                                                t["Name"],
-                                                first_tmp,
-                                                now_mjd_cost,
-                                                cfg.color_target_pairs,
-                                                cfg.color_window_days,
-                                                cfg.color_alpha,
-                                            )
-                                            > 1.0
-                                        ):
-                                            scale = cfg.swap_cost_scale_color
-                                        penalty = (
-                                            max(amortized_penalty, min_amort) * scale
+                                else:
+                                    now_mjd_cost = Time(current_time_utc).mjd
+                                    opp_s = _opportunity_cost_seconds(t, first_tmp, est_visit_s, now_mjd_cost)
+                                    w_slew = float(getattr(cfg, "inbatch_slew_weight", 0.3))
+                                    cost = opp_s + w_slew * float(slew_s)
+                                    if state is not None and state != first_tmp:
+                                        limit = int(
+                                            getattr(cfg, "max_swaps_per_window", 999)
                                         )
-                                        cost += penalty
+                                        if swap_count_by_window.get(idx_w, 0) >= limit:
+                                            cost = 1e9
+                                        else:
+                                            scale = 1.0
+                                            if (
+                                                tracker.cosmology_boost(
+                                                    t["Name"],
+                                                    first_tmp,
+                                                    now_mjd_cost,
+                                                    cfg.color_target_pairs,
+                                                    cfg.color_window_days,
+                                                    cfg.color_alpha,
+                                                )
+                                                > 1.0
+                                            ):
+                                                scale = cfg.swap_cost_scale_color
+                                            penalty = (
+                                                max(amortized_penalty, min_amort) * scale
+                                            )
+                                            cost += penalty
                                 sn_id_cost = t["Name"]
                                 already_seen = sn_id_cost in seen_ids
                                 if already_seen:
