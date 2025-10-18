@@ -269,6 +269,12 @@ Key tuning knobs for the planner:
 - `min_batch_payoff_s` — minimum wall-clock payoff needed to justify a swap (defaults to `filter_change_s` if unset).
 - `dp_time_mode` — reserved in config; not used by the current scheduler.
 
+- `swap_cost_scale_color` — color-aware scaling of swap costs.
+- `swap_amortize_min` — amortize swap cost for sufficiently long runs.
+- `policy_sun_alt_minutes` — minute-binned cache resolution for Sun altitude.
+- `pairs_topk_per_filter` — prune candidate (SN, filter) pairs per band to cap combinatorics.
+- `debug_planner` — emit structured diagnostics for DP plan, pair counts, and execution results.
+
 ### Filter feasibility (m5 / SNR gating)
 
 - Per‑band feasibility uses an LSST‑style depth scaling for the 5σ depth `m5`:
@@ -623,8 +629,7 @@ Filter choice within a visit is cadence‑ and band‑aware:
   Colour groups are BLUE = {g, r} and RED = {i, z, y}. If only one colour group
   has been seen so far, the first band from the other group can receive an extra
   `first_epoch_color_boost`.
-- Two‑band visits: when `auto_color_pairing` is `True` and `filters_per_visit_cap ≥ 2`,
-  the second band prefers the opposite colour group to build quick colour.
+
 
 If cadence is disabled, the first band is chosen to accelerate colour in Hybrid
 (prefer a band not yet used); once escalated, the reddest allowed band is
@@ -721,9 +726,7 @@ U(f) = C_f\; w_f\; B_{\rm color}(f)\; n(f),\qquad f^* = \underset{f\in\mathcal A
 
 where `\mathcal A` is the allowed set after Sun/Moon and policy checks. If a
 preference `first_filter` is available and passes the gate, it is kept;
-otherwise `f*` is used. When `auto_color_pairing` is enabled and
-`filters_per_visit_cap ≥ 2`, the second band prefers the opposite colour group to
-`f*`; if none, the next‑best `U(f)` is used.
+otherwise `f*` is used.
 
 ### 7) SIMLIB Export (SNANA)
 

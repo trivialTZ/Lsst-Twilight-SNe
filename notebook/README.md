@@ -163,7 +163,7 @@ With these two levers active, the planner tends to produce a much more even dist
   `SLEW_SMALL_DEG=3.5`, `SLEW_SMALL_TIME_S=4.0`, `SLEW_RATE_DEG_PER_S=5.25`, `SLEW_SETTLE_S=1.0` — a simple piecewise model with a constant small-slew time and a linear rate for larger moves.
 - **Moon:**  
   `MIN_MOON_SEP_BY_FILTER={"g":50,"r":35,"i":30,"z":25, ...}` — tighter in blue to protect S/N; dynamically scaled by Moon altitude/phase; ignored when the Moon is set.  
-  `REQUIRE_SINGLE_TIME_FOR_ALL_FILTERS=True` — enforces a single “best time” per visit, ensuring all filters (if >1) share the same epoch in a visit.
+  Multi-filter visits (when enabled via `FILTERS_PER_VISIT_CAP > 1`) share a single best time within the window; use the CLI flag `--require_single_time` to enforce a common epoch for all filters within a visit.
 - **Time caps:**  
   `PER_SN_CAP_S=120` — bounds per-SN work (slew + readout + exposure + filter changes).  
   `MORNING_CAP_S=600`, `EVENING_CAP_S=600` — roughly 10 minutes each; ensures plans pack into tight twilight windows.  
@@ -173,7 +173,7 @@ With these two levers active, the planner tends to produce a much more even dist
   `PRIORITY_STRATEGY="hybrid"` with `HYBRID_DETECTIONS=2`, `HYBRID_EXPOSURE=300s`, `LC_DETECTIONS=5`, `LC_EXPOSURE=300s`.  
   Starts broad with quick detections; escalates to deeper coverage for promising SNe.
 - **Filter planning (DP):**  
-  `SWAP_BOOST=0.95`, `DP_HYSTERESIS_THETA=0.02`, `N_ESTIMATE_MODE="guard_plus_exp"` (fast visit counts) or `"per_filter"` for band-specific units, optional `DP_MAX_SWAPS=None` (falls back to `MAX_SWAPS_PER_WINDOW`), and `MIN_BATCH_PAYOFF_S=None` (defaults to `FILTER_CHANGE_S` when unset).  `DP_TIME_MODE=False` keeps the cheaper visit-count DP; set to `True` to experiment with a time-budget variant.
+  `swap_boost=0.95`, `dp_hysteresis_theta=0.02`, `n_estimate_mode="guard_plus_exp"` (fast visit counts) or `"per_filter"` for band-specific units, optional `dp_max_swaps=None` (falls back to `max_swaps_per_window`), and `min_batch_payoff_s=None` (defaults to `filter_change_s` when unset).  `dp_time_mode=False` keeps the cheaper visit-count DP; set to `True` to experiment with a time-budget variant. Additional controls: `swap_cost_scale_color`, `swap_amortize_min`, `policy_sun_alt_minutes`, `pairs_topk_per_filter`, and `debug_planner`.
 - **Photometry / Sky:**
   `PIXEL_SCALE_ARCSEC=0.2` (Rubin pixel scale), `READ_NOISE_E=6` (typical 5.4–6.2 e⁻; requirement ≤9 e⁻ per LCA‑48‑J), `GAIN_E_PER_ADU=1.6` (measured ≈1.5–1.7 e⁻/ADU), `ZPT_ERR_MAG=0.01`, saturation threshold ≈8×10⁴ e⁻ by default.
   Dark‑sky surface brightnesses {u:23.05, g:22.25, r:21.20, i:20.46, z:19.61, y:18.60} mag/arcsec² (SMTN‑002); prefer `rubin_sim.skybrightness` when available. `TWILIGHT_DELTA_MAG=2.5` is an approximate fallback. Airmass uses the Kasten–Young (1989) approximation.
@@ -189,7 +189,7 @@ With these two levers active, the planner tends to produce a much more even dist
 
 - Short exposures and single-filter visits are deliberate: twilight is bright and short; you’ll get more distinct SNe with fewer swaps.
 - The Sun-altitude policy is strict: even if a filter is loaded, it won’t be used when the Sun is too high for that band.
-- If you want multi-filter color on the same visit, increase `FILTERS_PER_VISIT_CAP` (optionally leaving `auto_color_pairing=True`) and be prepared to raise `PER_SN_CAP_S` and the window caps—or add a Sun-alt exposure ladder so exposures shrink as the Sun rises.
+- If you want multi-filter color on the same visit, increase `FILTERS_PER_VISIT_CAP` and be prepared to raise `PER_SN_CAP_S` and the window caps—or add a Sun-alt exposure ladder so exposures shrink as the Sun rises.
 
 ---
 

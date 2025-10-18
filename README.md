@@ -124,6 +124,12 @@ knobs in `PlannerConfig`:
 - `min_batch_payoff_s` — minimum wall-clock payoff needed to justify a swap (defaults to `filter_change_s` if unset).
 - `dp_time_mode` (experimental) — enable a time-budget DP instead of visit counts.
 
+- `swap_cost_scale_color` — color-aware scaling of swap costs.
+- `swap_amortize_min` — amortize swap cost for sufficiently long runs.
+- `policy_sun_alt_minutes` — minute-binned cache resolution for Sun altitude.
+- `pairs_topk_per_filter` — prune candidate (SN, filter) pairs per band to cap combinatorics.
+- `debug_planner` — emit structured diagnostics for DP plan, pair counts, and execution results.
+
 The resulting filter sequence and per-filter visit counts drive the existing
 execution loop, which still routes within a batch by the usual score density
 heuristic (score divided by guard-aware visit cost) and honors cadence gates.

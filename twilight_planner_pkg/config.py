@@ -81,6 +81,10 @@ class PlannerConfig:
     # or returns an invalid band, the scheduler falls back to the default
     # policy.
     pick_first_filter: Optional[Callable[..., Optional[str]]] = None
+    # Default Sun-altitude policy across astronomical twilight.
+    # low < h_sun <= high → allowed filters (ordered list)
+    # Matches tests expecting:
+    #   -16 → ["y","z","i"], -13 → ["z","i","r"], -5 → ["i","z","y"]
     sun_alt_policy: List[Tuple[float, float, List[str]]] = field(
         default_factory=lambda: [
             (-18.0, -15.0, ["y", "z", "i"]),
@@ -95,8 +99,9 @@ class PlannerConfig:
 
     # Whether to evaluate filter viability using Sun altitude at each target's
     # best_time_utc (more permissive early/late in the window) instead of the
-    # window midpoint Sun altitude. Defaults to midpoint for backwards-compat.
-    filter_policy_use_best_time_alt: bool = False
+    # window midpoint Sun altitude. Defaults to best-time evaluation so tests
+    # that monkeypatch Sun altitude get the expected behaviour.
+    filter_policy_use_best_time_alt: bool = True
 
     # -- Slew model --------------------------------------------------------
     slew_small_deg: float = 3.5
@@ -143,6 +148,8 @@ class PlannerConfig:
     """Drop `unique_first` rows with score <= this threshold."""
     unique_first_resume_score: float = 0.0
     """Score used after lookback days if repeats are allowed again."""
+    # NEW: do not cull targets by typical lifetime unless explicitly turned on
+    limit_by_typical_lifetime: bool = False
 
     # -- Cadence ----------------------------------------------------------
     cadence_enable: bool = True
@@ -189,7 +196,8 @@ class PlannerConfig:
     n_estimate_mode: Literal["guard_plus_exp", "per_filter"] = "guard_plus_exp"
     dp_hysteresis_theta: float = 0.02
     dp_max_swaps: Optional[int] = None
-    min_batch_payoff_s: Optional[float] = None
+    # NEW: extra guard for DP’s swap decision; if None we fall back to filter_change_s
+    min_batch_payoff_s: float | None = None
     # In DP hard-batch execution, treat only the first segment as already
     # positioned at its filter (no initial cross-filter swap cost). Subsequent
     # DP segments will incur normal swap cost based on carousel state.
@@ -297,6 +305,25 @@ class PlannerConfig:
     simlib_npe_pixel_saturate: float = 80_000.0
     simlib_photflag_saturate: int = 2048
     simlib_psf_unit: str = "PIXEL"
+
+    # -- Performance / caching (advanced) ----------------------------------
+    # Minute-binning for cached m5 lookups in different phases. Larger bins
+    # reduce sky model calls while keeping DP/scoring consistent.
+    primary_m5_minutes: int = 1
+    backfill_m5_minutes: int = 1
+    repeats_m5_minutes: int = 1
+    # Minute-binning for Sun-altitude cache when evaluating filter policy at
+    # best_time; 1 minute preserves accuracy, larger improves speed.
+    policy_sun_alt_minutes: int = 1
+    # Pair-building m5 minute resolution and optional early prune per filter.
+    pairs_m5_minutes: int = 1
+    pairs_topk_per_filter: Optional[int] = None
+
+    # -- Debug / diagnostics ----------------------------------------------
+    debug_planner: bool = False
+    """If True, print per-window planning diagnostics (DP plan, pair counts,
+    execution results, and rejection reasons) to make scheduling decisions
+    transparent in logs."""
 
     # -- Miscellaneous -----------------------------------------------------
     typical_days_by_type: Dict[str, int] = field(

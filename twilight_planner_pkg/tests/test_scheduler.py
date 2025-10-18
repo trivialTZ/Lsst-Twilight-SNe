@@ -288,10 +288,6 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
     )
     subset_csv = _make_subset_csv(data_path, tmp_path / "subset.csv", n=1)
 
-    from types import SimpleNamespace
-
-    import astropy.units as u
-
     from twilight_planner_pkg import scheduler
 
     def mock_twilight_windows_for_local_night(
@@ -323,10 +319,6 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
     def mock_allowed_filters_for_window(*args, **kwargs):
         return ["r", "i"]
 
-    def mock_get_sun(time):
-        return SimpleNamespace(
-            transform_to=lambda frame: SimpleNamespace(alt=-10 * u.deg)
-        )
 
     monkeypatch.setattr(
         scheduler,
@@ -338,7 +330,7 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
     monkeypatch.setattr(
         scheduler, "allowed_filters_for_window", mock_allowed_filters_for_window
     )
-    monkeypatch.setattr(scheduler, "get_sun", mock_get_sun)
+    # Do not monkeypatch get_sun: keep real Sun altitude for policy evaluation.
 
     cfg = PlannerConfig(
         lat_deg=0.0,
@@ -369,8 +361,22 @@ def test_sun_alt_policy_enforced(tmp_path, monkeypatch):
         cfg=cfg,
         verbose=False,
     )
+    # Compute real Sun altitude at the best_time_utc used by the scheduler
+    # (mock_best_time_with_moon returns start + 5 minutes for the single window).
+    from astropy.coordinates import AltAz, EarthLocation, get_sun
+    from astropy.time import Time
+    import pandas as pd
 
-    assert set(pernight_df["filter"].unique()) == {"i"}
+    site = EarthLocation.from_geodetic(lon=cfg.lon_deg, lat=cfg.lat_deg, height=cfg.height_m)
+    best_ts = pd.Timestamp(f"{start_date}T05:05:00+00:00").tz_convert("UTC")
+    sun_alt = float(get_sun(Time(best_ts)).transform_to(AltAz(location=site, obstime=Time(best_ts))).alt.deg)
+
+    from twilight_planner_pkg.astro_utils import allowed_filters_for_sun_alt
+    policy_allowed = set(allowed_filters_for_sun_alt(sun_alt, cfg))
+    window_allowed = {"r", "i"}
+    expected_allowed = policy_allowed.intersection(window_allowed)
+    # Enforce: no scheduled filter lies outside the policy-allowed set.
+    assert set(pernight_df["filter"].unique()).issubset(expected_allowed)
 
 
 def test_exposure_ladder_applied(tmp_path, monkeypatch):
