@@ -147,3 +147,110 @@ def print_forecast_summary(res: dict, *, verbose: bool = True) -> None:
         s2 = sig_tw[p]
         ratio = s1 / s2 if (np.isfinite(s2) and s2 > 0) else float("nan")
         print(f"  {p:>3s}: WFD={s1:.4g}  WFD+Twilight={s2:.4g}  improvement x{ratio:.2f}")
+
+
+# ----------------------------- NEW CODE BELOW ----------------------------- #
+def _subcov(labels: list[str], C: np.ndarray, params: tuple[str, ...]) -> np.ndarray:
+    """Return the sub-covariance for 'params' from covariance C with given labels."""
+    idx = [labels.index(p) for p in params]
+    return C[np.ix_(idx, idx)]
+
+
+def _det_safe(C: np.ndarray) -> float:
+    """Determinant with a tiny Tikhonov regularization for numerical robustness."""
+    # Guard against tiny negative eigenvalues from numerical noise
+    eps = 0.0
+    try:
+        det = float(np.linalg.det(C))
+    except np.linalg.LinAlgError:
+        eps = 1e-15 * np.trace(C) / C.shape[0]
+        det = float(np.linalg.det(C + eps * np.eye(C.shape[0])))
+    # If roundoff makes it slightly negative, clip to zero
+    if det < 0 and abs(det) < 1e-18:
+        det = 0.0
+    return det
+
+
+def detf_fom_from_cov(C_w0wa: np.ndarray) -> float:
+    """DETF FoM ~ 1/sqrt(det(C_w0wa)) (constant factors cancel in ratios)."""
+    det = _det_safe(C_w0wa)
+    if det <= 0:
+        return float("nan")
+    return 1.0 / np.sqrt(det)
+
+
+def area_shrink_factor(C_ref: np.ndarray, C_new: np.ndarray) -> float:
+    """2D ellipse area shrink = sqrt(det(C_ref)/det(C_new))."""
+    d_ref, d_new = _det_safe(C_ref), _det_safe(C_new)
+    if d_ref <= 0 or d_new <= 0:
+        return float("nan")
+    return np.sqrt(d_ref / d_new)
+
+
+def hypervolume_shrink_factor(C_ref: np.ndarray, C_new: np.ndarray) -> float:
+    """nD hyper-volume shrink = sqrt(det(C_ref)/det(C_new))."""
+    d_ref, d_new = _det_safe(C_ref), _det_safe(C_new)
+    if d_ref <= 0 or d_new <= 0:
+        return float("nan")
+    return np.sqrt(d_ref / d_new)
+
+
+def info_gain_bits(C_ref: np.ndarray, C_new: np.ndarray) -> float:
+    """Gaussian Shannon information gain (D-optimality) in bits:
+    ΔI = 0.5 * log(det(C_ref)/det(C_new)) / log(2).
+    """
+    d_ref, d_new = _det_safe(C_ref), _det_safe(C_new)
+    if d_ref <= 0 or d_new <= 0:
+        return float("nan")
+    return 0.5 * np.log(d_ref / d_new) / np.log(2.0)
+
+
+def print_w0wa_metrics(res: dict) -> None:
+    """Pretty-print DETF FoM, 2D area, 3D hyper-volume shrink & information gain for w0waCDM.
+
+    Expects res from run_binned_forecast(..., model='w0wa').
+    """
+    labs = res["WFD"]["labels"]
+    if not all(p in labs for p in ("Om", "w0", "wa")):
+        print("[w0wa metrics] required params ('Om','w0','wa') not found in labels:", labs)
+        return
+    Cw = res["WFD"]["cov"]
+    Ct = res["WFD+Twilight"]["cov"]
+
+    # --- (w0, wa) block
+    Cw_2 = _subcov(labs, Cw, ("w0", "wa"))
+    Ct_2 = _subcov(labs, Ct, ("w0", "wa"))
+    fom_wfd = detf_fom_from_cov(Cw_2)
+    fom_tw  = detf_fom_from_cov(Ct_2)
+    fom_gain = fom_tw / fom_wfd if np.isfinite(fom_wfd) and fom_wfd > 0 else float("nan")
+    area_gain = area_shrink_factor(Cw_2, Ct_2)  # same as FoM gain
+    info_bits_2d = info_gain_bits(Cw_2, Ct_2)
+
+    # Correlations (nice to quote)
+    rho_wfd = Cw_2[0, 1] / np.sqrt(Cw_2[0, 0] * Cw_2[1, 1])
+    rho_tw  = Ct_2[0, 1] / np.sqrt(Ct_2[0, 0] * Ct_2[1, 1])
+
+    # --- 3D hyper-volume in (Om,w0,wa)
+    Cw_3 = _subcov(labs, Cw, ("Om", "w0", "wa"))
+    Ct_3 = _subcov(labs, Ct, ("Om", "w0", "wa"))
+    vol_gain = hypervolume_shrink_factor(Cw_3, Ct_3)
+    info_bits_3d = info_gain_bits(Cw_3, Ct_3)
+
+    # --- 1D sigmas (for completeness)
+    sig_wfd = {p: float(np.sqrt(Cw[i, i])) for i, p in enumerate(labs)}
+    sig_tw  = {p: float(np.sqrt(Ct[i, i])) for i, p in enumerate(labs)}
+
+    print("\n=== w0wa metrics: WFD  →  WFD+Twilight (combined) ===")
+    print("1D σ shrink factors:")
+    for p in labs:
+        r = sig_wfd[p] / sig_tw[p] if sig_tw[p] > 0 else float("nan")
+        print(f"  {p:>3s}: σ_WFD={sig_wfd[p]:.4g}  σ_WFD+Tw={sig_tw[p]:.4g}   ×{r:.2f}")
+    print("\n(w0, wa) DETF FoM and 2D area:")
+    print(f"  FoM_WFD = {fom_wfd:.4g},  FoM_WFD+Tw = {fom_tw:.4g},  gain ×{fom_gain:.2f}")
+    print(f"  68% ellipse area shrink ×{area_gain:.2f}  (independent of CL constant)")
+    print(f"  Correlation ρ(w0,wa):  {rho_wfd:.3f} → {rho_tw:.3f}")
+    print("\n(Om, w0, wa) 3D hyper-volume:")
+    print(f"  68% hyper-volume shrink ×{vol_gain:.2f}  (independent of CL constant)")
+    print("\nInformation gain (Gaussian, D-optimality):")
+    print(f"  ΔI(w0,wa)   = {info_bits_2d:.2f} bits")
+    print(f"  ΔI(Om,w0,wa) = {info_bits_3d:.2f} bits")

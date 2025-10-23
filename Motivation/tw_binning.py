@@ -357,6 +357,13 @@ def write_binned_catalogs(
     -------
     tuple of Paths
         Paths to the base and twilight binned CSVs.
+
+    Notes
+    -----
+    Also writes an unbinned per-SN CSV named
+    ``y1_sn_unbinned_{base_label}.csv`` in ``derived_dir`` with columns
+    including ``z``, ``c``, ``alpha_used``, ``beta_used``, ``sigma_int``,
+    ``sigma_lens``, ``sigma_vpec``, and per-SN ``sigma_mu``.
     """
     z_edges = np.arange(0.0, z_max + dz + 1e-12, dz)
     z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
@@ -366,7 +373,45 @@ def write_binned_catalogs(
     N_cos_tw = N_cos.copy()
     N_cos_tw[band] = np.maximum(N_cos_tw[band], N_det[band])
     fit_qc_y1 = fit_qc_y1.copy()
+    # Per-SN uncertainty
     fit_qc_y1["sigma_mu_sn"] = sigma_mu_per_sn(fit_qc_y1)
+
+    # Build unbinned, per-SN dataframe for diagnostics/exports
+    # Components consistent with sigma_mu_per_sn defaults
+    alpha_s = _num_series(fit_qc_y1, ["SIM_alpha", "alpha"], 0.14)
+    beta_s = _num_series(fit_qc_y1, ["SIM_beta", "beta"], 3.1)
+    z_s = _num_series(fit_qc_y1, "z", np.nan).astype(float)
+    c_s = _num_series(fit_qc_y1, "c", np.nan).astype(float)
+    sigma_int_s = pd.Series(
+        _sigma_int_from_color(c_s.to_numpy(dtype=float, na_value=np.nan)),
+        index=fit_qc_y1.index,
+    )
+    sig_lens_s = 0.055 * z_s
+    sig_vpec_s = (5.0 / np.log(10.0)) * (
+        300.0 / (299792.458 * np.maximum(z_s, 1e-3))
+    )
+
+    cols_id: dict[str, pd.Series] = {}
+    for cand_id in ("CID", "SNID", "ID"):
+        if cand_id in fit_qc_y1.columns:
+            cols_id[cand_id] = fit_qc_y1[cand_id]
+            break
+
+    df_unbinned_cols: dict[str, pd.Series | np.ndarray | float | str] = {
+        **cols_id,
+        "source": pd.Series("WFD", index=fit_qc_y1.index),
+        "z": z_s,
+        "c": c_s,
+        "alpha_used": alpha_s,
+        "beta_used": beta_s,
+        "sigma_int": sigma_int_s,
+        "sigma_lens": sig_lens_s,
+        "sigma_vpec": sig_vpec_s,
+        "sigma_mu": pd.to_numeric(
+            fit_qc_y1["sigma_mu_sn"], errors="coerce"
+        ).astype(float),
+    }
+    df_unbinned = pd.DataFrame(df_unbinned_cols, index=fit_qc_y1.index)
     sigma_bin = np.full_like(z_mid, np.nan, dtype=float)
     for k in range(len(z_mid)):
         m = (fit_qc_y1["z"] >= z_edges[k]) & (fit_qc_y1["z"] < z_edges[k + 1])
@@ -398,6 +443,10 @@ def write_binned_catalogs(
     tw_path = derived_dir / f"y1_cat_bin_tw_{base_label}.csv"
     df_base.to_csv(base_path, index=False)
     df_tw.to_csv(tw_path, index=False)
+
+    # Write unbinned per-SN export for transparency/diagnostics
+    unbinned_path = derived_dir / f"y1_sn_unbinned_{base_label}.csv"
+    df_unbinned.to_csv(unbinned_path, index=False)
     # compat filenames
     df_base.to_csv(derived_dir / "y1_cat_bin_base_fix.csv", index=False)
     df_tw.to_csv(derived_dir / "y1_cat_bin_tw_fix.csv", index=False)
@@ -425,6 +474,14 @@ def write_binned_catalogs_v2(
 
     The returned CSVs include an IVAR-weighted ``z_eff`` column and updated
     ``sigma_mu`` based on per-SN uncertainties for both WFD and promoted SNe.
+
+    Notes
+    -----
+    Also writes an unbinned per-SN CSV named
+    ``y1_sn_unbinned_{base_label}.csv`` in ``derived_dir`` for available
+    sources (WFD and, if provided, Twilight-promoted SNe) with columns
+    including ``z``, ``c``, ``alpha_used``, ``beta_used``, ``sigma_int``,
+    ``sigma_lens``, ``sigma_vpec``, and per-SN ``sigma_mu``.
     """
 
     z_edges = np.arange(0.0, z_max + dz + 1e-12, dz)
@@ -461,6 +518,64 @@ def write_binned_catalogs_v2(
             sigma_int=sigma_int,
             sigma_vpec_kms=sigma_vpec_kms,
         )
+
+    # Build unbinned, per-SN DataFrame(s)
+    def _per_sn_df(df: pd.DataFrame, source_label: str) -> pd.DataFrame:
+        if df is None or len(df) == 0:
+            return pd.DataFrame()
+        a_s = _num_series(df, ["SIM_alpha", "alpha"], alpha)
+        b_s = _num_series(df, ["SIM_beta", "beta"], beta)
+        z_s = _num_series(df, "z", np.nan).astype(float)
+        c_s = _num_series(df, "c", np.nan).astype(float)
+        if isinstance(sigma_int, str):
+            if sigma_int.lower() != "color_binned":
+                raise ValueError(
+                    "sigma_int string must be 'color_binned' or a numeric value"
+                )
+            si_s = pd.Series(
+                _sigma_int_from_color(c_s.to_numpy(dtype=float, na_value=np.nan)),
+                index=df.index,
+            )
+        else:
+            si_s = pd.Series(float(sigma_int), index=df.index)
+        sig_lens_s = 0.055 * z_s
+        sig_vpec_s = (5.0 / np.log(10.0)) * (
+            sigma_vpec_kms / (299792.458 * np.maximum(z_s, 1e-3))
+        )
+
+        cols_id: dict[str, pd.Series] = {}
+        for cand_id in ("CID", "SNID", "ID"):
+            if cand_id in df.columns:
+                cols_id[cand_id] = df[cand_id]
+                break
+
+        return pd.DataFrame(
+            {
+                **cols_id,
+                "source": pd.Series(source_label, index=df.index),
+                "z": z_s,
+                "c": c_s,
+                "alpha_used": a_s,
+                "beta_used": b_s,
+                "sigma_int": si_s,
+                "sigma_lens": sig_lens_s,
+                "sigma_vpec": sig_vpec_s,
+                "sigma_mu": pd.to_numeric(df["sigma_mu_sn"], errors="coerce").astype(
+                    float
+                ),
+            },
+            index=df.index,
+        )
+
+    df_unbinned_list: list[pd.DataFrame] = []
+    df_unbinned_list.append(_per_sn_df(fit_qc_y1, "WFD"))
+    if fit_promoted_y1 is not None:
+        df_unbinned_list.append(_per_sn_df(fit_promoted_y1, "TwilightPromoted"))
+    df_unbinned = (
+        pd.concat(df_unbinned_list, ignore_index=True)
+        if any(len(x) for x in df_unbinned_list)
+        else pd.DataFrame()
+    )
 
     sigma_bin_base = np.full_like(z_mid, np.nan, dtype=float)
     z_eff_base = np.full_like(z_mid, np.nan, dtype=float)
@@ -576,6 +691,11 @@ def write_binned_catalogs_v2(
     # Compatibility filenames
     df_base.to_csv(derived_dir / "y1_cat_bin_base_fix.csv", index=False)
     df_tw.to_csv(derived_dir / "y1_cat_bin_tw_fix.csv", index=False)
+
+    # Write unbinned per-SN export if available
+    if len(df_unbinned) > 0:
+        unbinned_path = derived_dir / f"y1_sn_unbinned_{base_label}.csv"
+        df_unbinned.to_csv(unbinned_path, index=False)
 
     return base_path, tw_path
 

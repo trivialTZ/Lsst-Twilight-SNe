@@ -332,6 +332,7 @@ def plot_fs8_scan(
     flow_df,
     *,
     power_spectrum_dict: dict | None = None,
+    sigma_u: float | None = None,
     sig_floor_list: np.ndarray | None = None,
     zlim_list: np.ndarray | None = None,
     fisher_properties: dict | None = None,
@@ -343,6 +344,8 @@ def plot_fs8_scan(
     title: str = "fσ8 forecast vs error floor and zmax",
     sigma_ref: float | None = None,
     sigma_label: str | None = None,
+    relative: bool = False,
+    fs8_ref: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Scan σ(fσ8) vs. added error floor and zmax using FLIP.
 
@@ -357,6 +360,10 @@ def plot_fs8_scan(
         Precomputed dict for FLIP covariance, e.g.,
         ``{"vv": [[k, Pvv(k)]]}``. If None, a default will be computed
         with CLASS using Planck-like values and growth-rate normalization.
+    sigma_u : float, optional
+        Damping scale in ``h^{-1} Mpc`` for the velocity power spectrum
+        Gaussian suppression factor ``Du(k, sigma_u)``. Ignored if
+        ``power_spectrum_dict`` is supplied. Default: 21.0.
     sig_floor_list : array-like, optional
         Values of an additional per-SN error floor (mag) to be COMBINED IN
         QUADRATURE with ``dmu_error_base`` when scanning. Default is
@@ -383,6 +390,11 @@ def plot_fs8_scan(
         benchmark). Drawn as a vertical dashed line if provided.
     sigma_label : str, optional
         Custom x-axis label. Defaults to ``r"$\langle\sigma_\mu\rangle$ [mag]"``.
+    relative : bool, optional
+        If True, divide the y-values by ``fs8_ref`` so the plot shows the
+        relative error ``σ(fσ8)/fσ8``. Default False.
+    fs8_ref : float, optional
+        Reference value used when ``relative`` is True. Default 1.0.
 
     Returns
     -------
@@ -459,7 +471,7 @@ def plot_fs8_scan(
             1500,
             normalization_power_spectrum="growth_rate",
         )
-        sigmau_fiducial = 21.0
+        sigmau_fiducial = 21.0 if sigma_u is None else float(sigma_u)
         power_spectrum_dict = {
             "vv": [[kh, ptt * flip.utils.Du(kh, sigmau_fiducial) ** 2]]
         }
@@ -505,16 +517,19 @@ def plot_fs8_scan(
         mask = _np.isfinite(xvals) & _np.isfinite(fs8_grid[ii])
         if not mask.any():
             continue
+        yvals = fs8_grid[ii, mask]
+        if relative:
+            yvals = yvals / float(fs8_ref)
         _plt.plot(
             xvals[mask],
-            fs8_grid[ii, mask],
+            yvals,
             marker="o",
             label=f"z≤{float(zl):.3f}",
         )
     if sigma_ref is not None:
         _plt.axvline(float(sigma_ref), color="k", linestyle="--", linewidth=1.0)
     _plt.xlabel(xlabel)
-    _plt.ylabel("$\\sigma_{f\\sigma_8}$")
+    _plt.ylabel("$\\sigma_{f\\sigma_8}$" if not relative else r"$\\sigma_{f\\sigma_8}/f\\sigma_8$")
     _plt.legend(frameon=False)
     if title:
         _plt.title(title)
@@ -529,6 +544,7 @@ def compute_fs8_scan_grid(
     flow_df,
     *,
     power_spectrum_dict: dict | None = None,
+    sigma_u: float | None = None,
     sig_floor_list: np.ndarray | None = None,
     zlim_list: np.ndarray | None = None,
     fisher_properties: dict | None = None,
@@ -594,7 +610,7 @@ def compute_fs8_scan_grid(
             1500,
             normalization_power_spectrum="growth_rate",
         )
-        sigmau_fiducial = 21.0
+        sigmau_fiducial = 21.0 if sigma_u is None else float(sigma_u)
         power_spectrum_dict = {
             "vv": [[kh, ptt * flip.utils.Du(kh, sigmau_fiducial) ** 2]]
         }
@@ -641,6 +657,7 @@ def plot_fs8_scan_compare(
     flow_combined,
     *,
     power_spectrum_dict: dict | None = None,
+    sigma_u: float | None = None,
     sig_floor_list: np.ndarray | None = None,
     zlim_list: np.ndarray | None = None,
     fisher_properties: dict | None = None,
@@ -651,6 +668,8 @@ def plot_fs8_scan_compare(
     quiet: bool = True,
     sigma_ref: float | None = None,
     title: str = "fσ8 vs ⟨σμ⟩: WFD Y1 (dashed) vs WFD+Twilight Y1 (solid)",
+    relative: bool = False,
+    fs8_ref: float = 1.0,
 ):
     """Overlay fσ8 scans: dashed WFD vs solid WFD+Twilight with matched colors per z-limit.
 
@@ -663,6 +682,7 @@ def plot_fs8_scan_compare(
     fs8_wfd, rms_wfd, sf_list, zl_list = compute_fs8_scan_grid(
         flow_wfd,
         power_spectrum_dict=power_spectrum_dict,
+        sigma_u=sigma_u,
         sig_floor_list=sig_floor_list,
         zlim_list=zlim_list,
         fisher_properties=fisher_properties,
@@ -675,6 +695,7 @@ def plot_fs8_scan_compare(
     fs8_tw, rms_tw, _, _ = compute_fs8_scan_grid(
         flow_combined,
         power_spectrum_dict=power_spectrum_dict,
+        sigma_u=sigma_u,
         sig_floor_list=sf_list,
         zlim_list=zl_list,
         fisher_properties=fisher_properties,
@@ -692,11 +713,17 @@ def plot_fs8_scan_compare(
         # WFD dashed
         mask = _np.isfinite(rms_wfd[i]) & _np.isfinite(fs8_wfd[i])
         if mask.any():
-            _plt.plot(rms_wfd[i][mask], fs8_wfd[i][mask], linestyle="--", color=color, linewidth=2.0)
+            yvals = fs8_wfd[i][mask]
+            if relative:
+                yvals = yvals / float(fs8_ref)
+            _plt.plot(rms_wfd[i][mask], yvals, linestyle="--", color=color, linewidth=2.0)
         # Combined solid
         mask2 = _np.isfinite(rms_tw[i]) & _np.isfinite(fs8_tw[i])
         if mask2.any():
-            _plt.plot(rms_tw[i][mask2], fs8_tw[i][mask2], linestyle="-", color=color, linewidth=2.0, label=f"z≤{float(zl):.3f}")
+            yvals2 = fs8_tw[i][mask2]
+            if relative:
+                yvals2 = yvals2 / float(fs8_ref)
+            _plt.plot(rms_tw[i][mask2], yvals2, linestyle="-", color=color, linewidth=2.0, label=f"z≤{float(zl):.3f}")
 
     if sigma_ref is not None:
         _plt.axvline(float(sigma_ref), color="k", linestyle="--", linewidth=1.0)
@@ -709,7 +736,7 @@ def plot_fs8_scan_compare(
     ]
 
     _plt.xlabel(r"$\langle\sigma_\mu\rangle$ [mag]")
-    _plt.ylabel(r"$\sigma_{f\sigma_8}$")
+    _plt.ylabel(r"$\sigma_{f\sigma_8}$" if not relative else r"$\sigma_{f\sigma_8}/f\sigma_8$")
     _plt.title(title)
     leg1 = _plt.legend(frameon=False, title="z max", loc="upper left")
     _plt.gca().add_artist(leg1)
