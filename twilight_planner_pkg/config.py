@@ -518,6 +518,7 @@ class PlannerConfig:
         if self.start_filter is not None:
             start_norm = _norm_filter_name(self.start_filter)
             self.start_filter = start_norm
+
         if self.start_filter and self.start_filter not in self.filters:
             self.filters.insert(0, self.start_filter)
 
@@ -597,3 +598,29 @@ def _deprecated_max_filters_per_visit_set(self, value: int) -> None:
 
 
 PlannerConfig.max_filters_per_visit = _deprecated_max_filters_per_visit  # type: ignore[assignment]
+
+
+# --- Discovery photometry normalization (module-level defaults) -----------
+# Treat Clear as 'CV' (clear with Johnson V zero-point) by default.
+# Set to 'CR' if your Clear data are R-anchored.
+CLEAR_ZEROPOINT: str = 'CV'  # 'CV' or 'CR'
+
+# Turn on per-field linear color-term mapping when reference colors are available.
+# If no calibrators are provided, code should fall back to static coefficients below.
+DISCOVERY_ATLAS_LINEAR: bool = True
+
+# Clip color range used in fitting/transform (approx stellar locus envelope)
+# Covey+2007 locus spans roughly g-r ~ [-0.4, 1.7] for main sequence.
+DISCOVERY_COLOR_PRIORS_MIN: float = -0.5
+DISCOVERY_COLOR_PRIORS_MAX: float = 1.8
+
+# Optional static fallback coefficients if per-field fitting is unavailable.
+# Model: out = in + a + b*(g-r) [+ c*(r-i) for PS1_w]
+DISCOVERY_LINEAR_COEFFS: Dict[str, Dict[str, float]] = {
+    'PS1_w': {'target': 'r', 'a': 0.00, 'b': -0.20, 'c': -0.05},  # safe starters; prefer fitting
+    'GOTO_L': {'target': 'g', 'a': 0.00, 'b': -0.10},
+    'BG_q':   {'target': 'r', 'a': 0.00, 'b': -0.15},
+    # Treat Clear as Johnson V anchored by default (CV)
+    'CV_to':  {'target': 'r', 'a': 0.10, 'b': -0.42},  # placeholder slope (V→r)
+    'CR_to':  {'target': 'r', 'a': 0.00, 'b':  0.00},  # if Clear is R-anchored, often near identity
+}

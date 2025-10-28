@@ -1407,9 +1407,10 @@ def plan_twilight_range_with_caps(
                 lifetime_days_each = df["SN_type_raw"].apply(
                     lambda t: parse_sn_type_to_window_days(t, cfg)
                 )
-            min_allowed_disc_each = cutoff - lifetime_days_each.apply(
-                lambda d: timedelta(days=int(d))
-            )
+            # Robust conversion to timedeltas avoids pandas Timestamp<->int errors
+            lifetime_days_num = pd.to_numeric(lifetime_days_each, errors="coerce")
+            lifetime_days_num = lifetime_days_num.fillna(getattr(cfg, "default_typical_days", 14)).astype(int)
+            min_allowed_disc_each = pd.Timestamp(cutoff) - pd.to_timedelta(lifetime_days_num, unit="D")
             subset = df[
                 has_disc
                 & (df["discovery_datetime"] <= cutoff)

@@ -1,9 +1,16 @@
-"""Quality-control utilities for twilight cosmology analysis."""
+"""Quality-control utilities for twilight cosmology analysis.
+
+Add FITRES-only QC mode:
+- Use FIT-level thresholds (FITPROB, x1, c, PKMJDERR, x1ERR, cERR).
+- Replace PHOT-based sampling with FITRES proxies (SNRMAX1/2/3, SNRSUM, PKMJDERR).
+- Skip saturation in fitres_only mode.
+- Optionally annotate per-step QC boolean columns for audit.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -173,15 +180,46 @@ def densest_year_window(head: pd.DataFrame) -> Tuple[float, float]:
     return best[0], best[1]
 
 
+# -----------------------------------------------------------------------------
+# FITRES-only sampling proxy
+# -----------------------------------------------------------------------------
+def fitres_proxy_sampling_mask(
+    fit_df: pd.DataFrame,
+    snrmax_min: float = 5.0,
+    snrsum_min: Optional[float] = 20.0,
+    require_pkmjderr: bool = True,
+    pkmjderr_max: float = 1.0,
+) -> pd.Series:
+    """
+    Build a sampling-quality proxy using only FITRES columns.
+    Conditions (applied if corresponding columns exist):
+      - max(SNRMAX1/2/3) >= snrmax_min
+      - SNRSUM >= snrsum_min (if snrsum_min is not None)
+      - PKMJDERR <= pkmjderr_max (if require_pkmjderr)
+    """
+    m = pd.Series(True, index=fit_df.index)
+    # SNRMAX top-3
+    snr_cols = [c for c in ("SNRMAX1", "SNRMAX2", "SNRMAX3") if c in fit_df.columns]
+    if snr_cols:
+        m &= fit_df[snr_cols].max(axis=1) >= float(snrmax_min)
+    # SNRSUM
+    if ("SNRSUM" in fit_df.columns) and (snrsum_min is not None):
+        m &= pd.to_numeric(fit_df["SNRSUM"], errors="coerce") >= float(snrsum_min)
+    # PKMJDERR
+    if require_pkmjderr and ("PKMJDERR" in fit_df.columns):
+        m &= pd.to_numeric(fit_df["PKMJDERR"], errors="coerce") <= float(pkmjderr_max)
+    return m.fillna(False)
+
+
 def ross_qc_with_report(
     fit_all: pd.DataFrame,
     *,
-    head_hi: pd.DataFrame,
-    phot_hi: pd.DataFrame,
-    head_lo: pd.DataFrame,
-    phot_lo: pd.DataFrame,
-    phot_hi_path: Path | None = None,
-    phot_lo_path: Path | None = None,
+    head_hi: Optional[pd.DataFrame] = None,
+    phot_hi: Optional[pd.DataFrame] = None,
+    head_lo: Optional[pd.DataFrame] = None,
+    phot_lo: Optional[pd.DataFrame] = None,
+    phot_hi_path: Optional[Path] = None,
+    phot_lo_path: Optional[Path] = None,
     # SALT2 / fit-level thresholds (None → skip that cut)
     fitprob_min: float | None = 0.05,
     x1_abs_max: float | None = 3.0,
@@ -194,6 +232,15 @@ def ross_qc_with_report(
     snr_thresh: float = 5.0,
     require_pm10_snr5: bool = True,
     verbose: bool = False,
+    # Mode & toggles
+    fitres_only: bool = False,
+    check_sampling: bool = True,
+    check_saturation: bool = True,
+    add_qc_columns: bool = True,
+    # FITRES proxy thresholds (FITRES-only mode)
+    fitres_snrmax_min: float = 5.0,
+    fitres_snrsum_min: Optional[float] = 20.0,
+    fitres_require_pkmjderr: bool = True,
 ) -> pd.DataFrame:
     """Apply Rosselli-style QC on FITRES using PHOT/HEAD checks.
 
@@ -220,112 +267,213 @@ def ross_qc_with_report(
     Returns
     -------
     pandas.DataFrame
-        FITRES rows passing all quality cuts.
+        FITRES rows passing all quality cuts. If ``add_qc_columns=True``,
+        includes per-step audit columns (boolean with possible pd.NA for skipped).
     """
     N0 = len(fit_all)
-
-    def keep_and_print(mask: pd.Series, tag: str) -> pd.Series:
-        if verbose:
-            kept = int(mask.sum())
-            print(f"[ROSS QC] {tag:<18} keep={kept:6d}/{N0:6d} ({kept/N0:5.1%})")
-        return mask
-
+    # Helper to track cumulative keeps
     m_all = pd.Series(True, index=fit_all.index)
+
+    def keep_and_print(mask: pd.Series, tag: str) -> None:
+        nonlocal m_all
+        m_all &= mask.fillna(False)
+        if verbose:
+            kept = int(m_all.sum())
+            print(f"[ROSS QC] {tag:<18} keep={kept:6d}/{N0:6d} ({kept/N0:5.1%})")
+
+    # Prepare audit columns (pandas nullable boolean to allow pd.NA)
+    qc_cols: dict[str, pd.Series] = {
+        "QC_fitprob": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_x1": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_c": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_pkmjderr": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_x1err": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_cerr": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_sampling_pm10snr5": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_sampling_fitres_proxy": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+        "QC_nosat": pd.Series(pd.NA, index=fit_all.index, dtype="boolean"),
+    }
+
+    # ---------------------------
+    # FIT-level cuts (FITRES only)
+    # ---------------------------
     # FITPROB
-    if fitprob_min is None or ("FITPROB" not in fit_all.columns):
-        m_fitprob = pd.Series(True, index=fit_all.index)
+    if (fitprob_min is not None) and ("FITPROB" in fit_all.columns):
+        m_fitprob = pd.to_numeric(fit_all["FITPROB"], errors="coerce") > float(
+            fitprob_min
+        )
+        qc_cols["QC_fitprob"] = m_fitprob.astype("boolean")
+        keep_and_print(m_fitprob, f"FITPROB>{float(fitprob_min):.2f}")
     else:
-        m_fitprob = fit_all["FITPROB"].fillna(0) > float(fitprob_min)
-    tag_fitprob = (
-        "FITPROB (skip)" if fitprob_min is None else f"FITPROB>{float(fitprob_min):.2f}"
-    )
-    keep_and_print(m_fitprob, tag_fitprob)
-    m_all &= m_fitprob
+        if verbose:
+            print("[ROSS QC] skip FITPROB cut (column missing or threshold None)")
+        qc_cols["QC_fitprob"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
     # |x1|
-    if x1_abs_max is None:
-        m_x1 = pd.Series(True, index=fit_all.index)
-    else:
+    if (x1_abs_max is not None) and ("x1" in fit_all.columns):
         m_x1 = (
-            np.abs(pd.to_numeric(fit_all.get("x1", np.nan), errors="coerce"))
+            np.abs(pd.to_numeric(fit_all["x1"], errors="coerce"))
             <= float(x1_abs_max)
         )
-    tag_x1 = "x1 (skip)" if x1_abs_max is None else f"|x1|<={float(x1_abs_max):.2f}"
-    keep_and_print(m_x1, tag_x1)
-    m_all &= m_x1
-    # |c|
-    if c_abs_max is None:
-        m_c = pd.Series(True, index=fit_all.index)
+        qc_cols["QC_x1"] = m_x1.astype("boolean")
+        keep_and_print(m_x1, f"|x1|<={float(x1_abs_max):.2f}")
     else:
+        if verbose:
+            print("[ROSS QC] skip x1 cut (column missing or threshold None)")
+        qc_cols["QC_x1"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
+    # |c|
+    if (c_abs_max is not None) and ("c" in fit_all.columns):
         m_c = (
-            np.abs(pd.to_numeric(fit_all.get("c", np.nan), errors="coerce"))
+            np.abs(pd.to_numeric(fit_all["c"], errors="coerce"))
             <= float(c_abs_max)
         )
-    tag_c = "c (skip)" if c_abs_max is None else f"|c|<={float(c_abs_max):.2f}"
-    keep_and_print(m_c, tag_c)
-    m_all &= m_c
-    # PKMJDERR
-    if pkmjderr_max is None:
-        m_pkmjd = pd.Series(True, index=fit_all.index)
+        qc_cols["QC_c"] = m_c.astype("boolean")
+        keep_and_print(m_c, f"|c|<={float(c_abs_max):.2f}")
     else:
+        if verbose:
+            print("[ROSS QC] skip c cut (column missing or threshold None)")
+        qc_cols["QC_c"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
+    # PKMJDERR
+    if (pkmjderr_max is not None) and ("PKMJDERR" in fit_all.columns):
         m_pkmjd = (
-            pd.to_numeric(fit_all.get("PKMJDERR", np.nan), errors="coerce")
+            pd.to_numeric(fit_all["PKMJDERR"], errors="coerce")
             <= float(pkmjderr_max)
         )
-    tag_pkmjd = (
-        "PKMJDERR (skip)" if pkmjderr_max is None else f"PKMJDERR<={float(pkmjderr_max):.1f}d"
-    )
-    keep_and_print(m_pkmjd, tag_pkmjd)
-    m_all &= m_pkmjd
-    # x1ERR
-    if x1err_max is None:
-        m_x1e = pd.Series(True, index=fit_all.index)
+        qc_cols["QC_pkmjderr"] = m_pkmjd.astype("boolean")
+        keep_and_print(m_pkmjd, f"PKMJDERR<={float(pkmjderr_max):.1f}d")
     else:
+        if verbose:
+            print("[ROSS QC] skip PKMJDERR cut (column missing or threshold None)")
+        qc_cols["QC_pkmjderr"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
+    # x1ERR
+    if (x1err_max is not None) and ("x1ERR" in fit_all.columns):
         m_x1e = (
-            pd.to_numeric(fit_all.get("x1ERR", np.nan), errors="coerce")
+            pd.to_numeric(fit_all["x1ERR"], errors="coerce")
             <= float(x1err_max)
         )
-    tag_x1e = "x1ERR (skip)" if x1err_max is None else f"x1ERR<={float(x1err_max):.2f}"
-    keep_and_print(m_x1e, tag_x1e)
-    m_all &= m_x1e
-    # cERR
-    if cerr_max is None:
-        m_ce = pd.Series(True, index=fit_all.index)
+        qc_cols["QC_x1err"] = m_x1e.astype("boolean")
+        keep_and_print(m_x1e, f"x1ERR<={float(x1err_max):.2f}")
     else:
+        if verbose:
+            print("[ROSS QC] skip x1ERR cut (column missing or threshold None)")
+        qc_cols["QC_x1err"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
+    # cERR
+    if (cerr_max is not None) and ("cERR" in fit_all.columns):
         m_ce = (
-            pd.to_numeric(fit_all.get("cERR", np.nan), errors="coerce")
+            pd.to_numeric(fit_all["cERR"], errors="coerce")
             <= float(cerr_max)
         )
-    tag_ce = "cERR (skip)" if cerr_max is None else f"cERR<={float(cerr_max):.2f}"
-    keep_and_print(m_ce, tag_ce)
-    m_all &= m_ce
-    ids_hi = set(head_hi["ID_int"].dropna().astype("Int64"))
-    ids_lo = set(head_lo["ID_int"].dropna().astype("Int64"))
-    fit_hi = fit_all[fit_all["ID_int"].isin(ids_hi)]
-    fit_lo = fit_all[fit_all["ID_int"].isin(ids_lo)]
-    if require_pm10_snr5:
-        obs_ok_hi = _sn_pm10_snr5_ok_for_run(
-            fit_hi, head_hi, phot_hi, phase_days, snr_thresh
-        )
-        obs_ok_lo = _sn_pm10_snr5_ok_for_run(
-            fit_lo, head_lo, phot_lo, phase_days, snr_thresh
-        )
-        m_obs = pd.Series(False, index=fit_all.index)
-        m_obs.loc[fit_hi.index] = obs_ok_hi.values
-        m_obs.loc[fit_lo.index] = obs_ok_lo.values
-        keep_and_print(m_obs, ">=3 obs ±10d")
-        m_all &= m_obs
-    nosat_hi = nosat_mask_for_run(
-        fit_hi, head_hi, phot_hi, phot_path=phot_hi_path, rest_window=phase_days
-    )
-    nosat_lo = nosat_mask_for_run(
-        fit_lo, head_lo, phot_lo, phot_path=phot_lo_path, rest_window=phase_days
-    )
-    m_nosat = pd.Series(False, index=fit_all.index)
-    m_nosat.loc[fit_hi.index] = nosat_hi.values
-    m_nosat.loc[fit_lo.index] = nosat_lo.values
-    keep_and_print(m_nosat, "no saturation")
-    m_all &= m_nosat
+        qc_cols["QC_cerr"] = m_ce.astype("boolean")
+        keep_and_print(m_ce, f"cERR<={float(cerr_max):.2f}")
+    else:
+        if verbose:
+            print("[ROSS QC] skip cERR cut (column missing or threshold None)")
+        qc_cols["QC_cerr"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
+    # ------------------------------------
+    # Sampling & saturation (mode dependent)
+    # ------------------------------------
+    if fitres_only:
+        # FITRES-only: optional proxy sampling; saturation skipped
+        if check_sampling:
+            m_proxy = fitres_proxy_sampling_mask(
+                fit_all,
+                snrmax_min=fitres_snrmax_min,
+                snrsum_min=fitres_snrsum_min,
+                require_pkmjderr=fitres_require_pkmjderr,
+                pkmjderr_max=float(pkmjderr_max) if pkmjderr_max is not None else 1.0,
+            )
+            qc_cols["QC_sampling_fitres_proxy"] = m_proxy.astype("boolean")
+            keep_and_print(m_proxy, "FITRES proxy sampling")
+        else:
+            # sampling step disabled
+            qc_cols["QC_sampling_fitres_proxy"] = pd.Series(
+                pd.NA, index=fit_all.index, dtype="boolean"
+            )
+        if check_saturation and verbose:
+            print("[ROSS QC] SKIP saturation: fitres_only=True")
+        qc_cols["QC_nosat"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+    else:
+        # Non FITRES-only: keep existing PHOT-based sampling & nosat logic (with toggles)
+        ids_hi: set[int] = set()
+        ids_lo: set[int] = set()
+        fit_hi = fit_all.iloc[0:0]
+        fit_lo = fit_all.iloc[0:0]
+        if head_hi is not None:
+            ids_hi = set(head_hi.get("ID_int", pd.Series(dtype="Int64")).dropna().astype("Int64"))
+            fit_hi = fit_all[fit_all.get("ID_int").isin(ids_hi)] if "ID_int" in fit_all.columns else fit_all.iloc[0:0]
+        if head_lo is not None:
+            ids_lo = set(head_lo.get("ID_int", pd.Series(dtype="Int64")).dropna().astype("Int64"))
+            fit_lo = fit_all[fit_all.get("ID_int").isin(ids_lo)] if "ID_int" in fit_all.columns else fit_all.iloc[0:0]
+
+        if check_sampling and require_pm10_snr5:
+            obs_ok_hi = (
+                _sn_pm10_snr5_ok_for_run(
+                    fit_hi, head_hi, phot_hi, phase_days, snr_thresh
+                )
+                if (head_hi is not None and phot_hi is not None)
+                else pd.Series(False, index=fit_hi.index)
+            )
+            obs_ok_lo = (
+                _sn_pm10_snr5_ok_for_run(
+                    fit_lo, head_lo, phot_lo, phase_days, snr_thresh
+                )
+                if (head_lo is not None and phot_lo is not None)
+                else pd.Series(False, index=fit_lo.index)
+            )
+            m_obs = pd.Series(False, index=fit_all.index)
+            m_obs.loc[fit_hi.index] = obs_ok_hi.values
+            m_obs.loc[fit_lo.index] = obs_ok_lo.values
+            qc_cols["QC_sampling_pm10snr5"] = m_obs.astype("boolean")
+            keep_and_print(m_obs, ">=3 obs ±10d")
+        else:
+            qc_cols["QC_sampling_pm10snr5"] = pd.Series(
+                pd.NA, index=fit_all.index, dtype="boolean"
+            )
+
+        if check_saturation:
+            nosat_hi = (
+                nosat_mask_for_run(
+                    fit_hi, head_hi, phot_hi, phot_path=phot_hi_path, rest_window=phase_days
+                )
+                if (head_hi is not None and phot_hi is not None)
+                else pd.Series(True, index=fit_hi.index)
+            )
+            nosat_lo = (
+                nosat_mask_for_run(
+                    fit_lo, head_lo, phot_lo, phot_path=phot_lo_path, rest_window=phase_days
+                )
+                if (head_lo is not None and phot_lo is not None)
+                else pd.Series(True, index=fit_lo.index)
+            )
+            m_nosat = pd.Series(False, index=fit_all.index)
+            m_nosat.loc[fit_hi.index] = nosat_hi.values
+            m_nosat.loc[fit_lo.index] = nosat_lo.values
+            qc_cols["QC_nosat"] = m_nosat.astype("boolean")
+            keep_and_print(m_nosat, "no saturation")
+        else:
+            qc_cols["QC_nosat"] = pd.Series(pd.NA, index=fit_all.index, dtype="boolean")
+
     kept = int(m_all.sum())
     if verbose:
         print(f"[ROSS QC] TOTAL          keep={kept:6d}/{N0:6d} ({kept/N0:5.1%})")
-    return fit_all.loc[m_all].copy()
+    out = fit_all.loc[m_all].copy()
+    if add_qc_columns:
+        for k, v in qc_cols.items():
+            # Reindex to keep only rows we kept
+            out[k] = v.reindex(out.index)
+    return out
+
+# Example usage (FITRES-only mode):
+# fit_qc = ross_qc_with_report(
+#     fit_all,
+#     head_hi=None, phot_hi=None, head_lo=None, phot_lo=None,
+#     fitres_only=True,
+#     fitres_snrmax_min=5.0, fitres_snrsum_min=20.0,
+#     fitres_require_pkmjderr=True,
+#     add_qc_columns=True, verbose=True,
+# )

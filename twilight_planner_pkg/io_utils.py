@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timezone as _dt_timezone
 from typing import Dict, List, Optional, Tuple
+import re
 
 import astropy.units as u
 import numpy as np
@@ -15,6 +16,13 @@ from .astro_utils import (
     validate_coords,
 )
 from .config import PlannerConfig
+from .config import (
+    DISCOVERY_ATLAS_LINEAR,
+    DISCOVERY_COLOR_PRIORS_MIN,
+    DISCOVERY_COLOR_PRIORS_MAX,
+    DISCOVERY_LINEAR_COEFFS,
+    CLEAR_ZEROPOINT,
+)
 
 # mypy: ignore-errors
 
@@ -65,6 +73,9 @@ _DISC_DATE_SYNONYMS = [
     "discoverdate",
     "firstdetected",
     "firstdiscoverydate",
+    # TNS variant
+    "discoverydateut",
+    # generic fallbacks
     "date",
     "utcdate",
     "isodate",
@@ -82,7 +93,16 @@ _NAME_SYNONYMS = [
     "id",
     "snname",
 ]
-_TYPE_SYNONYMS = ["type", "sntype", "class", "tnsclass", "subtype", "sn_type_raw"]
+_TYPE_SYNONYMS = [
+    "type",
+    "sntype",
+    "class",
+    "tnsclass",
+    "subtype",
+    "sn_type_raw",
+    # TNS variant
+    "objtype",
+]
 
 _MAG_SYNONYMS = {
     "g": [
@@ -147,13 +167,19 @@ _DISC_MAG_SYNONYMS = [
     "discoverymag",
     "disc_mag",
     "discovermag",
+    # TNS variant
+    "discoverymagflux",
 ]
 _DISC_FILT_SYNONYMS = [
     "discmagfilter",
     "discoverymagfilter",
     "disc_filter",
+    # common variants
     "filter",
     "band",
+    # TNS variants
+    "discoveryfilter",
+    "discfilter",
 ]
 
 
@@ -171,11 +197,37 @@ def _pick_filter_column(df: pd.DataFrame) -> Optional[str]:
 def _norm_filter_string(x: object) -> str:
     """Normalize a free-form filter string to a compact token.
 
-    Examples: "Orange" → "o", "ATLAS-o" → "o", "PS1 r" → "r".
+    Examples: "Orange" → "o", "ATLAS-o" → "o", "g-ZTF" → "g", "PS1 r" → "r".
     """
     s = str(x).strip().lower()
-    # remove common prefixes/suffixes and spaces
-    for rm in ["atlas-", "ps1", "ps ", "lsst", "panstarrs", "_ps1", " "]:
+    # remove common prefixes/suffixes and spaces, plus common survey/instrument tags
+    for rm in [
+        "atlas-",
+        "-atlas",
+        "atlas",
+        "ps1",
+        "ps ",
+        "_ps1",
+        "-p1",
+        "p1",
+        "gpc1",
+        "gpc2",
+        "-gpc1",
+        "-gpc2",
+        "ztf",
+        "-ztf",
+        "lsst",
+        "panstarrs",
+        "blackgem",
+        "bg",
+        "goto",
+        "-goto",
+        "crts",
+        "-crts",
+        "sedm",
+        "-sedm",
+        " ",
+    ]:
         s = s.replace(rm, "")
     alias = {
         "orange": "o",
@@ -193,7 +245,13 @@ def _norm_filter_string(x: object) -> str:
         "z": "z",
         "y": "y",
     }
-    return alias.get(s, s)
+    if s in alias:
+        return alias[s]
+    # Fallback: pick the first plausible band letter
+    for ch in s:
+        if ch in "ugrizyoc":
+            return ch
+    return s
 
 
 def _to_r_from_atlas(
@@ -213,6 +271,282 @@ def _to_r_from_atlas(
     if f == "o":
         return dm + 0.26 * float(assumed_gr)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Heterogeneous discovery photometry ingestion and mapping
+# ---------------------------------------------------------------------------
+
+# Canonical tags for heterogeneous discovery filters
+_FILTER_SYNONYMS = {
+    r"^\s*w[\-\s]?p?1\s*$": "PS1_w",
+    r"^\s*l[\-\s]?goto\s*$": "GOTO_L",
+    r"^\s*bg[\-\s]?q[\-\s]?(blackgem)?$": "BG_q",
+    r"^\s*clear[\-\s]?$": "Clear",
+    r"^\s*v[\-\s]?crts[\-\s]?(crts)?$": "CRTS_V",
+}
+
+
+def normalize_filter_name(s: str | object) -> Optional[str]:
+    """Normalize free-form discovery filter strings to canonical tags.
+
+    Returns one of: 'PS1_w', 'GOTO_L', 'BG_q', 'Clear', 'CRTS_V', or
+    LSST bands 'g'/'r' (and maps others to None for downstream defaulting).
+    Matching is case/space/punctuation insensitive.
+    """
+    try:
+        t = str(s).strip().lower()
+    except Exception:
+        return None
+    for pat, tag in _FILTER_SYNONYMS.items():
+        if re.match(pat, t):
+            return tag
+    # Allow direct LSST-like single-letter band identifiers
+    if t in {"g", "r"}:
+        return t
+    # tolerate strings like 'g-ztf', 'r-ztf'
+    if t.startswith("g"):
+        return "g"
+    if t.startswith("r"):
+        return "r"
+    return None
+
+
+def _clip_color(x: Optional[float]) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        xv = float(x)
+    except Exception:
+        return None
+    if np.isnan(xv):
+        return None
+    return float(np.clip(xv, DISCOVERY_COLOR_PRIORS_MIN, DISCOVERY_COLOR_PRIORS_MAX))
+
+
+def map_to_lsst(
+    tag: str,
+    mag: float,
+    colors: Dict[str, Optional[float]] | None,
+    coeffs: Optional[Dict[str, float]] = None,
+) -> Tuple[str, float]:
+    """Map a heterogeneous discovery-band magnitude to an LSST band/magnitude.
+
+    Parameters
+    ----------
+    tag : str
+        Canonical filter tag (e.g., 'PS1_w', 'GOTO_L', 'BG_q', 'Clear', 'CRTS_V', 'g', 'r').
+    mag : float
+        Input discovery magnitude in the given tag.
+    colors : dict
+        Optional per-object colors with keys 'g-r' and 'r-i'.
+    coeffs : dict or None
+        Optional override coefficients {a, b, c?}. If None, defaults are used.
+
+    Returns
+    -------
+    (lsst_band, mag_transformed)
+    """
+    # Direct pass-through for g/r if requested
+    if tag in {"g", "r"}:
+        return tag, float(mag)
+
+    colors = colors or {}
+    gr = _clip_color(colors.get("g-r"))
+    ri = _clip_color(colors.get("r-i"))
+
+    def _apply(default_key: str) -> Tuple[str, float]:
+        default = DISCOVERY_LINEAR_COEFFS.get(default_key, {})
+        target = str(default.get("target", "r"))
+        a = float((coeffs or default).get("a", 0.0))
+        b = float((coeffs or default).get("b", 0.0))
+        c = float((coeffs or default).get("c", 0.0))
+        dm = a
+        if gr is not None:
+            dm += b * gr
+        if (c != 0.0) and (ri is not None):
+            dm += c * ri
+        return target, float(mag + dm)
+
+    if tag == "PS1_w":
+        return _apply("PS1_w")
+    if tag == "GOTO_L":
+        return _apply("GOTO_L")
+    if tag == "BG_q":
+        return _apply("BG_q")
+    if tag in {"Clear", "CRTS_V"}:
+        # Treat Clear as V (CV) unless overriden to CR. CRTS_V is V.
+        if (tag == "CRTS_V") or (CLEAR_ZEROPOINT.upper() == "CV"):
+            return _apply("CV_to")
+        else:
+            return _apply("CR_to")
+
+    # Unknown tag: conservatively map to r unchanged
+    return "r", float(mag)
+
+
+def _fit_linear_coeffs_for_tag(
+    tag: str, calibrators: Optional[pd.DataFrame]
+) -> Optional[Dict[str, float]]:
+    """Optionally fit (a,b[,c]) for a given tag using calibrators.
+
+    Expects calibrators with columns at least: 'tag', 'mag' (input discovery mag),
+    and per-object reference magnitudes 'g','r','i'. The target band is implied by
+    DISCOVERY_LINEAR_COEFFS[target]['target'] for the tag.
+
+    Returns None if inputs are insufficient.
+    """
+    if calibrators is None or tag not in DISCOVERY_LINEAR_COEFFS:
+        return None
+    df = calibrators
+    try:
+        df = df[df["tag"] == tag]
+    except Exception:
+        return None
+    need_cols = {"mag", "g", "r"}
+    if not need_cols.issubset(set(df.columns)):
+        return None
+    cfg_default = DISCOVERY_LINEAR_COEFFS.get(tag, {})
+    target = str(cfg_default.get("target", "r"))
+    if target not in {"g", "r"}:
+        target = "r"
+    # Build design matrix: [1, (g-r), (r-i)?]
+    try:
+        gr = (df["g"] - df["r"]).astype(float)
+        ri = None
+        if "i" in df.columns:
+            ri = (df["r"] - df["i"]).astype(float)
+        y = (df[target] - df["mag"]).astype(float)
+        # clip colors to priors range
+        gr = gr.clip(DISCOVERY_COLOR_PRIORS_MIN, DISCOVERY_COLOR_PRIORS_MAX)
+        if ri is not None:
+            ri = ri.clip(DISCOVERY_COLOR_PRIORS_MIN, DISCOVERY_COLOR_PRIORS_MAX)
+        X_cols = [np.ones_like(gr.values), gr.values]
+        if ri is not None and ("c" in cfg_default):
+            X_cols.append(ri.values)
+        X = np.vstack(X_cols).T
+        # Robust-ish: iterative sigma clip on residuals
+        mask = np.isfinite(X).all(axis=1) & np.isfinite(y.values)
+        Xw = X[mask]
+        yw = y.values[mask]
+        if Xw.shape[0] < Xw.shape[1] + 3:
+            return None
+        for _ in range(2):
+            coef, *_ = np.linalg.lstsq(Xw, yw, rcond=None)
+            resid = yw - Xw @ coef
+            s = np.nanstd(resid)
+            if not np.isfinite(s) or s <= 0:
+                break
+            keep = np.abs(resid) < 3.0 * s
+            if keep.sum() < Xw.shape[1] + 3:
+                break
+            Xw = Xw[keep]
+            yw = yw[keep]
+        # Map to a,b,c
+        out: Dict[str, float] = {"a": float(coef[0]), "b": float(coef[1])}
+        if len(coef) >= 3:
+            out["c"] = float(coef[2])
+        return out
+    except Exception:
+        return None
+
+
+def read_discovery_csv(
+    path: str,
+    ref_colors_df: Optional[pd.DataFrame] = None,
+    calibrators_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Read a mixed-filter discovery CSV and normalize to LSST g/r magnitudes.
+
+    Returns columns: mjd, ra, dec, lsst_band, mag_lsst, magerr
+
+    - Accepts liberal headers for mjd, mag, magerr/e_mag, filter/band, ra, dec, survey.
+    - Does not mutate input RA/Dec.
+    - If DISCOVERY_ATLAS_LINEAR and calibrators are provided, fits per-tag
+      (a,b[,c]) and applies; otherwise falls back to static coefficients.
+    - Fitting is skipped gracefully if calibrators are unavailable.
+    """
+    df = pd.read_csv(path)
+    # tolerant header mapping
+    def _pick(colset: List[str], keys: List[str]) -> Optional[str]:
+        keys_norm = {"".join(ch for ch in k.lower() if ch.isalnum()): k for k in colset}
+        for want in keys:
+            w = "".join(ch for ch in want.lower() if ch.isalnum())
+            for knorm, orig in keys_norm.items():
+                if knorm == w:
+                    return orig
+        return None
+
+    cols = list(df.columns)
+    c_mjd = _pick(cols, ["mjd", "jd"])
+    c_mag = _pick(cols, ["mag", "magnitude"])  # discovery magnitude value
+    c_meg = _pick(cols, ["magerr", "e_mag", "mag_error"])  # uncertainty
+    c_fil = _pick(cols, ["filter", "band", "filt", "discmagfilter", "discoveryfilter"])
+    c_ra = _pick(cols, ["ra"])  # do not mutate RA
+    c_dec = _pick(cols, ["dec", "decl", "declination"])  # do not mutate Dec
+    # Optional survey (unused but tolerated)
+    c_surv = _pick(cols, ["survey"])  # noqa: F841
+
+    need = {"mjd": c_mjd, "mag": c_mag, "magerr": c_meg, "filter": c_fil, "ra": c_ra, "dec": c_dec}
+    missing = [k for k, v in need.items() if v is None]
+    if missing:
+        raise ValueError(f"Missing required column(s) {missing} in {path}")
+
+    df = df.rename(columns={c_mjd: "mjd", c_mag: "mag", c_meg: "magerr", c_fil: "filter", c_ra: "ra", c_dec: "dec"})
+
+    # Normalize filter tags
+    df["tag"] = df["filter"].apply(normalize_filter_name)
+    # Provide per-object colors if available
+    if ref_colors_df is not None:
+        # Expect columns 'g-r','r-i' keyed by index or an identifier; fallback to NaNs
+        for c in ("g-r", "r-i"):
+            if c not in ref_colors_df.columns:
+                ref_colors_df[c] = np.nan
+        try:
+            df = df.join(ref_colors_df[["g-r", "r-i"]], how="left")
+        except Exception:
+            # If join fails, just fill NaNs
+            df["g-r"] = np.nan
+            df["r-i"] = np.nan
+    else:
+        df["g-r"] = np.nan
+        df["r-i"] = np.nan
+
+    # Optionally fit per-tag coefficients
+    fit_by_tag: Dict[str, Dict[str, float]] = {}
+    if DISCOVERY_ATLAS_LINEAR and calibrators_df is not None:
+        try:
+            tags = sorted(set(df["tag"].dropna().astype(str)))
+        except Exception:
+            tags = []
+        for t in tags:
+            co = _fit_linear_coeffs_for_tag(t, calibrators_df)
+            if co is not None:
+                fit_by_tag[t] = co
+
+    # Transform per-row
+    out_band: List[str] = []
+    out_mag: List[float] = []
+    for tag, mag, gr, ri in zip(df["tag"], df["mag"], df["g-r"], df["r-i"]):
+        t = tag if isinstance(tag, str) else None
+        if t is None:
+            # Unknown tag → default to r unchanged
+            out_band.append("r")
+            try:
+                out_mag.append(float(mag))
+            except Exception:
+                out_mag.append(np.nan)
+            continue
+        co = fit_by_tag.get(t)
+        band, mt = map_to_lsst(t, float(mag), {"g-r": gr, "r-i": ri}, coeffs=co)
+        # Ensure only g/r bands are emitted
+        band = band if band in {"g", "r"} else "r"
+        out_band.append(band)
+        out_mag.append(mt)
+
+    df["lsst_band"] = out_band
+    df["mag_lsst"] = out_mag
+    return df[["mjd", "ra", "dec", "lsst_band", "mag_lsst", "magerr"]]
 
 
 def infer_src_mag_from_discovery_pro(
@@ -263,7 +597,18 @@ def infer_src_mag_from_discovery_pro(
             dm = float(dm)
         except Exception:
             continue
-        disc_f = _norm_filter_string(row.get(filt_col, "")) if filt_col else ""
+        raw_f = row.get(filt_col, "") if filt_col else ""
+        # First try richer normalization/mapping to LSST g/r with linear terms
+        tag = normalize_filter_name(raw_f)
+        if tag is not None:
+            try:
+                lsst_band, dm_lsst = map_to_lsst(tag, float(dm), colors=None, coeffs=None)
+                disc_f = str(lsst_band).lower()
+                dm = float(dm_lsst)
+            except Exception:
+                disc_f = _norm_filter_string(raw_f)
+        else:
+            disc_f = _norm_filter_string(raw_f)
         src: Dict[str, float] = {}
 
         if policy == "copy":
@@ -739,7 +1084,17 @@ def _parse_ra_value(val) -> float:
             return (x * 15.0) % 360.0
         return x % 360.0  # degrees
     try:
-        ang = Angle(str(val))
+        s = str(val).strip()
+        # Heuristic: sexagesimal with ":" and leading field < 24 → hours
+        if ":" in s:
+            try:
+                lead = float(s.split(":", 1)[0].replace("+", "").replace("-", ""))
+            except Exception:
+                lead = None
+            if lead is not None and 0.0 <= lead < 24.0:
+                ang = Angle(s, unit=u.hourangle)
+                return float(ang.to(u.deg).value) % 360.0
+        ang = Angle(s)
         if ang.unit == u.radian:
             return float(ang.to(u.deg).value) % 360.0
         return float(ang.wrap_at(360 * u.deg).degree)
@@ -788,10 +1143,49 @@ def quick_unit_report(df: pd.DataFrame, ra_col: str, dec_col: str) -> None:
     """
     ra = pd.to_numeric(df[ra_col], errors="coerce")
     dec = pd.to_numeric(df[dec_col], errors="coerce")
-    print(f"RA raw (numeric) range:  min={np.nanmin(ra):.6f}, max={np.nanmax(ra):.6f}")
-    print(
-        f"Dec raw (numeric) range: min={np.nanmin(dec):.6f}, max={np.nanmax(dec):.6f}"
-    )
+    # Guard against all-NaN numeric views (e.g., sexagesimal strings)
+    if ra.notna().any():
+        try:
+            print(
+                f"RA raw (numeric) range:  min={np.nanmin(ra):.6f}, max={np.nanmax(ra):.6f}"
+            )
+        except Exception:
+            pass
+    else:
+        # Try parsing a sample of values as sexagesimal hours
+        try:
+            vals = df[ra_col].astype(str).head(100).tolist()
+            parsed = np.array([_parse_ra_value(v) for v in vals], dtype=float)
+            finite = parsed[np.isfinite(parsed)]
+            if finite.size:
+                print(
+                    f"RA parsed (deg) sample:  min={finite.min():.6f}, max={finite.max():.6f}"
+                )
+            else:
+                print("RA appears non-numeric/empty; skipping unit report.")
+        except Exception:
+            print("RA appears non-numeric; skipping unit report.")
+
+    if dec.notna().any():
+        try:
+            print(
+                f"Dec raw (numeric) range: min={np.nanmin(dec):.6f}, max={np.nanmax(dec):.6f}"
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            vals = df[dec_col].astype(str).head(100).tolist()
+            parsed = np.array([_parse_dec_value(v) for v in vals], dtype=float)
+            finite = parsed[np.isfinite(parsed)]
+            if finite.size:
+                print(
+                    f"Dec parsed (deg) sample: min={finite.min():.6f}, max={finite.max():.6f}"
+                )
+            else:
+                print("Dec appears non-numeric/empty; skipping unit report.")
+        except Exception:
+            print("Dec appears non-numeric; skipping unit report.")
 
 
 def _infer_units(ra_num: pd.Series, dec_num: pd.Series):
