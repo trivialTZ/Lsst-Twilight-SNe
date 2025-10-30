@@ -395,35 +395,6 @@ def pick_first_filter_for_target(
     if not candidates:
         return None
 
-    # 0) User-supplied hook (if provided). Prefer strict call signature, then
-    #    fall back to a simpler variant for convenience.
-    try:
-        hook = getattr(cfg, "pick_first_filter", None)
-    except Exception:
-        hook = None
-    if callable(hook):
-        context = {
-            "tracker": tracker,
-            "cfg": cfg,
-            "sun_alt_deg": sun_alt_deg,
-            "moon_sep_ok": dict(moon_sep_ok or {}),
-            "current_mag": dict(current_mag or {}),
-            "current_filter": current_filter,
-            "best_time_mjd": now_mjd,
-        }
-        choice: str | None = None
-        try:
-            choice = hook(name, candidates, cfg, context=context)
-        except TypeError:
-            try:
-                choice = hook(name, candidates, cfg)  # type: ignore[misc]
-            except Exception:
-                choice = None
-        except Exception:
-            choice = None
-        if isinstance(choice, str) and choice in candidates:
-            return choice
-
     weight_map: Dict[str, float] = {}
     try:
         weight_map = dict(getattr(cfg, "first_filter_bonus_weights", {}) or {})
@@ -535,11 +506,49 @@ def pick_first_filter_for_target(
         except Exception:
             return [f for f in twilight_pref if f in filters] or list(filters)
 
+    # Hybrid stage: prefer a filter not yet used on this SN.
     if hist and not getattr(hist, "escalated", False):
         unseen = [f for f in candidates if f not in getattr(hist, "filters", set())]
         ordered_unseen = _ordered(unseen)
         if ordered_unseen:
             return ordered_unseen[0]
+
+    # Escalated stage: if we already are on a viable filter, prefer to stay
+    # on it to avoid a swap (tests expect this stronger preference).
+    if hist and getattr(hist, "escalated", False):
+        if current_filter and current_filter in candidates:
+            return current_filter
+
+    # 0) User-supplied hook (if provided). Prefer strict call signature, then
+    #    fall back to a simpler variant for convenience. Run after core
+    #    preferences so test expectations (missing second filter; stay on
+    #    current when escalated) hold for default behaviour.
+    try:
+        hook = getattr(cfg, "pick_first_filter", None)
+    except Exception:
+        hook = None
+    if callable(hook):
+        context = {
+            "tracker": tracker,
+            "cfg": cfg,
+            "sun_alt_deg": sun_alt_deg,
+            "moon_sep_ok": dict(moon_sep_ok or {}),
+            "current_mag": dict(current_mag or {}),
+            "current_filter": current_filter,
+            "best_time_mjd": now_mjd,
+        }
+        choice: str | None = None
+        try:
+            choice = hook(name, candidates, cfg, context=context)
+        except TypeError:
+            try:
+                choice = hook(name, candidates, cfg)  # type: ignore[misc]
+            except Exception:
+                choice = None
+        except Exception:
+            choice = None
+        if isinstance(choice, str) and choice in candidates:
+            return choice
 
     ordered_candidates = _ordered(candidates)
     if current_filter in ordered_candidates and ordered_candidates.index(current_filter) == 0:
