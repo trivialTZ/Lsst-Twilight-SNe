@@ -708,7 +708,10 @@ def load_binned_catalogs(
     tw_glob: str = "y1_cat_bin_tw_*.csv",
     tw_guess_glob: str | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Load binned catalogs and clip to ``z_max`` if provided."""
+    """Load binned catalogs and clip to ``z_max`` if provided.
+        deprecate
+    """
+
 
     def _latest(glob: str) -> Path | None:
         paths = sorted(derived_dir.glob(glob), key=lambda p: p.stat().st_mtime)
@@ -736,3 +739,161 @@ def load_binned_catalogs(
             df = df.query("0 < z <= @z_max").copy()
         out["WFD+Twilight (Guess)"] = df
     return out
+
+
+def write_binned_catalogs_v3(
+    derived_dir: Path,
+    fit_qc: pd.DataFrame,
+    *,
+    label: str,
+    dz: float = DZ_DEFAULT,
+    z_max: float = Z_MAX_DEFAULT,
+    sigma_agg: str = "ivar",
+    alpha: float = 0.14,
+    beta: float = 3.1,
+    sigma_int: float | str = "color_binned",
+    sigma_vpec_kms: float = 300.0,
+) -> tuple[Path, pd.DataFrame, np.ndarray, np.ndarray]:
+    """
+    Bin by redshift and write a single CSV with N(z), σμ(z), and z_eff.
+    This v3 depends only on fit_qc (no Twilight or promoted inputs).
+
+    Parameters
+    ----------
+    derived_dir : pathlib.Path
+        Output directory for the CSV.
+    fit_qc : pandas.DataFrame
+        FITRES-like table for cosmology-quality SNe with SALT2 columns.
+    label : str
+        Used in filename: cat_bin_{label}.csv
+    dz, z_max : float
+        Bin width and max redshift edge (bins start at 0).
+    sigma_agg : {"ivar", "median"}
+        Per-bin σμ aggregation. "ivar" = inverse-variance; "median" = robust median.
+    alpha, beta : float
+        Stretch/color coefficients for σμ pipeline (fallback if cols absent).
+    sigma_int : float | str
+        Intrinsic scatter; if "color_binned", interpolate from color-grid.
+    sigma_vpec_kms : float
+        Peculiar-velocity dispersion (km/s).
+
+    Returns
+    -------
+    (out_path, df_out, z_edges, z_mid)
+        out_path : Path to cat_bin_{label}.csv
+        df_out   : DataFrame with columns ["z","z_eff","N","sigma_mu"]
+        z_edges  : ndarray of bin edges
+        z_mid    : ndarray of bin centers
+
+    Examples
+    --------
+    >>> df = pd.DataFrame({
+    ...     "z":[0.05,0.06,0.12],
+    ...     "mBERR":[0.12]*3, "x1ERR":[1.0]*3, "cERR":[0.04]*3,
+    ...     "COV_x1_c":[0.0]*3, "COV_mB_x1":[0.0]*3, "COV_mB_c":[0.0]*3,
+    ...     "c":[0.0, 0.1, -0.05],
+    ... })
+    >>> out_path, df_out, z_edges, z_mid = write_binned_catalogs_v3(
+    ...     Path("."), df, label="test", dz=0.05, z_max=0.2
+    ... )
+    """
+    # ---- per-SN σμ ----
+    fit_qc = fit_qc.copy()
+    fit_qc["sigma_mu_sn"] = sigma_mu_per_sn(
+        fit_qc, alpha=alpha, beta=beta,
+        sigma_int=sigma_int, sigma_vpec_kms=sigma_vpec_kms
+    )
+
+    # ---- binning grid ----
+    z_edges = np.arange(0.0, z_max + dz + 1e-12, dz)
+    z_mid   = 0.5 * (z_edges[:-1] + z_edges[1:])
+
+    # numeric z once, reuse everywhere
+    z_num = pd.to_numeric(fit_qc.get("z", np.nan), errors="coerce").astype(float)
+    z_num = z_num.replace([np.inf, -np.inf], np.nan)
+
+    # histogram counts (finite z only)
+    N = nz_hist(z_num[np.isfinite(z_num)].to_numpy(), z_edges)
+
+    # ---- per-bin aggregation ----
+    sigma_bin = np.full_like(z_mid, np.nan, dtype=float)
+    z_eff     = np.full_like(z_mid, np.nan, dtype=float)
+
+    agg = str(sigma_agg).lower().strip()
+    if agg not in {"ivar", "median"}:
+        raise ValueError("sigma_agg must be either 'ivar' or 'median'")
+
+    # pre-cache sigma_mu_sn as numeric
+    sig_sn = pd.to_numeric(fit_qc["sigma_mu_sn"], errors="coerce").astype(float)
+    sig_sn = sig_sn.replace([np.inf, -np.inf], np.nan)
+
+    for k in range(len(z_mid)):
+        z_lo, z_hi = z_edges[k], z_edges[k + 1]
+        m = (z_num >= z_lo) & (z_num < z_hi)
+
+        if not bool(m.any()):
+            continue
+
+        s = sig_sn[m]
+        s = s[(s > 0) & np.isfinite(s)]
+
+        if s.empty:
+            continue
+
+        if agg == "ivar":
+            inv  = 1.0 / (s.values ** 2)
+            ssum = float(inv.sum())
+            n    = float(s.size)
+            if ssum > 0.0:
+                sigma_bin[k] = float(np.sqrt(n / ssum))
+                z_bin = z_num[m].to_numpy(dtype=float)
+                # align z to s by selecting same finite-positive mask
+                z_bin = z_bin[(sig_sn[m] > 0) & np.isfinite(sig_sn[m])]
+                z_eff[k] = float((z_bin * inv).sum() / ssum)
+        else:
+            sigma_bin[k] = float(np.nanmedian(s.values))
+
+    # ---- fill missing ----
+# --- 用下面这个实现替换 v3 里的 _fill() 辅助函数 ---
+    def _fill(values: np.ndarray, fill: float | np.ndarray | pd.Series) -> np.ndarray:
+        s = pd.Series(values).replace([np.inf, -np.inf], np.nan).astype(float)
+        s = s.ffill().bfill()
+        # 标量：直接用
+        if np.isscalar(fill):
+            return s.fillna(float(fill)).to_numpy(dtype=float)
+        # 非标量：转成 Series 并与 s 对齐后按位置填
+        if isinstance(fill, pd.Series):
+            fill_s = fill.astype(float).reindex(s.index)
+        else:
+            fill_arr = np.asarray(fill, dtype=float)
+            if fill_arr.shape != s.shape:
+                # 形状不匹配就退回到“用 fill 的全体中位数”作为标量兜底
+                fallback = float(np.nanmedian(fill_arr)) if fill_arr.size else np.nan
+                return s.fillna(fallback).to_numpy(dtype=float)
+            fill_s = pd.Series(fill_arr, index=s.index)
+        out = s.where(s.notna(), fill_s)   # 只在 NaN 的位置用 fill_s
+        return out.to_numpy(dtype=float)
+
+
+    global_med = float(np.nanmedian(sig_sn.values)) if sig_sn.size else 0.12
+    sigma_bin  = _fill(sigma_bin, global_med)
+    z_eff      = _fill(z_eff, z_mid)
+
+    # ---- output ----
+    df_out = pd.DataFrame({
+        "z": z_mid,
+        "z_eff": z_eff,
+        "N": N.astype(int),
+        "sigma_mu": sigma_bin,
+    })
+
+    derived_dir.mkdir(parents=True, exist_ok=True)
+    out_path    = derived_dir / f"cat_bin_{label}.csv"
+    compat_path = derived_dir / f"y1_cat_bin_base_{label}.csv"
+
+    df_out.to_csv(out_path, index=False)
+    df_out.to_csv(compat_path, index=False)
+
+    # return both the path AND the in-memory results + bins
+    return out_path, df_out, z_edges, z_mid
+

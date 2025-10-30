@@ -16,6 +16,6 @@ COLORS = {
 FID_CENTERS = {"Om": 0.3, "w0": -1.0, "wa": 0.0, "M": 0.0}
 
 # Default binning / ranges (keep notebook defaults)
-DZ_DEFAULT = 0.01
-Z_MAX_DEFAULT = 1.20
-Z_TW_MIN_DEFAULT, Z_TW_MAX_DEFAULT = 0.02, 0.22
+DZ_DEFAULT = 0.00
+Z_MAX_DEFAULT = 2.2
+Z_TW_MIN_DEFAULT, Z_TW_MAX_DEFAULT = 0.00, 0.25
