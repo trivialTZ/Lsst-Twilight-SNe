@@ -781,7 +781,7 @@ def write_binned_catalogs_v3(
     -------
     (out_path, df_out, z_edges, z_mid)
         out_path : Path to cat_bin_{label}.csv
-        df_out   : DataFrame with columns ["z","z_eff","N","sigma_mu"]
+        df_out   : DataFrame with columns ["z","z_eff","N","sigma_mu","w"]
         z_edges  : ndarray of bin edges
         z_mid    : ndarray of bin centers
 
@@ -887,6 +887,12 @@ def write_binned_catalogs_v3(
         "sigma_mu": sigma_bin,
     })
 
+    # Cosmology weight per redshift bin: w = N / sigma_mu^2 (zero if sigma_mu <= 0)
+    # Use numeric arrays to avoid pandas dtype pitfalls
+    _sig = df_out["sigma_mu"].to_numpy(dtype=float)
+    _N   = df_out["N"].to_numpy(dtype=float)
+    df_out["w"] = np.where((_sig > 0.0) & np.isfinite(_sig), _N / (_sig ** 2), 0.0)
+
     derived_dir.mkdir(parents=True, exist_ok=True)
     out_path    = derived_dir / f"cat_bin_{label}.csv"
     compat_path = derived_dir / f"y1_cat_bin_base_{label}.csv"
@@ -896,4 +902,3 @@ def write_binned_catalogs_v3(
 
     # return both the path AND the in-memory results + bins
     return out_path, df_out, z_edges, z_mid
-
