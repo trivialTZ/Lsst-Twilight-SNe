@@ -3,6 +3,13 @@
 Tools for planning LSST twilight observations of supernovae and
 experimenting with dynamic priority strategies.
 
+---
+<div align="center">
+  <img src="ov.png" alt="Overview" width="80%"/>
+</div>
+
+---
+
 ## Repository layout
 
 - `twilight_planner_pkg/` – core Python package with the scheduler and
