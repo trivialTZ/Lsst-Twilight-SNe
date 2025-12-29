@@ -4,7 +4,8 @@ from .tw_binning import (
     nz_hist,
     sigma_mu_per_sn,
     write_binned_catalogs_v2,
-    write_binned_catalogs_v3
+    write_binned_catalogs_v3,
+    _sigma_int_from_color
 )
 from .tw_constants import (
     COLORS,

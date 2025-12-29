@@ -101,7 +101,7 @@ def promote_host_coords_to_ra_dec(
     ra_col: str = "RA",
     dec_col: str = "DEC",
     invalid_sentinel: float = -999.0,
-    drop_invalid_host: bool = True,   # <— NEW: drop rows with invalid HOST_* first
+    drop_invalid_host: bool = True,   # drop rows with invalid HOST_* first
     inplace: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, int]]:
     """
@@ -144,22 +144,18 @@ def promote_host_coords_to_ra_dec(
             "n_host_dropped": 0
         }
 
-    # valid hosts after optional drop
     valid_host = (
         df[host_ra_col].notna() & df[host_dec_col].notna() &
         (df[host_ra_col] != invalid_sentinel) & (df[host_dec_col] != invalid_sentinel)
     )
 
-    # invalid RA/DEC
     invalid_ra  = df[ra_col].isna()  | (df[ra_col]  == invalid_sentinel)
     invalid_dec = df[dec_col].isna() | (df[dec_col] == invalid_sentinel)
 
-    # masks to fill
     fill_ra_mask   = valid_host & invalid_ra
     fill_dec_mask  = valid_host & invalid_dec
     fill_both_mask = valid_host & invalid_ra & invalid_dec
 
-    # fill from host
     df.loc[fill_ra_mask,  ra_col]  = df.loc[fill_ra_mask,  host_ra_col].to_numpy()
     df.loc[fill_dec_mask, dec_col] = df.loc[fill_dec_mask, host_dec_col].to_numpy()
 

@@ -7,6 +7,7 @@ __all__ = [
     "priority",
     "photom_rubin",
     "simlib_writer",
+    "snana_fits",
     "sky_model",
     "examine",
 ]
