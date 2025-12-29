@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 from typing import Iterable, Literal, overload
 
@@ -9,7 +10,12 @@ import pandas as pd
 from astropy.io import fits
 
 
-@dataclass(frozen=True, slots=True)
+_DATACLASS_KWARGS: dict[str, bool] = {}
+if "slots" in inspect.signature(dataclass).parameters:
+    _DATACLASS_KWARGS["slots"] = True
+
+
+@dataclass(frozen=True, **_DATACLASS_KWARGS)
 class SnanaFitsPair:
     head_path: Path
     phot_path: Path
