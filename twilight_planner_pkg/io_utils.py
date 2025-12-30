@@ -1464,7 +1464,13 @@ def _parse_discovery_to_datetime(series: pd.Series) -> pd.Series:
         # Convert numerics to strings so that values like 20240101 are read as calendar dates
         remainder = series[mask_remaining]
         as_str = remainder.astype(str)
-        dt_fallback = pd.to_datetime(as_str, utc=True, errors="coerce")
+        # Pandas may infer a single format from the first values, which breaks
+        # truly mixed-format columns (e.g., "YYYY/MM/DD HH:MM" + ISO-8601). Use
+        # the mixed-format parser when available.
+        try:
+            dt_fallback = pd.to_datetime(as_str, utc=True, errors="coerce", format="mixed")
+        except TypeError:
+            dt_fallback = pd.to_datetime(as_str, utc=True, errors="coerce")
         # If tz is missing, localize to UTC (pd.to_datetime with utc=True already does this)
         out.loc[mask_remaining] = dt_fallback
 
@@ -1506,6 +1512,19 @@ def standardize_columns(df: pd.DataFrame, cfg: PlannerConfig) -> pd.DataFrame:
     df["SN_type_raw"] = (
         df[type_col].astype(str) if (type_col and type_col in df.columns) else np.nan
     )
+    # Backward-compatible handling of WFD SIMLIB-derived catalogs:
+    # some pipelines store provenance in the `type` column as "WFD" while
+    # also providing `source="WFD"`. When present, treat this as Ia-like so
+    # `only_ia` filtering works without requiring users to rewrite catalogs.
+    try:
+        if "source" in df.columns and type_col and type_col in df.columns:
+            src_norm = df["source"].astype(str).str.strip().str.lower()
+            type_norm = df[type_col].astype(str).str.strip().str.lower()
+            mask = src_norm.eq("wfd") & type_norm.eq("wfd")
+            if mask.any():
+                df.loc[mask, "SN_type_raw"] = "WFD_Ia"
+    except Exception:
+        pass
     df["typical_lifetime_days"] = df["SN_type_raw"].apply(
         lambda t: parse_sn_type_to_window_days(t, cfg)
     )

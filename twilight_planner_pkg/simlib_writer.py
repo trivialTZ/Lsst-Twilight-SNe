@@ -29,7 +29,7 @@ class SimlibHeader:
 class SimlibWriter:
     """Minimal SNANA SIMLIB writer."""
 
-    def __init__(self, fp: TextIO, header: SimlibHeader):
+    def __init__(self, fp: TextIO, header: SimlibHeader, *, preserve_ids: bool = False):
         """Create a writer.
 
         Parameters
@@ -38,6 +38,10 @@ class SimlibWriter:
             Open file-like object for writing.
         header : SimlibHeader
             Header configuration.
+        preserve_ids : bool, optional
+            When ``True``, LIBID numbers provided to :meth:`start_libid` are
+            preserved in the output. When ``False`` (default), LIBIDs are
+            renumbered sequentially as in the original implementation.
         """
 
         self.fp = fp
@@ -51,6 +55,7 @@ class SimlibWriter:
         self._groups: dict[str, dict] = {}
         # Preserve first-seen order of SN keys (explicit list for clarity).
         self._order: list[str] = []
+        self._preserve_ids = bool(preserve_ids)
 
     def write_header(self) -> None:
         """Write the SIMLIB DOCUMENTATION and global header (no LIBID blocks).
@@ -99,7 +104,8 @@ class SimlibWriter:
         We aggregate all subsequent add_epoch() calls into a per-SN buffer keyed by
         `comment` (preferred) or by a RA/DEC-derived fallback key if `comment` is empty.
         The actual SIMLIB block for this SN is written only at close(), with NOBS
-        recomputed from the buffered epochs and LIBIDs renumbered sequentially.
+        recomputed from the buffered epochs. Unless ``preserve_ids=True`` was set at
+        construction time, LIBIDs are renumbered sequentially.
         """
         # Choose a stable group key: prefer the SN name/comment; else RA/DEC key.
         key = comment.strip() if comment else f"{ra_deg:.6f},{dec_deg:.6f}"
@@ -205,7 +211,13 @@ class SimlibWriter:
             # the LIBID line to mirror typical SNANA formatting like:
             #   LIBID:      236     # from SNID=000236
             w("#--------------------------------------------\n")
-            libid_line = f"LIBID: {libid_out:7d}"
+            libid_val = libid_out
+            if self._preserve_ids:
+                try:
+                    libid_val = int(g.get("first_seen_libid", libid_out))
+                except Exception:
+                    libid_val = libid_out
+            libid_line = f"LIBID: {libid_val:7d}"
             if comment:
                 libid_line += f"     # {comment}"
             w(f"{libid_line}\n")
@@ -238,8 +250,9 @@ class SimlibWriter:
                     f"{e['psf1']:7.3f}  {e['psf2']:7.3f}  {e['psfratio']:7.3f}  "
                     f"{e['zpavg']:6.3f}  {e['zperr']:5.3f}\n"
                 )
-            w(f"END_LIBID: {libid_out}\n")
-            libid_out += 1
+            w(f"END_LIBID: {libid_val}\n")
+            if not self._preserve_ids:
+                libid_out += 1
         # End marker then close
         w("END_OF_SIMLIB:\n")
         self.fp.close()

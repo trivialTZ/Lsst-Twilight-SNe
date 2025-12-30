@@ -101,6 +101,16 @@ def test_parse_discovery_to_datetime():
     expected_iso = pd.to_datetime(iso_series, utc=True)
     pd.testing.assert_series_equal(iso_parsed, expected_iso)
 
+    mixed_series = pd.Series(["2022/11/7 18:31", "2023-10-21T04:50:52.800"])
+    mixed_parsed = _parse_discovery_to_datetime(mixed_series)
+    expected_mixed = pd.Series(
+        [
+            pd.Timestamp("2022-11-07 18:31:00", tz="UTC"),
+            pd.Timestamp("2023-10-21 04:50:52.800", tz="UTC"),
+        ]
+    )
+    pd.testing.assert_series_equal(mixed_parsed, expected_mixed)
+
     mjd_series = pd.Series([60000.0, 60001.0])
     orig_to_datetime = Time.to_datetime
     import datetime as datetime_module
@@ -170,3 +180,18 @@ def test_standardize_columns_invalid_dec_raises():
     cfg_inst = cfg()
     with pytest.raises(ValueError):
         standardize_columns(df, cfg_inst)
+
+
+def test_standardize_columns_maps_wfd_type_to_ia_like():
+    df = pd.DataFrame(
+        {
+            "ra": [10.0, 20.0],
+            "dec": [-10.0, -20.0],
+            "discoverydate": ["2023-01-01T00:00:00Z", "2023-01-02T00:00:00Z"],
+            "name": ["WFD_OBJ", "TNS_OBJ"],
+            "type": ["WFD", "Ia"],
+            "source": ["WFD", "TNS"],
+        }
+    )
+    out = standardize_columns(df, cfg())
+    assert list(out["SN_type_raw"]) == ["WFD_Ia", "Ia"]

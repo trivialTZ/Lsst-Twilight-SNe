@@ -1,0 +1,31 @@
+DOCUMENTATION:
+  PURPOSE: toy WFD SIMLIB for parser tests
+DOCUMENTATION_END:
+
+SURVEY: LSST
+FILTERS: grizY
+PIXSIZE: 0.200
+
+BEGIN LIBGEN
+
+#--------------------------------------------
+LIBID:      10     # cadence from SNID=10
+RA:   10.000000        DEC:   -5.000000
+NOBS:   3     REDSHIFT:  0.12345     PEAKMJD: 60000.0
+# MATCH_TNS: objid=1 name=SN2023abc z_tns=0.12
+#   MJD        ID+NEXPOSE FLT GAIN NOISE SKYSIG PSF1 PSF2 PSFRATIO ZPTAVG ZPTERR
+S:  60000.0000  1   g   1.0   0.0   10.0  1.0  0.0   0.0  30.0  0.01  99
+S:  60001.0000  2*2 i   1.0   0.0   20.0  1.0  0.0   0.0  30.1  0.01  99
+S:  60002.5000  3   Y   1.0   0.0   30.0  1.0  0.0   0.0  30.2  0.01  99
+END_LIBID:
+
+#--------------------------------------------
+LIBID:      11
+RA:   20.000000        DEC:    5.500000
+NOBS:   2
+#   MJD        ID+NEXPOSE FLT GAIN NOISE SKYSIG PSF1 PSF2 PSFRATIO ZPTAVG ZPTERR
+S:  60003.0000  1   r   1.0   0.0   15.0  1.0  0.0   0.0  29.9  0.01  99
+S:  60004.0000  2   r   1.0   0.0   16.0  1.0  0.0   0.0  29.8  0.01  99
+END_LIBID:
+
+END_OF_SIMLIB:

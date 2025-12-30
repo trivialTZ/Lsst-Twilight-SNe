@@ -146,6 +146,36 @@ __all__ = [
     "_opportunity_cost_seconds",
 ]
 
+# Normalize optional external cadence tables (e.g., WFD SIMLIB visits) so the
+# tracker can consume consistent band keys and finite MJD lists.
+def _normalize_external_visits_map(
+    visits: Optional[Dict[str, Dict[str, List[float]]]]
+) -> Optional[Dict[str, Dict[str, List[float]]]]:
+    if not visits:
+        return None
+    normalized: Dict[str, Dict[str, List[float]]] = {}
+    for name, band_map in visits.items():
+        if not band_map:
+            continue
+        band_norm: Dict[str, List[float]] = {}
+        for band, mjd_list in band_map.items():
+            b = str(band).strip().lower()
+            if b == "y":
+                b = "y"
+            vals: List[float] = []
+            for mjd in mjd_list or []:
+                try:
+                    val = float(mjd)
+                except Exception:
+                    continue
+                if math.isfinite(val):
+                    vals.append(val)
+            if vals:
+                band_norm[b] = sorted(vals)
+        if band_norm:
+            normalized[name] = band_norm
+    return normalized or None
+
 # --- Monkeypatchable symbols (re-exported) ---
 from .astro_utils import (
     twilight_windows_for_local_night as twilight_windows_for_local_night,
@@ -1129,6 +1159,7 @@ def plan_twilight_range_with_caps(
     *,
     stream_per_sn: bool = False,
     stream_sequence: bool = False,
+    wfd_visits_by_name: dict[str, dict[str, List[float]]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate a twilight observing plan over a date range with per-window time caps.
 
@@ -1151,6 +1182,11 @@ def plan_twilight_range_with_caps(
         runs over the same date range.
     verbose : bool, optional
         If ``True``, print progress messages.
+    wfd_visits_by_name : dict, optional
+        Optional external cadence table keyed by ``Name`` → ``{band: [MJD...]}``
+        (e.g., from ``simlib_visits_by_name``). When provided, cadence gating
+        and bonuses consider both past twilight visits and these future WFD
+        visits in the same band.
 
     Returns
     -------
@@ -1287,12 +1323,14 @@ def plan_twilight_range_with_caps(
     seq_count = 0
     nights = pd.date_range(start, end, freq="D")
     nights_iter = tqdm(nights, desc="Nights", unit="night", leave=True)
+    external_visits = _normalize_external_visits_map(wfd_visits_by_name)
     tracker = PriorityTracker(
         hybrid_detections=cfg.hybrid_detections,
         hybrid_exposure_s=cfg.hybrid_exposure_s,
         lc_detections=cfg.lc_detections,
         lc_exposure_s=cfg.lc_exposure_s,
         unique_lookback_days=cfg.unique_lookback_days,
+        external_visits_by_name=external_visits,
     )
     tz_local = _local_timezone_from_location(site)
 

@@ -66,6 +66,8 @@ class PriorityTracker:
     unique_lookback_days: float = 999.0
     unique_first_resume_score: float = 0.0
     history: Dict[str, _SNHistory] = field(default_factory=dict)
+    # Optional external visit schedule (e.g., WFD) keyed by name → band → sorted MJDs
+    external_visits_by_name: Optional[Dict[str, Dict[str, List[float]]]] = None
 
     BLUE = {"g", "r"}
     RED = {"i", "z", "y"}
@@ -106,6 +108,43 @@ class PriorityTracker:
                 continue
             counts[filt] = counts.get(filt, 0) + 1
         return counts
+
+    def _prev_next_mjd(
+        self, name: str, filt: str, now_mjd: float
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Return (previous, next) MJD for ``name``/``filt`` including external visits."""
+
+        mjds: List[float] = []
+        hist = self.history.get(name)
+        if hist and hist.visits:
+            for mjd, f in hist.visits:
+                if f != filt:
+                    continue
+                try:
+                    val = float(mjd)
+                except Exception:
+                    continue
+                if math.isfinite(val):
+                    mjds.append(val)
+        if self.external_visits_by_name:
+            try:
+                ext = self.external_visits_by_name.get(name, {}).get(filt, [])
+            except Exception:
+                ext = []
+            for mjd in ext or []:
+                try:
+                    val = float(mjd)
+                except Exception:
+                    continue
+                if math.isfinite(val):
+                    mjds.append(val)
+        if not mjds:
+            return (None, None)
+        prev_candidates = [m for m in mjds if m <= now_mjd]
+        next_candidates = [m for m in mjds if m >= now_mjd]
+        prev = max(prev_candidates) if prev_candidates else None
+        next_mjd = min(next_candidates) if next_candidates else None
+        return (prev, next_mjd)
 
     def color_deficit(
         self, name: str, now_mjd: float, target_pairs: int, window_days: float
@@ -319,13 +358,10 @@ class PriorityTracker:
             not been observed in that filter.
         """
 
-        hist = self.history.get(name)
-        if not hist:
+        prev, _ = self._prev_next_mjd(name, filt, now_mjd)
+        if prev is None:
             return None
-        last = hist.last_mjd_by_filter.get(filt)
-        if last is None:
-            return None
-        return now_mjd - last
+        return now_mjd - prev
 
     def cadence_gate(
         self,
@@ -337,14 +373,22 @@ class PriorityTracker:
     ) -> bool:
         """Determine if ``filt`` may be observed at ``now_mjd``.
 
-        Returns ``True`` if the filter has never been observed or if the
-        elapsed time since the last observation exceeds ``target_d - jitter_d``.
+        Returns ``True`` if both conditions hold:
+        - No previous visit exists or the elapsed time since the last visit
+          exceeds ``target_d - jitter_d``.
+        - No future external visit is scheduled sooner than ``target_d - jitter_d``
+          from ``now_mjd``.
         """
 
-        delta = self.days_since(name, filt, now_mjd)
-        if delta is None:
-            return True
-        return delta >= max(0.0, target_d - jitter_d)
+        prev, next_mjd = self._prev_next_mjd(name, filt, now_mjd)
+        threshold = max(0.0, target_d - jitter_d)
+        prev_ok = True
+        if prev is not None:
+            prev_ok = (now_mjd - prev) >= threshold
+        next_ok = True
+        if next_mjd is not None:
+            next_ok = (next_mjd - now_mjd) >= threshold
+        return bool(prev_ok and next_ok)
 
     def cadence_bonus(
         self,
@@ -362,12 +406,17 @@ class PriorityTracker:
         when ``filt`` has not yet been observed.
         """
 
-        delta = self.days_since(name, filt, now_mjd)
-        if delta is None:
+        prev, next_mjd = self._prev_next_mjd(name, filt, now_mjd)
+        if prev is None and next_mjd is None:
+            return float(first_epoch_weight)
+        prev_dist = math.inf if prev is None else now_mjd - prev
+        next_dist = math.inf if next_mjd is None else next_mjd - now_mjd
+        delta_eff = min(prev_dist, next_dist)
+        if not math.isfinite(delta_eff):
             return float(first_epoch_weight)
         if sigma_d <= 0:
             return 0.0
-        return float(weight * math.exp(-0.5 * ((delta - target_d) / sigma_d) ** 2))
+        return float(weight * math.exp(-0.5 * ((delta_eff - target_d) / sigma_d) ** 2))
 
     def _score(
         self,

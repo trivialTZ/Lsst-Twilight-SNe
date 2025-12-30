@@ -137,7 +137,6 @@ def _plan_batches_by_dp(
             counts = [0] * length
             total = 0.0
             remaining = float(time_left_s)
-            start_filter_cfg = getattr(cfg, "start_filter", None)
             for i, f in enumerate(seq):
                 prefix = prefix_scores.get(f)
                 if prefix is None or prefix.size <= 1:
@@ -147,12 +146,11 @@ def _plan_batches_by_dp(
                     cfg.inter_exposure_min_s + cfg.exposure_by_filter.get(f, 0.0)
                 )
                 if i == 0:
-                    if (start_filter_cfg and f == start_filter_cfg) or getattr(
-                        cfg, "dp_free_first_swap_only", False
-                    ):
-                        swap_cost = 0.0
-                    else:
-                        swap_cost = cfg.filter_change_s
+                    # Do not charge an entry swap for the first DP segment: the scheduler
+                    # can pre-position the carousel before the window begins, so the DP
+                    # should allocate the full on-sky window to visits. Swap costs are
+                    # still charged between subsequent segments.
+                    swap_cost = 0.0
                 else:
                     swap_cost = cfg.filter_change_s
                 seg_budget = max(0.0, remaining - swap_cost)

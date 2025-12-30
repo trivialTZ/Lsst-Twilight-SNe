@@ -138,6 +138,48 @@ plan_twilight_range_with_caps(
 )
 ```
 
+### WFD SIMLIB + TNS Catalog Integration (Cadence-Aware)
+
+If you have an external WFD cadence library as a SNANA SIMLIB and a separate
+TNS-style catalog CSV, you can:
+
+1. Parse the SIMLIB into (a) a catalog-like table and (b) a per-object per-band
+   visit schedule.
+2. Concatenate that table with your TNS CSV to make a single combined catalog.
+3. Pass the WFD visit schedule into the scheduler so cadence gating/bonuses
+   consider both past twilight visits and future WFD visits in the same band.
+
+```python
+import pandas as pd
+from pathlib import Path
+
+from twilight_planner_pkg.config import PlannerConfig
+from twilight_planner_pkg.scheduler import plan_twilight_range_with_caps
+from twilight_planner_pkg.simlib_reader import simlib_to_catalog_df, simlib_visits_by_name
+
+tns_csv = Path("/path/to/TNS.csv")
+wfd_simlib = Path("/path/to/WFD.SIMLIB")
+
+wfd_visits_by_name = simlib_visits_by_name(wfd_simlib)
+wfd_catalog_df = simlib_to_catalog_df(wfd_simlib)
+combined_df = pd.concat([pd.read_csv(tns_csv), wfd_catalog_df], ignore_index=True, sort=False)
+combined_csv = Path("/tmp/combined_tns_wfd.csv")
+combined_df.to_csv(combined_csv, index=False)
+
+cfg = PlannerConfig(lat_deg=-30.2446, lon_deg=-70.7494, height_m=2647)
+plan_twilight_range_with_caps(
+    str(combined_csv),
+    "/tmp/out",
+    "2024-01-01",
+    "2024-01-07",
+    cfg,
+    wfd_visits_by_name=wfd_visits_by_name,
+)
+```
+
+See `notebook/TwilightPlanner_WFD_TNS.ipynb` for a full working example that
+writes `combined_tns_wfd.csv` and runs the planner with `wfd_visits_by_name`.
+
 To select only Type Ia-like objects programmatically:
 
 ```python
@@ -773,7 +815,9 @@ default priority strategy.
 - `filter_policy.py` — m₅/SNR feasibility with Sun/Moon-aware sky brightness; intersects with `sun_alt_policy`
 - `photom_rubin.py` — Rubin‑tuned photometric kernel with source+sky saturation guard
 - `sky_model.py` — twilight/dark sky providers with Sun-altitude brightening; optional `rubin_sim.skybrightness`
+- `simlib_reader.py` — lightweight SIMLIB parser (header/LIBID/epochs) + helpers to build WFD cadence tables
 - `simlib_writer.py` — minimal SNANA SIMLIB exporter
+- `simlib_merge.py` — merge a WFD SIMLIB with twilight planner epochs while preserving LIBIDs
 - `io_utils.py` — robust CSV parsing; RA/Dec/discovery inference
 - `main.py` — CLI wrapper
 

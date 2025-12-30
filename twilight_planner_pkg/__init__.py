@@ -6,6 +6,8 @@ __all__ = [
     "scheduler",
     "priority",
     "photom_rubin",
+    "simlib_reader",
+    "simlib_merge",
     "simlib_writer",
     "snana_fits",
     "sky_model",
