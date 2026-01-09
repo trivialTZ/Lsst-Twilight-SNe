@@ -43,6 +43,7 @@ def _copy_entry(entry: SimlibEntry) -> SimlibEntry:
         libid=entry.libid,
         ra_deg=entry.ra_deg,
         dec_deg=entry.dec_deg,
+        mwebv=getattr(entry, "mwebv", None),
         nobs=entry.nobs,
         redshift=entry.redshift,
         peakmjd=entry.peakmjd,
@@ -157,25 +158,56 @@ def _build_preamble(doc: SimlibDocument, source_path: Path, n_entries: int) -> L
     """Compose the header for the merged SIMLIB."""
 
     lines: List[str] = []
-    lines.extend(doc.documentation)
+    doc_lines = list(doc.documentation)
+    merge_note_lines = [
+        f"  NOTE: Merged twilight planner output into WFD SIMLIB: {source_path}",
+        "  SOURCE: twilight_planner_pkg.simlib_merge",
+    ]
+    # Keep a single DOCUMENTATION block; if the input has one, inject our note
+    # just before DOCUMENTATION_END.
+    if doc_lines:
+        already_has_note = any("Merged twilight planner output" in l for l in doc_lines)
+        already_has_source = any("twilight_planner_pkg.simlib_merge" in l for l in doc_lines)
+        if not (already_has_note and already_has_source):
+            insert_at = None
+            for i, l in enumerate(doc_lines):
+                if l.strip().startswith("DOCUMENTATION_END"):
+                    insert_at = i
+                    break
+            if insert_at is None:
+                doc_lines.extend(merge_note_lines)
+            else:
+                # Add a blank separator line inside the doc block for readability.
+                if insert_at > 0 and doc_lines[insert_at - 1].strip():
+                    doc_lines.insert(insert_at, "")
+                    insert_at += 1
+                for j, note_line in enumerate(merge_note_lines):
+                    doc_lines.insert(insert_at + j, note_line)
+    else:
+        # Defensive fallback: create a minimal DOCUMENTATION block if missing.
+        doc_lines = ["DOCUMENTATION:"] + merge_note_lines + ["DOCUMENTATION_END:", ""]
+
+    lines.extend(doc_lines)
+    inserted_pixsize = any(l.strip().startswith("PIXSIZE:") for l in doc.global_header)
     for line in doc.global_header:
         stripped = line.strip()
         if stripped.upper().startswith("BEGIN LIBGEN"):
             break
+        if (not inserted_pixsize) and stripped.startswith("FILTERS:"):
+            lines.append(line)
+            lines.append(f"PIXSIZE:  {SimlibHeader().PIXSIZE:.3f}")
+            inserted_pixsize = True
+            continue
         if stripped.startswith("NLIBID:"):
             lines.append(f"NLIBID:      {n_entries}")
         else:
             lines.append(line)
-    lines.append("")
-    lines.extend(
-        [
-            "DOCUMENTATION:",
-            f"  NOTE: Merged twilight planner output into WFD SIMLIB: {source_path}",
-            "  SOURCE: twilight_planner_pkg.simlib_merge",
-            "DOCUMENTATION_END:",
-            "",
-        ]
-    )
+    if not inserted_pixsize:
+        lines.append(f"PIXSIZE:  {SimlibHeader().PIXSIZE:.3f}")
+    # Ensure at least one blank line between global header and the forthcoming
+    # BEGIN LIBGEN emitted by SimlibWriter.close().
+    if lines and lines[-1].strip():
+        lines.append("")
     return lines
 
 
@@ -219,6 +251,7 @@ def merge_simlib_with_twilight(
                 libid=libid,
                 ra_deg=info.get("ra"),
                 dec_deg=info.get("dec"),
+                mwebv=None,
                 redshift=info.get("redshift"),
                 peakmjd=info.get("peakmjd"),
                 comment="",
@@ -265,6 +298,7 @@ def merge_simlib_with_twilight(
                 dec,
                 len(epochs_sorted),
                 comment=comment,
+                mwebv=getattr(entry, "mwebv", None),
                 redshift=entry.redshift,
                 peakmjd=entry.peakmjd,
             )

@@ -42,6 +42,7 @@ class SimlibEntry:
     libid: int
     ra_deg: Optional[float] = None
     dec_deg: Optional[float] = None
+    mwebv: Optional[float] = None
     nobs: Optional[int] = None
     redshift: Optional[float] = None
     peakmjd: Optional[float] = None
@@ -224,10 +225,13 @@ def parse_simlib(source: str | Path | TextIO | Iterable[str]) -> SimlibDocument:
             if "RA:" in raw_line:
                 ra = _extract_float(raw_line, "RA:")
                 dec = _extract_float(raw_line, "DEC:")
+                mw = _extract_float(raw_line, "MWEBV:")
                 if ra is not None:
                     entry.ra_deg = ra
                 if dec is not None:
                     entry.dec_deg = dec
+                if mw is not None:
+                    entry.mwebv = mw
                 idx += 1
                 continue
             if "NOBS:" in raw_line:

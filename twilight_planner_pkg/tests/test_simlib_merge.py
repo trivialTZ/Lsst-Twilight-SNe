@@ -66,3 +66,6 @@ def test_header_includes_wfd_documentation(tmp_path):
 
     assert "toy WFD SIMLIB for parser tests" in text
     assert "Merged twilight planner output" in text
+    # Keep a single DOCUMENTATION block in the merged output.
+    assert text.count("DOCUMENTATION:") == 1
+    assert text.count("DOCUMENTATION_END:") == 1

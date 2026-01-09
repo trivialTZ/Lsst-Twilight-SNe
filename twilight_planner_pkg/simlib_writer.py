@@ -96,6 +96,7 @@ class SimlibWriter:
         nobs: int,
         comment: str = "",
         *,
+        mwebv: float | None = None,
         redshift: float | None = None,
         peakmjd: float | None = None,
     ) -> None:
@@ -118,6 +119,7 @@ class SimlibWriter:
                 "ra_deg": ra_deg,
                 "dec_deg": dec_deg,
                 "comment": comment.strip() if comment else "",
+                "mwebv": mwebv,
                 "redshift": redshift,
                 "peakmjd": peakmjd,
                 "epochs": [],  # list of dicts with epoch fields
@@ -132,6 +134,8 @@ class SimlibWriter:
                 g["redshift"] = redshift
             if g.get("peakmjd") is None and peakmjd is not None:
                 g["peakmjd"] = peakmjd
+            if g.get("mwebv") is None and mwebv is not None:
+                g["mwebv"] = mwebv
         # Reset per-LIBID epoch counter used ONLY when streaming (we re-ID at flush).
         self._idx = 0
 
@@ -183,6 +187,7 @@ class SimlibWriter:
         """Flush buffered groups as one LIBID per SN, then close the file handle."""
         # Emit groups in first-seen order with sequential LIBIDs starting at 1.
         w = self.fp.write
+        h = self.header
         # Per SNANA format, mark the start of LIBGEN now (after global header)
         w("BEGIN LIBGEN\n\n")
         libid_out = 1
@@ -194,6 +199,7 @@ class SimlibWriter:
             ra = g["ra_deg"]
             dec = g["dec_deg"]
             comment = g["comment"]
+            mwebv = g.get("mwebv")
             nobs = len(epochs)
             # REDSHIFT and PEAKMJD (optional):
             z = g.get("redshift")
@@ -221,12 +227,16 @@ class SimlibWriter:
             if comment:
                 libid_line += f"     # {comment}"
             w(f"{libid_line}\n")
-            w(f"NOBS: {nobs}  RA: {ra:11.6f}  DEC: {dec:11.6f}\n")
+            nobs_line = (
+                f"NOBS: {nobs}  PIXSIZE:  {h.PIXSIZE:.3f}  RA: {ra:11.6f}  DEC: {dec:11.6f}"
+            )
+            if isinstance(mwebv, (int, float)):
+                nobs_line += f"  MWEBV:  {float(mwebv):.4f}"
+            w(f"{nobs_line}\n")
             if (z is not None) or (pmjd is not None):
                 z_str = f"{z:.5f}" if isinstance(z, (int, float)) else ""
                 pmjd_str = f"{pmjd:11.3f}" if isinstance(pmjd, (int, float)) else ""
                 w(f"REDSHIFT:  {z_str:>7s}     PEAKMJD: {pmjd_str}\n")
-            w("\n")
             w(
                 "#     MJD        ID+NEXPOSE FLT GAIN NOISE SKYSIG PSF1 PSF2 PSFRATIO ZPTAVG ZPTERR\n"
             )
@@ -250,7 +260,7 @@ class SimlibWriter:
                     f"{e['psf1']:7.3f}  {e['psf2']:7.3f}  {e['psfratio']:7.3f}  "
                     f"{e['zpavg']:6.3f}  {e['zperr']:5.3f}\n"
                 )
-            w(f"END_LIBID: {libid_val}\n")
+            w("END_LIBID:\n\n")
             if not self._preserve_ids:
                 libid_out += 1
         # End marker then close

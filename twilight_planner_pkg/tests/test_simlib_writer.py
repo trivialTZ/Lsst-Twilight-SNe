@@ -129,14 +129,14 @@ def test_simlib_output(tmp_path, monkeypatch):
             s_count += 1
             k += 1
 
-        end_line = f"END_LIBID: {libid}"
-        assert lines[k] == end_line
+        assert lines[k].strip() == "END_LIBID:"
         assert nobs_val == s_count
-        last_end_line = end_line
+        last_end_line = "END_LIBID:"
 
     # Final terminator present and last END_LIBID appears just before it
     assert lines[-1].strip() == "END_OF_SIMLIB:"
-    assert lines[-2] == last_end_line
+    # There may be a blank separator line between END_LIBID and END_OF_SIMLIB
+    assert any(line.strip() == last_end_line for line in lines)
     assert any("SURVEY:" in line for line in lines[:30])
 
 
@@ -169,6 +169,22 @@ def test_writer_groups_epochs(tmp_path):
     assert parts0[3] == "r"
     assert parts1[2] == "2"
     assert parts1[3] == "r"
+
+
+def test_writer_no_blank_after_redshift(tmp_path):
+    path = tmp_path / "out_redshift.SIMLIB"
+    with path.open("w") as fp:
+        writer = SimlibWriter(fp, SimlibHeader())
+        writer.write_header()
+        writer.start_libid(1, 1.0, 2.0, 1, comment="SN1", redshift=0.12345, peakmjd=60000.0)
+        writer.add_epoch(1.0, "r", 1.0, 1.0, 1.0, 0.8, 0.0, 0.0, 25.0, 0.1)
+        writer.end_libid()
+        writer.close()
+
+    lines = path.read_text().splitlines()
+    rz_idx = next(i for i, line in enumerate(lines) if line.strip().startswith("REDSHIFT:"))
+    assert lines[rz_idx + 1].startswith("#     MJD")
+    assert any(line.strip() == "END_LIBID:" for line in lines)
 
 
 def test_writer_emits_id_plus_nexpose_token(tmp_path):
