@@ -378,24 +378,31 @@ class RubinSkyProvider:
                     )
                 # Be resilient to API changes: try common signatures
                 set_params_ok = False
+                # rubin_sim historically accepted scalar floats for set_params,
+                # but NumPy 2.0 turns `ndarray(0d).nonzero()` into a hard error.
+                # Passing 1-element arrays avoids triggering that path inside
+                # rubin_sim and remains compatible with older NumPy versions.
+                X_arr = np.atleast_1d(np.array(X, dtype=float))
+                sun_alt_arr = np.atleast_1d(np.array(sun_alt, dtype=float))
+                az_arr = np.atleast_1d(np.array(float(az_sun_rel_deg), dtype=float))
                 for kwargs in (
                     dict(
-                        airmass=X,
-                        sun_alt=sun_alt,
-                        azs=float(az_sun_rel_deg),
+                        airmass=X_arr,
+                        sun_alt=sun_alt_arr,
+                        azs=az_arr,
                         degrees=True,
                         filter_names=[band],
                     ),
                     dict(
-                        airmass=X,
-                        sun_alt=sun_alt,
-                        azRelSun=float(az_sun_rel_deg),
+                        airmass=X_arr,
+                        sun_alt=sun_alt_arr,
+                        azRelSun=az_arr,
                         degrees=True,
                         filter_names=[band],
                     ),
                     dict(
-                        airmass=X,
-                        sun_alt=sun_alt,
+                        airmass=X_arr,
+                        sun_alt=sun_alt_arr,
                         degrees=True,
                         filter_names=[band],
                     ),
@@ -408,7 +415,7 @@ class RubinSkyProvider:
                         continue
                 if not set_params_ok:
                     # Last-ditch: minimal required params
-                    self.model.set_params(airmass=X, sun_alt=sun_alt)
+                    self.model.set_params(airmass=X_arr, sun_alt=sun_alt_arr)
 
             mags = self.model.return_mags()
             # rubin_sim returns a dict: { 'g': array([...]), ... }
@@ -481,9 +488,9 @@ def rubin_sim_mu_sky_by_sun_alt(
                 alt_val = min(max(alt_val, sun_alt_min_deg), sun_alt_max_deg)
 
                 model.set_params(
-                    airmass=X_in,
-                    sun_alt=alt_val,
-                    azs=90.0,
+                    airmass=np.atleast_1d(np.array(X_in, dtype=float)),
+                    sun_alt=np.atleast_1d(np.array(alt_val, dtype=float)),
+                    azs=np.atleast_1d(np.array(90.0, dtype=float)),
                     degrees=True,
                     filter_names=[band],
                 )
