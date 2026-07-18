@@ -205,40 +205,99 @@ def info_gain_bits(C_ref: np.ndarray, C_new: np.ndarray) -> float:
     return 0.5 * np.log(d_ref / d_new) / np.log(2.0)
 
 
+def compute_w0wa_metrics(res: dict) -> dict[str, object]:
+    """Compute summary metrics for a w0waCDM forecast.
+
+    Parameters
+    ----------
+    res : dict
+        Output of ``run_binned_forecast(..., model="w0wa")``.
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``labels``: list[str]
+        - ``sigmas``: dict[label, dict[param, float]]
+        - ``fom_2d``: dict[label, float] for (w0, wa) with DETF FoM ~ 1/sqrt(det(C))
+        - ``fom_3d``: dict[label, float] for (Om, w0, wa) with FoM ~ 1/sqrt(det(C))
+        - ``rho_w0wa``: dict[label, float]
+        - ``gain_fom_2d`` / ``gain_fom_3d``: float (WFD+Twilight / WFD)
+        - ``info_bits_2d`` / ``info_bits_3d``: float (WFD → WFD+Twilight)
+    """
+    labs = res["WFD"]["labels"]
+    required = ("Om", "w0", "wa")
+    if not all(p in labs for p in required):
+        raise ValueError(f"required params {required} not found in labels: {labs}")
+
+    C_wfd = res["WFD"]["cov"]
+    C_tw = res["WFD+Twilight"]["cov"]
+    Cw_2 = _subcov(labs, C_wfd, ("w0", "wa"))
+    Ct_2 = _subcov(labs, C_tw, ("w0", "wa"))
+    Cw_3 = _subcov(labs, C_wfd, ("Om", "w0", "wa"))
+    Ct_3 = _subcov(labs, C_tw, ("Om", "w0", "wa"))
+
+    sig_wfd = {p: float(np.sqrt(C_wfd[i, i])) for i, p in enumerate(labs)}
+    sig_tw = {p: float(np.sqrt(C_tw[i, i])) for i, p in enumerate(labs)}
+
+    fom_2d_wfd = detf_fom_from_cov(Cw_2)
+    fom_2d_tw = detf_fom_from_cov(Ct_2)
+    fom_3d_wfd = detf_fom_from_cov(Cw_3)
+    fom_3d_tw = detf_fom_from_cov(Ct_3)
+
+    rho_wfd = float(Cw_2[0, 1] / np.sqrt(Cw_2[0, 0] * Cw_2[1, 1]))
+    rho_tw = float(Ct_2[0, 1] / np.sqrt(Ct_2[0, 0] * Ct_2[1, 1]))
+
+    gain_fom_2d = (
+        fom_2d_tw / fom_2d_wfd
+        if np.isfinite(fom_2d_wfd) and (fom_2d_wfd > 0)
+        else float("nan")
+    )
+    gain_fom_3d = (
+        fom_3d_tw / fom_3d_wfd
+        if np.isfinite(fom_3d_wfd) and (fom_3d_wfd > 0)
+        else float("nan")
+    )
+
+    return {
+        "labels": list(labs),
+        "sigmas": {"WFD": sig_wfd, "WFD+Twilight": sig_tw},
+        "fom_2d": {"WFD": fom_2d_wfd, "WFD+Twilight": fom_2d_tw},
+        "fom_3d": {"WFD": fom_3d_wfd, "WFD+Twilight": fom_3d_tw},
+        "rho_w0wa": {"WFD": rho_wfd, "WFD+Twilight": rho_tw},
+        "gain_fom_2d": gain_fom_2d,
+        "gain_fom_3d": gain_fom_3d,
+        "info_bits_2d": info_gain_bits(Cw_2, Ct_2),
+        "info_bits_3d": info_gain_bits(Cw_3, Ct_3),
+    }
+
+
 def print_w0wa_metrics(res: dict) -> None:
     """Pretty-print DETF FoM, 2D area, 3D hyper-volume shrink & information gain for w0waCDM.
 
     Expects res from run_binned_forecast(..., model='w0wa').
     """
-    labs = res["WFD"]["labels"]
-    if not all(p in labs for p in ("Om", "w0", "wa")):
-        print("[w0wa metrics] required params ('Om','w0','wa') not found in labels:", labs)
+    try:
+        m = compute_w0wa_metrics(res)
+    except (KeyError, ValueError) as e:
+        labs = res.get("WFD", {}).get("labels", None)
+        print("[w0wa metrics]", str(e))
+        if labs is not None:
+            print("labels:", labs)
         return
-    Cw = res["WFD"]["cov"]
-    Ct = res["WFD+Twilight"]["cov"]
 
-    # --- (w0, wa) block
-    Cw_2 = _subcov(labs, Cw, ("w0", "wa"))
-    Ct_2 = _subcov(labs, Ct, ("w0", "wa"))
-    fom_wfd = detf_fom_from_cov(Cw_2)
-    fom_tw  = detf_fom_from_cov(Ct_2)
-    fom_gain = fom_tw / fom_wfd if np.isfinite(fom_wfd) and fom_wfd > 0 else float("nan")
-    area_gain = area_shrink_factor(Cw_2, Ct_2)  # same as FoM gain
-    info_bits_2d = info_gain_bits(Cw_2, Ct_2)
-
-    # Correlations (nice to quote)
-    rho_wfd = Cw_2[0, 1] / np.sqrt(Cw_2[0, 0] * Cw_2[1, 1])
-    rho_tw  = Ct_2[0, 1] / np.sqrt(Ct_2[0, 0] * Ct_2[1, 1])
-
-    # --- 3D hyper-volume in (Om,w0,wa)
-    Cw_3 = _subcov(labs, Cw, ("Om", "w0", "wa"))
-    Ct_3 = _subcov(labs, Ct, ("Om", "w0", "wa"))
-    vol_gain = hypervolume_shrink_factor(Cw_3, Ct_3)
-    info_bits_3d = info_gain_bits(Cw_3, Ct_3)
-
-    # --- 1D sigmas (for completeness)
-    sig_wfd = {p: float(np.sqrt(Cw[i, i])) for i, p in enumerate(labs)}
-    sig_tw  = {p: float(np.sqrt(Ct[i, i])) for i, p in enumerate(labs)}
+    labs = m["labels"]
+    sig_wfd = m["sigmas"]["WFD"]
+    sig_tw = m["sigmas"]["WFD+Twilight"]
+    fom_wfd = m["fom_2d"]["WFD"]
+    fom_tw = m["fom_2d"]["WFD+Twilight"]
+    fom_gain = m["gain_fom_2d"]
+    area_gain = fom_gain  # same definition for 2D
+    rho_wfd = m["rho_w0wa"]["WFD"]
+    rho_tw = m["rho_w0wa"]["WFD+Twilight"]
+    vol_gain = m["gain_fom_3d"]  # same definition for nD
+    info_bits_2d = m["info_bits_2d"]
+    info_bits_3d = m["info_bits_3d"]
 
     print("\n=== w0wa metrics: WFD  →  WFD+Twilight (combined) ===")
     print("1D σ shrink factors:")

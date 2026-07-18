@@ -72,6 +72,7 @@ from .twilight_sched.caching import (  # noqa: F401
     _finite_or_none,
     _m5best_cache_prune_by_day,
     bump_window_token,
+    precache_sky_mags,
     prune_m5best_by_day,
 )
 from .twilight_sched.scoring_pairs import (  # noqa: F401
@@ -94,6 +95,7 @@ from .twilight_sched.cost import (
     has_room_for_any_visit,
     min_exposure_in_palette,
     opportunity_cost_seconds_cached,
+    precache_opportunity_m5,
 )
 from .twilight_sched.executor import _attempt_schedule_one
 from .twilight_sched.summaries import (
@@ -220,6 +222,7 @@ PER_SN_COLUMNS = [
     "sky_mag_arcsec2",
     "moon_sep",
     "ZPT",
+    "ZPTERR",
     "SKYSIG",
     "NEA_pix",
     "RDNOISE",
@@ -451,6 +454,41 @@ def _prepare_window_candidates(
                 cfg.exposure_by_filter = new_exp
                 override_applied = True
                 break
+
+    # Every filter-policy lookup below uses the same window-start MJD.  Rubin's
+    # SkyModel supports all targets and bands in one call, so populate the
+    # existing scalar cache up front.  Subsequent policy code remains exactly
+    # unchanged and falls back to scalar calls if batching is unavailable.
+    if bool(getattr(cfg, "sky_batch_cache_enable", True)) and not group_df.empty:
+        policy_samples: list[tuple[float, float, float, tuple[str, ...]]] = []
+        rubin_bands = ("u", "g", "r", "i", "z", "y")
+        for _, policy_row in group_df.iterrows():
+            try:
+                ra_policy = float(policy_row.get("RA_deg"))
+                dec_policy = float(policy_row.get("Dec_deg"))
+                X_policy = float(
+                    airmass_from_alt_deg(float(policy_row.get("max_alt_deg")))
+                )
+            except Exception:
+                continue
+            target_bands = {
+                str(value).strip().lower()
+                for value in mag_lookup.get(policy_row.get("Name"), {}).keys()
+            }
+            requested = tuple(
+                band
+                for band in rubin_bands
+                if band in {"g", "r", "i", "z", "y"} or band in target_bands
+            )
+            policy_samples.append(
+                (ra_policy, dec_policy, X_policy, requested)
+            )
+        precache_sky_mags(
+            sky_provider=sky_provider,
+            mjd=float(Time(current_time_utc).mjd),
+            samples=policy_samples,
+            minutes=1,
+        )
 
     candidates: list[dict] = []
     for _, row in group_df.iterrows():
@@ -917,6 +955,7 @@ def _attempt_schedule_one(
             "sky_mag_arcsec2": round(sky_mag, 2),
             "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
             "ZPT": round(eph.ZPTAVG, 3),
+            "ZPTERR": round(eph.ZPTERR, 3),
             "SKYSIG": round(eph.SKYSIG, 3),
             "NEA_pix": round(eph.NEA_pix, 2),
             "RDNOISE": round(eph.RDNOISE, 2),
@@ -2058,6 +2097,15 @@ def plan_twilight_range_with_caps(
                                 for f in allowed_list
                             )
                         batch = [tt for tt in batch if _cad_ok_any(tt)]
+                    precache_opportunity_m5(
+                        batch,
+                        now_mjd_cost,
+                        cfg,
+                        phot_cfg,
+                        sky_provider,
+                        site,
+                        minutes=int(getattr(cfg, "primary_m5_minutes", 1) or 1),
+                    )
                     for t in batch:
                         lowz_ia_t = False
                         try:
@@ -2366,6 +2414,17 @@ def plan_twilight_range_with_caps(
                                     for f in allowed_list
                                 )
                             batch = [tt for tt in batch if _cad_ok_any_bf(tt)]
+                        precache_opportunity_m5(
+                            batch,
+                            now_mjd_cost,
+                            cfg,
+                            phot_cfg,
+                            sky_provider,
+                            site,
+                            minutes=int(
+                                getattr(cfg, "backfill_m5_minutes", 1) or 1
+                            ),
+                        )
                         costs: List[float] = []
                         for t in batch:
                             lowz_ia_t = False

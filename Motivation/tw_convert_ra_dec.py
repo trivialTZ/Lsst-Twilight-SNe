@@ -9,30 +9,55 @@ def parse_simlib_ra_dec(simlib_path: str | Path) -> pd.DataFrame:
     libid_pat = re.compile(r'\bLIBID\b\s*[:=]\s*(\d+)')
     ra_pat    = re.compile(r'\bRA\b\s*[:=]\s*([+-]?\d+(?:\.\d*)?)')
     dec_pat   = re.compile(r'\bDEC\b\s*[:=]\s*([+-]?\d+(?:\.\d*)?)', re.IGNORECASE)
+    redshift_pat = re.compile(
+        r'\bREDSHIFT\b\s*[:=]\s*([+-]?\d+(?:\.\d*)?(?:[Ee][+-]?\d+)?)',
+        re.IGNORECASE,
+    )
 
     records = []
-    cur = {"LIBID": None, "RA": None, "DEC": None}
+    cur = {"LIBID": None, "RA": None, "DEC": None, "REDSHIFT": None}
 
     with open(simlib_path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
             m_id = libid_pat.search(line)
             if m_id:
                 if cur["LIBID"] is not None and cur["RA"] is not None and cur["DEC"] is not None:
-                    records.append((int(cur["LIBID"]), float(cur["RA"]), float(cur["DEC"])))
-                cur = {"LIBID": int(m_id.group(1)), "RA": None, "DEC": None}
+                    records.append(
+                        (
+                            int(cur["LIBID"]),
+                            float(cur["RA"]),
+                            float(cur["DEC"]),
+                            np.nan if cur["REDSHIFT"] is None else float(cur["REDSHIFT"]),
+                        )
+                    )
+                cur = {"LIBID": int(m_id.group(1)), "RA": None, "DEC": None, "REDSHIFT": None}
                 m_ra = ra_pat.search(line); m_dec = dec_pat.search(line)
                 if m_ra:  cur["RA"]  = float(m_ra.group(1))
                 if m_dec: cur["DEC"] = float(m_dec.group(1))
+                m_redshift = redshift_pat.search(line)
+                if m_redshift: cur["REDSHIFT"] = float(m_redshift.group(1))
                 continue
             if cur["LIBID"] is not None:
                 m_ra = ra_pat.search(line)
                 if m_ra:  cur["RA"]  = float(m_ra.group(1))
                 m_dec = dec_pat.search(line)
                 if m_dec: cur["DEC"] = float(m_dec.group(1))
+                m_redshift = redshift_pat.search(line)
+                if m_redshift: cur["REDSHIFT"] = float(m_redshift.group(1))
         if cur["LIBID"] is not None and cur["RA"] is not None and cur["DEC"] is not None:
-            records.append((int(cur["LIBID"]), float(cur["RA"]), float(cur["DEC"])))
+            records.append(
+                (
+                    int(cur["LIBID"]),
+                    float(cur["RA"]),
+                    float(cur["DEC"]),
+                    np.nan if cur["REDSHIFT"] is None else float(cur["REDSHIFT"]),
+                )
+            )
 
-    return pd.DataFrame(records, columns=["LIBID", "RA_simlib", "DEC_simlib"])
+    return pd.DataFrame(
+        records,
+        columns=["LIBID", "RA_simlib", "DEC_simlib", "REDSHIFT_simlib"],
+    )
 
 
 def fix_ra_dec_from_simlib(df: pd.DataFrame,
@@ -40,13 +65,21 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
                            id_col: str = "SIM_LIBID",
                            ra_col: str = "RA",
                            dec_col: str = "DEC",
-                           overwrite: str = "all") -> tuple[pd.DataFrame, dict]:
+                           overwrite: str = "all",
+                           require_all_mapped: bool = False,
+                           redshift_col: str | None = None,
+                           require_redshift_match: bool = False,
+                           redshift_atol: float = 5.1e-6) -> tuple[pd.DataFrame, dict]:
     """
     Replace RA/DEC in `df` using RA/DEC from SIMLIB matched by `id_col`.
     overwrite: 'all' or 'nan_only'
     """
     if id_col not in df.columns:
         raise KeyError(f"`{id_col}` not found in DataFrame.")
+    if require_redshift_match and redshift_col is None:
+        raise ValueError("`redshift_col` is required when checking SIMLIB redshifts.")
+    if redshift_col is not None and redshift_col not in df.columns:
+        raise KeyError(f"`{redshift_col}` not found in DataFrame.")
 
     lib_df = parse_simlib_ra_dec(simlib_path)
     if lib_df.empty:
@@ -54,6 +87,51 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
 
     map_df = lib_df.rename(columns={"LIBID": id_col})
     merged = df.merge(map_df, on=id_col, how="left", sort=False, copy=True, validate="m:1")
+
+    mapped_rows = merged["RA_simlib"].notna() & merged["DEC_simlib"].notna()
+    n_rows_mapped = int(mapped_rows.sum())
+    n_rows_unmapped = int((~mapped_rows).sum())
+    if require_all_mapped and n_rows_unmapped:
+        missing_ids = (
+            merged.loc[~mapped_rows, id_col]
+            .dropna()
+            .astype(str)
+            .drop_duplicates()
+            .head(10)
+            .tolist()
+        )
+        raise ValueError(
+            f"SIMLIB coordinate mapping is incomplete for {simlib_path}: "
+            f"mapped {n_rows_mapped}/{len(merged)} rows; "
+            f"first missing {id_col} values={missing_ids}"
+        )
+
+    n_redshift_compared = 0
+    n_redshift_mismatch = 0
+    if redshift_col is not None:
+        fitres_redshift = pd.to_numeric(merged[redshift_col], errors="coerce")
+        simlib_redshift = pd.to_numeric(merged["REDSHIFT_simlib"], errors="coerce")
+        comparable = mapped_rows & fitres_redshift.notna() & simlib_redshift.notna()
+        redshift_match = np.isclose(
+            fitres_redshift.to_numpy(float),
+            simlib_redshift.to_numpy(float),
+            rtol=0.0,
+            atol=float(redshift_atol),
+            equal_nan=False,
+        )
+        n_redshift_compared = int(comparable.sum())
+        n_redshift_mismatch = int((comparable & ~redshift_match).sum())
+        if require_redshift_match:
+            missing_redshift = mapped_rows & ~comparable
+            if bool(missing_redshift.any()) or n_redshift_mismatch:
+                bad = merged.loc[missing_redshift | (comparable & ~redshift_match), id_col]
+                bad_ids = bad.dropna().astype(str).drop_duplicates().head(10).tolist()
+                raise ValueError(
+                    f"SIMLIB redshift mapping is inconsistent for {simlib_path}: "
+                    f"compared {n_redshift_compared}/{n_rows_mapped} mapped rows, "
+                    f"found {n_redshift_mismatch} mismatches; "
+                    f"first inconsistent {id_col} values={bad_ids}"
+                )
 
     before_ra_nan = int(merged[ra_col].isna().sum())
     before_dec_nan = int(merged[dec_col].isna().sum())
@@ -81,12 +159,16 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
     stats = dict(
         n_rows=len(df),
         n_with_mapping=map_df[id_col].nunique(),
+        n_rows_mapped=n_rows_mapped,
+        n_rows_unmapped=n_rows_unmapped,
+        n_redshift_compared=n_redshift_compared,
+        n_redshift_mismatch=n_redshift_mismatch,
         ra_nan_before=before_ra_nan, ra_nan_after=after_ra_nan,
         dec_nan_before=before_dec_nan, dec_nan_after=after_dec_nan,
         n_ra_changed=n_ra_changed, n_dec_changed=n_dec_changed
     )
 
-    merged = merged.drop(columns=["RA_simlib", "DEC_simlib"])
+    merged = merged.drop(columns=["RA_simlib", "DEC_simlib", "REDSHIFT_simlib"])
     merged = merged[df.columns]  # restore column order
 
     return merged, stats

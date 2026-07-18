@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -208,3 +209,51 @@ def test_writer_emits_id_plus_nexpose_token(tmp_path):
 def test_header_uppercases_y_band():
     header = SimlibHeader(FILTERS="grizy")
     assert header.FILTERS == "grizY"
+
+
+def test_writer_declares_and_converts_global_units(tmp_path):
+    path = tmp_path / "converted_units.SIMLIB"
+    header = SimlibHeader(
+        PIXSIZE=0.2,
+        PSF_UNIT="ARCSEC_FWHM",
+        SKYSIG_UNIT="ADU_PER_SQARCSEC",
+    )
+    with path.open("w") as fp:
+        writer = SimlibWriter(fp, header)
+        writer.write_header()
+        writer.start_libid(1, 1.0, 2.0, 1, comment="SN1")
+        writer.add_epoch(
+            60000.0,
+            "r",
+            1.6,
+            6.0,
+            10.0,
+            2.0,
+            0.0,
+            0.0,
+            29.0,
+            0.01,
+        )
+        writer.end_libid()
+        writer.close()
+
+    text = path.read_text()
+    assert "PSF_UNIT: ARCSEC_FWHM" in text
+    assert "SKYSIG_UNIT: ADU_PER_SQARCSEC" in text
+    row = next(line for line in text.splitlines() if line.startswith("S:"))
+    fields = row.split()
+    assert float(fields[5]) == 6.0  # read noise remains electrons
+    assert float(fields[6]) == 50.0  # 10 ADU/pixel / 0.2 arcsec/pixel
+    assert math.isclose(float(fields[7]), 0.942, abs_tol=5e-4)
+
+
+def test_default_header_explicitly_matches_native_row_units(tmp_path):
+    path = tmp_path / "native_units.SIMLIB"
+    with path.open("w") as fp:
+        writer = SimlibWriter(fp, SimlibHeader())
+        writer.write_header()
+        writer.close()
+
+    text = path.read_text()
+    assert "PSF_UNIT: PIXEL_SIGMA" in text
+    assert "SKYSIG_UNIT: ADU_PER_SQPIXEL" in text

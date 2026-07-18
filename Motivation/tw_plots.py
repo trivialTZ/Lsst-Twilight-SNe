@@ -8,6 +8,48 @@ import numpy as np
 from .tw_constants import COLORS, FID_CENTERS
 
 
+def _apply_aas_style() -> None:
+    """AAS-journal-friendly Matplotlib defaults (serif/Roman, larger labels)."""
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "STIXGeneral", "DejaVu Serif"],
+            "mathtext.fontset": "stix",
+            "font.size": 14,
+            "axes.labelsize": 16,
+            "axes.titlesize": 16,
+            "axes.linewidth": 1.2,
+            "xtick.labelsize": 14,
+            "ytick.labelsize": 14,
+            "xtick.direction": "in",
+            "ytick.direction": "in",
+            "xtick.major.size": 6,
+            "ytick.major.size": 6,
+            "xtick.minor.size": 3,
+            "ytick.minor.size": 3,
+            "legend.fontsize": 14,
+            "legend.frameon": False,
+            "lines.linewidth": 2.0,
+            "lines.markersize": 5.5,
+            "savefig.dpi": 300,
+        }
+    )
+
+
+def _param_label(p: str) -> str:
+    return {"Om": r"$\Omega_m$", "w0": r"$w_0$", "wa": r"$w_a$", "M": r"$\mathcal{M}$"}.get(p, p)
+
+
+def _ymax_padded(values: list[float], *, pad_frac: float = 0.12) -> float | None:
+    finite = [float(v) for v in values if np.isfinite(v)]
+    if not finite:
+        return None
+    vmax = max(finite)
+    if vmax <= 0:
+        return None
+    return vmax * (1.0 + pad_frac)
+
+
 def ellipse_points_from_cov(
     C2: np.ndarray, n_sigma: float = 1.0, n_pts: int = 400
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -39,6 +81,7 @@ def show_fig_y1_nz(
     Z_TW_MAX: float,
     Z_MAX: float,
 ) -> None:
+    _apply_aas_style()
     plt.figure(figsize=(10, 6))
     plt.plot(z_mid, N_det, label=f"Detection (Y1, N={int(N_det.sum())})")
     plt.plot(z_mid, N_cos, label=f"Cosmology (Y1, N={int(N_cos.sum())})")
@@ -49,7 +92,6 @@ def show_fig_y1_nz(
     plt.ylim(bottom=0)
     plt.xlabel("Redshift z")
     plt.ylabel("Count per Δz")
-    plt.grid(alpha=0.2)
     plt.legend()
     plt.tight_layout()
     plt.show()
@@ -155,6 +197,7 @@ def plot_lcdm_1d(
     res: dict, *, param: str = "Om", title: str = "ΛCDM Forecast Comparison"
 ):
     """1D Gaussian PDFs for a single parameter from forecast results."""
+    _apply_aas_style()
     plt.figure(dpi=150)
     ax = plt.gca()
     x0 = FID_CENTERS[param]
@@ -169,12 +212,14 @@ def plot_lcdm_1d(
     for label, s in sigs.items():
         ys = np.exp(-0.5 * ((xs - x0) / s) ** 2) / (s * np.sqrt(2 * np.pi))
         ax.plot(xs, ys, label=f"{label} (σ={s:.4g})", color=COLORS[label]["primary"])
-    ax.set_xlabel(param)
+    ax.set_xlabel(_param_label(param))
     ax.set_ylabel("Gaussian (norm.)")
     ax.legend(frameon=False)
     if title:
         plt.title(title)
+    plt.tight_layout()
     plt.show()
+    return plt.gcf(), ax
 
 
 def plot_corner(
@@ -183,7 +228,9 @@ def plot_corner(
     params: tuple[str, ...] = ("Om", "w0", "wa"),
     title: str = "w0waCDM Forecast",
 ):
-    labs = res["WFD"]["labels"]
+    _apply_aas_style()
+    # Use the first scenario as the label reference (param ordering is shared).
+    labs = next(iter(res.values()))["labels"]
     n = len(params)
     fig, axes = plt.subplots(n, n, figsize=(3.2 * n, 3.2 * n), dpi=150)
     for r in range(n):
@@ -202,8 +249,8 @@ def plot_corner(
                     xs = np.linspace(x0 - 5 * s, x0 + 5 * s, 600)
                     ys = np.exp(-0.5 * ((xs - x0) / s) ** 2) / (s * np.sqrt(2 * np.pi))
                     ax.plot(xs, ys, color=COLORS[label]["primary"], lw=2)
-                ax.set_ylabel("PDF")
-                ax.set_xlabel(p_i)
+                ax.set_ylabel("")
+                ax.set_xlabel(_param_label(p_i))
             else:
                 p_x, p_y = params[c], params[r]
                 i, j = labs.index(p_x), labs.index(p_y)
@@ -221,26 +268,34 @@ def plot_corner(
                     ax.plot(
                         FID_CENTERS[p_x] + ex2,
                         FID_CENTERS[p_y] + ey2,
-                        color=COLORS[label]["light"],
+                        color=COLORS[label]["primary"],
                         lw=1.5,
+                        linestyle="--",
+                        alpha=0.65,
                     )
-                ax.set_xlabel(p_x)
-                ax.set_ylabel(p_y)
+                ax.set_xlabel(_param_label(p_x))
+                ax.set_ylabel(_param_label(p_y))
     from matplotlib.lines import Line2D
 
     handles = [
-        Line2D([0], [0], color=COLORS[label]["primary"], lw=2, label=f"{label} 1σ")
+        Line2D([0], [0], color=COLORS[label]["primary"], lw=2, label=f"{label}")
         for label in res
     ]
-    axes[0, 0].legend(handles=handles, frameon=False, loc="upper right")
-    fig.suptitle(title, y=0.93)
+    leg_ax = axes[0, n - 1] if n > 1 else axes[0, 0]
+    if n > 1:
+        leg_ax.axis("off")
+    leg_ax.legend(handles=handles, frameon=False, loc="upper right")
+    if title:
+        fig.suptitle(title, y=0.98)
     fig.tight_layout()
     plt.show()
+    return fig, axes
 
 
 def plot_lcdm_1d_comparison(
     res_map: dict, *, param: str = "Om", title: str = "ΛCDM Forecast Comparison"
 ):
+    _apply_aas_style()
     plt.figure(dpi=150)
     ax = plt.gca()
     x0 = FID_CENTERS[param]
@@ -259,11 +314,12 @@ def plot_lcdm_1d_comparison(
         s = np.sqrt(C[i, i])
         ys = np.exp(-0.5 * ((xs - x0) / s) ** 2) / (s * np.sqrt(2 * np.pi))
         ax.plot(xs, ys, label=f"{label} (σ={s:.4g})", color=COLORS[label]["primary"])
-    ax.set_xlabel(param)
+    ax.set_xlabel(_param_label(param))
     ax.set_ylabel("Gaussian (norm.)")
     ax.legend(frameon=False)
     if title:
         plt.title(title)
+    plt.tight_layout()
     plt.show()
 
 
@@ -273,7 +329,9 @@ def plot_corner_comparison(
     params: tuple[str, ...] = ("Om", "w0", "wa"),
     title: str = "w0waCDM Forecast Comparison (1σ/2σ)",
 ):
-    labs_ref = res_map["WFD"]["labels"]
+    _apply_aas_style()
+    # Use the first scenario as the label reference (param ordering is shared).
+    labs_ref = next(iter(res_map.values()))["labels"]
     n = len(params)
     fig, axes = plt.subplots(n, n, figsize=(3.2 * n, 3.2 * n), dpi=150)
     for r in range(n):
@@ -292,8 +350,8 @@ def plot_corner_comparison(
                     xs = np.linspace(x0 - 5 * s, x0 + 5 * s, 600)
                     ys = np.exp(-0.5 * ((xs - x0) / s) ** 2) / (s * np.sqrt(2 * np.pi))
                     ax.plot(xs, ys, color=COLORS[label]["primary"], lw=2)
-                ax.set_ylabel("PDF")
-                ax.set_xlabel(p_i)
+                ax.set_ylabel("")
+                ax.set_xlabel(_param_label(p_i))
             else:
                 p_x, p_y = params[c], params[r]
                 i, j = labs_ref.index(p_x), labs_ref.index(p_y)
@@ -311,21 +369,389 @@ def plot_corner_comparison(
                     ax.plot(
                         FID_CENTERS[p_x] + ex2,
                         FID_CENTERS[p_y] + ey2,
-                        color=COLORS[label]["light"],
+                        color=COLORS[label]["primary"],
                         lw=1.5,
+                        linestyle="--",
+                        alpha=0.65,
                     )
-                ax.set_xlabel(p_x)
-                ax.set_ylabel(p_y)
+                ax.set_xlabel(_param_label(p_x))
+                ax.set_ylabel(_param_label(p_y))
     from matplotlib.lines import Line2D
 
     handles = [
-        Line2D([0], [0], color=COLORS[label]["primary"], lw=2, label=f"{label} 1σ")
+        Line2D([0], [0], color=COLORS[label]["primary"], lw=2, label=f"{label}")
         for label in res_map
     ]
-    axes[0, 0].legend(handles=handles, frameon=False, loc="upper right")
-    fig.suptitle(title, y=0.93)
+    leg_ax = axes[0, n - 1] if n > 1 else axes[0, 0]
+    if n > 1:
+        leg_ax.axis("off")
+    leg_ax.legend(handles=handles, frameon=False, loc="upper right")
+    if title:
+        fig.suptitle(title, y=0.98)
     fig.tight_layout()
     plt.show()
+
+
+def plot_w0wa_metrics_bars(
+    res: dict,
+    *,
+    title: str = "w0waCDM: WFD vs WFD+Twilight",
+    scenario_order: tuple[str, str] = ("WFD", "WFD+Twilight"),
+    scenario_colors: dict[str, str] | None = None,
+    show: bool = True,
+    figsize: tuple[float, float] = (10.2, 6.4),
+    show_legend: bool = True,
+):
+    """Bar-plot FoM and 1σ errors for WFD vs WFD+Twilight.
+
+    Creates a 2×2 figure:
+    - FoM and σ for (w0, wa)
+    - FoM and σ for (Om, w0, wa)
+
+    Notes
+    -----
+    The FoM is computed as ``1/sqrt(det(C_sub))`` for the selected
+    parameter sub-covariance. For 2D (w0, wa) this matches the usual
+    DETF FoM up to an overall constant (which cancels in ratios).
+    """
+    _apply_aas_style()
+    from .tw_fisher import compute_w0wa_metrics
+
+    m = compute_w0wa_metrics(res)
+    sigmas = m["sigmas"]
+    fom_2d = m["fom_2d"]
+    fom_3d = m["fom_3d"]
+
+    scenarios = [s for s in scenario_order if s in sigmas]
+    if len(scenarios) < 2:
+        raise ValueError(f"Expected at least 2 scenarios in {scenario_order}; got {list(sigmas)}")
+
+    def _pname(p: str) -> str:
+        return {"Om": r"\Omega_m", "w0": r"w_0", "wa": r"w_a"}.get(p, p)
+
+    def _sigma_xtick(p: str) -> str:
+        return rf"$\sigma({_pname(p)})$"
+
+    def _fmt_fom(v: float) -> str:
+        if not np.isfinite(v):
+            return "nan"
+        av = abs(v)
+        if av >= 100:
+            return f"{v:.0f}"
+        if av >= 10:
+            return f"{v:.1f}"
+        return f"{v:.3g}"
+
+    def _fmt_sig(v: float) -> str:
+        if not np.isfinite(v):
+            return "nan"
+        av = abs(v)
+        if av >= 0.1:
+            return f"{v:.3f}"
+        if av >= 0.01:
+            return f"{v:.4f}"
+        return f"{v:.3g}"
+
+    def _bar_height(v: float) -> float:
+        return float(v) if np.isfinite(v) else 0.0
+
+    def _annotate(ax, bars, values, fmt_fn):
+        for b, v in zip(bars, values, strict=False):
+            h = b.get_height()
+            ax.annotate(
+                fmt_fn(float(v)),
+                (b.get_x() + b.get_width() / 2.0, h),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+    def _color_for(scenario: str) -> str | None:
+        if scenario_colors and scenario in scenario_colors:
+            return scenario_colors[scenario]
+        if scenario in COLORS:
+            return COLORS[scenario]["primary"]
+        return None
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize, dpi=150)
+
+    # ---- FoM panels
+    x = np.arange(len(scenarios))
+    colors = [_color_for(s) for s in scenarios]
+
+    vals_2d = [fom_2d[s] for s in scenarios]
+    bars = axes[0, 0].bar(x, [_bar_height(v) for v in vals_2d], color=colors)
+    _annotate(axes[0, 0], bars, vals_2d, _fmt_fom)
+    axes[0, 0].set_xticks(x, scenarios, rotation=0)
+    axes[0, 0].set_ylabel("FoM")
+    axes[0, 0].set_title(r"FoM: $(w_0,w_a)$")
+    ymax = _ymax_padded([float(v) for v in vals_2d])
+    if ymax is None:
+        axes[0, 0].set_ylim(bottom=0.0)
+    else:
+        axes[0, 0].set_ylim(bottom=0.0, top=ymax)
+
+    vals_3d = [fom_3d[s] for s in scenarios]
+    bars = axes[1, 0].bar(x, [_bar_height(v) for v in vals_3d], color=colors)
+    _annotate(axes[1, 0], bars, vals_3d, _fmt_fom)
+    axes[1, 0].set_xticks(x, scenarios, rotation=0)
+    axes[1, 0].set_ylabel("FoM")
+    axes[1, 0].set_title(r"FoM: $(\Omega_m,w_0,w_a)$")
+    ymax = _ymax_padded([float(v) for v in vals_3d])
+    if ymax is None:
+        axes[1, 0].set_ylim(bottom=0.0)
+    else:
+        axes[1, 0].set_ylim(bottom=0.0, top=ymax)
+
+    # ---- σ panels
+    def _plot_sig_panel(ax, params: list[str]):
+        group_x = np.arange(len(params))
+        width = 0.36
+        offsets = (-width / 2.0, width / 2.0) if len(scenarios) == 2 else np.linspace(
+            -width, width, len(scenarios)
+        )
+
+        all_vals: list[float] = []
+        for i, s in enumerate(scenarios):
+            vals = [sigmas[s].get(p, float("nan")) for p in params]
+            all_vals.extend([float(v) for v in vals])
+            bars = ax.bar(
+                group_x + offsets[i],
+                [_bar_height(v) for v in vals],
+                width=width,
+                label=s,
+                color=_color_for(s),
+                edgecolor="k",
+                linewidth=0.3,
+            )
+            _annotate(ax, bars, vals, _fmt_sig)
+
+        ax.set_xticks(group_x, [_sigma_xtick(p) for p in params])
+        ax.set_ylabel("1σ error")
+        ymax = _ymax_padded(all_vals)
+        if ymax is None:
+            ax.set_ylim(bottom=0.0)
+        else:
+            ax.set_ylim(bottom=0.0, top=ymax)
+
+    _plot_sig_panel(axes[0, 1], ["w0", "wa"])
+    axes[0, 1].set_title(r"Errors: $(w_0,w_a)$")
+
+    _plot_sig_panel(axes[1, 1], ["Om", "w0", "wa"])
+    axes[1, 1].set_title(r"Errors: $(\Omega_m,w_0,w_a)$")
+
+    # Shared legend
+    handles, labels = axes[0, 1].get_legend_handles_labels()
+    if show_legend and handles:
+        fig.legend(handles, labels, loc="upper right", frameon=False)
+
+    if title:
+        fig.suptitle(title, y=0.99)
+    right = 0.92 if show_legend else 1.0
+    top = 0.96 if title else 1.0
+    fig.tight_layout(rect=(0, 0, right, top))
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def plot_w0wa_metrics_bars_multi(
+    res_map: dict[str, dict],
+    *,
+    title: str = "w0waCDM: multi-scenario",
+    scenario_order: tuple[str, ...] | None = None,
+    scenario_colors: dict[str, str] | None = None,
+    show: bool = True,
+    figsize: tuple[float, float] = (10.2, 6.4),
+    show_legend: bool = True,
+):
+    """Bar-plot FoM and 1σ errors for multiple scenarios.
+
+    Parameters
+    ----------
+    res_map : dict
+        Mapping from scenario name to a forecast block with keys:
+        - ``labels``: list[str]
+        - ``cov``: ndarray
+
+        This matches the per-scenario values inside ``run_binned_forecast``
+        output (e.g., ``res['WFD']`` or ``res['WFD+Twilight']``).
+    """
+    _apply_aas_style()
+
+    scenarios = list(scenario_order) if scenario_order is not None else list(res_map)
+    scenarios = [s for s in scenarios if s in res_map]
+    if len(scenarios) < 1:
+        raise ValueError("No scenarios provided in res_map.")
+
+    labels = list(res_map[scenarios[0]].get("labels", []))
+    required = ("Om", "w0", "wa")
+    if not all(p in labels for p in required):
+        raise ValueError(f"required params {required} not found in labels: {labels}")
+
+    for s in scenarios[1:]:
+        labs_s = list(res_map[s].get("labels", []))
+        if labs_s != labels:
+            raise ValueError(
+                "All scenarios must share identical parameter labels; "
+                f"got {scenarios[0]}={labels} vs {s}={labs_s}"
+            )
+
+    def _subcov(C: np.ndarray, params: tuple[str, ...]) -> np.ndarray:
+        idx = [labels.index(p) for p in params]
+        return C[np.ix_(idx, idx)]
+
+    def _det_safe(C: np.ndarray) -> float:
+        try:
+            det = float(np.linalg.det(C))
+        except np.linalg.LinAlgError:
+            eps = 1e-15 * float(np.trace(C)) / C.shape[0]
+            det = float(np.linalg.det(C + eps * np.eye(C.shape[0])))
+        if det < 0 and abs(det) < 1e-18:
+            det = 0.0
+        return det
+
+    def _fom(C_sub: np.ndarray) -> float:
+        det = _det_safe(C_sub)
+        if (not np.isfinite(det)) or det <= 0:
+            return float("nan")
+        return float(1.0 / np.sqrt(det))
+
+    def _color_for(s: str) -> str | None:
+        if scenario_colors and s in scenario_colors:
+            return scenario_colors[s]
+        if s in COLORS:
+            return COLORS[s]["primary"]
+        return None
+
+    def _fmt_fom(v: float) -> str:
+        if not np.isfinite(v):
+            return "nan"
+        av = abs(v)
+        if av >= 100:
+            return f"{v:.0f}"
+        if av >= 10:
+            return f"{v:.1f}"
+        return f"{v:.3g}"
+
+    def _fmt_sig(v: float) -> str:
+        if not np.isfinite(v):
+            return "nan"
+        av = abs(v)
+        if av >= 0.1:
+            return f"{v:.3f}"
+        if av >= 0.01:
+            return f"{v:.4f}"
+        return f"{v:.3g}"
+
+    def _bar_height(v: float) -> float:
+        return float(v) if np.isfinite(v) else 0.0
+
+    def _annotate(ax, bars, values, fmt_fn):
+        for b, v in zip(bars, values, strict=False):
+            h = b.get_height()
+            ax.annotate(
+                fmt_fn(float(v)),
+                (b.get_x() + b.get_width() / 2.0, h),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+    sigmas: dict[str, dict[str, float]] = {}
+    fom_2d: dict[str, float] = {}
+    fom_3d: dict[str, float] = {}
+    for s in scenarios:
+        C = np.asarray(res_map[s]["cov"], dtype=float)
+        sigmas[s] = {p: float(np.sqrt(C[i, i])) for i, p in enumerate(labels)}
+        fom_2d[s] = _fom(_subcov(C, ("w0", "wa")))
+        fom_3d[s] = _fom(_subcov(C, ("Om", "w0", "wa")))
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize, dpi=150)
+
+    x = np.arange(len(scenarios))
+    colors = [_color_for(s) for s in scenarios]
+
+    vals_2d = [fom_2d[s] for s in scenarios]
+    bars = axes[0, 0].bar(x, [_bar_height(v) for v in vals_2d], color=colors)
+    _annotate(axes[0, 0], bars, vals_2d, _fmt_fom)
+    axes[0, 0].set_xticks(x, scenarios, rotation=0)
+    axes[0, 0].set_ylabel("FoM")
+    axes[0, 0].set_title(r"FoM: $(w_0,w_a)$")
+    ymax = _ymax_padded([float(v) for v in vals_2d])
+    if ymax is None:
+        axes[0, 0].set_ylim(bottom=0.0)
+    else:
+        axes[0, 0].set_ylim(bottom=0.0, top=ymax)
+
+    vals_3d = [fom_3d[s] for s in scenarios]
+    bars = axes[1, 0].bar(x, [_bar_height(v) for v in vals_3d], color=colors)
+    _annotate(axes[1, 0], bars, vals_3d, _fmt_fom)
+    axes[1, 0].set_xticks(x, scenarios, rotation=0)
+    axes[1, 0].set_ylabel("FoM")
+    axes[1, 0].set_title(r"FoM: $(\Omega_m,w_0,w_a)$")
+    ymax = _ymax_padded([float(v) for v in vals_3d])
+    if ymax is None:
+        axes[1, 0].set_ylim(bottom=0.0)
+    else:
+        axes[1, 0].set_ylim(bottom=0.0, top=ymax)
+
+    def _pname(p: str) -> str:
+        return {"Om": r"\Omega_m", "w0": r"w_0", "wa": r"w_a"}.get(p, p)
+
+    def _sigma_xtick(p: str) -> str:
+        return rf"$\sigma({_pname(p)})$"
+
+    def _plot_sig_panel(ax, params: list[str]):
+        group_x = np.arange(len(params))
+        width = min(0.22, 0.8 / max(1, len(scenarios)))
+        offsets = (np.arange(len(scenarios)) - (len(scenarios) - 1) / 2.0) * width
+
+        all_vals: list[float] = []
+        for i, s in enumerate(scenarios):
+            vals = [sigmas[s].get(p, float("nan")) for p in params]
+            all_vals.extend([float(v) for v in vals])
+            bars = ax.bar(
+                group_x + offsets[i],
+                [_bar_height(v) for v in vals],
+                width=width,
+                label=s,
+                color=_color_for(s),
+                edgecolor="k",
+                linewidth=0.3,
+            )
+            _annotate(ax, bars, vals, _fmt_sig)
+
+        ax.set_xticks(group_x, [_sigma_xtick(p) for p in params])
+        ax.set_ylabel("1σ error")
+        ymax = _ymax_padded(all_vals)
+        if ymax is None:
+            ax.set_ylim(bottom=0.0)
+        else:
+            ax.set_ylim(bottom=0.0, top=ymax)
+
+    _plot_sig_panel(axes[0, 1], ["w0", "wa"])
+    axes[0, 1].set_title(r"Errors: $(w_0,w_a)$")
+
+    _plot_sig_panel(axes[1, 1], ["Om", "w0", "wa"])
+    axes[1, 1].set_title(r"Errors: $(\Omega_m,w_0,w_a)$")
+
+    handles, labels_leg = axes[0, 1].get_legend_handles_labels()
+    if show_legend and handles:
+        fig.legend(handles, labels_leg, loc="upper right", frameon=False)
+
+    if title:
+        fig.suptitle(title, y=0.99)
+    right = 0.92 if show_legend else 1.0
+    top = 0.96 if title else 1.0
+    fig.tight_layout(rect=(0, 0, right, top))
+    if show:
+        plt.show()
+    return fig, axes
 
 
 def plot_fs8_scan(

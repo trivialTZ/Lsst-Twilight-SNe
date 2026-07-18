@@ -138,6 +138,7 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         "alt_deg",
         "sky_mag_arcsec2",
         "ZPT",
+        "ZPTERR",
         "SKYSIG",
         "NEA_pix",
         "RDNOISE",
@@ -153,6 +154,7 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         "cadence_gate_passed",
     }
     assert expected_cols.issubset(pernight_df.columns)
+    assert (pernight_df["ZPTERR"] == cfg.zpt_err_mag).all()
 
     assert (pernight_df["t_exp_s"] >= 0).all()
 

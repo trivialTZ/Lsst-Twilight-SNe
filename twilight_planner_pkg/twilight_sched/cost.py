@@ -25,7 +25,7 @@ from ..astro_utils import great_circle_sep_deg, slew_time_seconds
 from ..config import PlannerConfig
 from ..photom_rubin import PhotomConfig
 from ..sky_model import SkyModelConfig
-from .caching import _cached_m5_at_time
+from .caching import _cached_m5_at_time, precache_m5_at_times
 
 
 def _visit_unit_time(
@@ -280,3 +280,50 @@ def opportunity_cost_seconds_cached(
     opp = float(est_visit_s) * (10 ** (0.8 * delta_m) - 1.0)
     cap = float(getattr(cfg, "inbatch_cost_cap_s", 600.0))
     return float(min(max(0.0, opp), cap))
+
+
+def precache_opportunity_m5(
+    targets: Iterable[dict],
+    now_mjd: float,
+    cfg: PlannerConfig,
+    phot_cfg: PhotomConfig,
+    sky_provider,
+    site: EarthLocation,
+    *,
+    minutes: int = 1,
+) -> int:
+    """Batch the m5 values that greedy opportunity-cost scoring may request."""
+
+    minute_step = max(1, int(minutes))
+    requests: list[tuple[dict, str, float, int, bool]] = []
+    for target in targets:
+        filters = target.get("policy_allowed", target.get("allowed", [])) or []
+        best_ts = target.get("best_time_utc")
+        best_mjd: float | None = None
+        if best_ts is not None:
+            try:
+                import pandas as pd
+
+                if isinstance(best_ts, pd.Timestamp):
+                    best_mjd = float(Time(best_ts.tz_convert("UTC")).mjd)
+                else:
+                    best_mjd = float(
+                        Time(pd.Timestamp(best_ts).tz_localize("UTC")).mjd
+                    )
+            except Exception:
+                best_mjd = None
+        for filt in filters:
+            requests.append(
+                (target, str(filt), float(now_mjd), minute_step, False)
+            )
+            if best_mjd is not None:
+                requests.append(
+                    (target, str(filt), best_mjd, minute_step, True)
+                )
+    return precache_m5_at_times(
+        requests=requests,
+        cfg=cfg,
+        phot_cfg=phot_cfg,
+        sky_provider=sky_provider,
+        site=site,
+    )

@@ -27,6 +27,9 @@ from astropy.coordinates import EarthLocation
 from astropy.time import Time
 
 from ..astro_utils import (
+    _put_saturation_sky_cache,
+    _saturation_sky_cache_key,
+    airmass_from_alt_deg,
     compute_capped_exptime,
     great_circle_sep_deg,
     slew_time_seconds,
@@ -174,6 +177,86 @@ def _compute_capped_exptime_for_pair(
         cfg.current_dec_deg = orig_dec
         cfg.current_mjd = orig_mjd
         cfg.current_redshift = orig_z
+
+
+def _precache_saturation_sky_for_tasks(
+    tasks: list[tuple[dict, str, float]],
+    cfg: PlannerConfig,
+    sky_provider,
+    now_mjd: float,
+) -> int:
+    """Batch identical-MJD Rubin queries used by exposure capping."""
+
+    if not bool(getattr(cfg, "sky_batch_cache_enable", True)):
+        return 0
+    batch_method = getattr(sky_provider, "sky_mags", None)
+    if not callable(batch_method):
+        return 0
+
+    # One target can contribute several filters.  Collapse those filters first,
+    # then batch all targets that share an exact preferred MJD.
+    targets: dict[tuple[float, float, float, float], dict[str, object]] = {}
+    for target, filt, _cad_tgt_eff in tasks:
+        coord = _candidate_coord(target)
+        if coord is None:
+            continue
+        try:
+            alt = float(target.get("max_alt_deg", np.nan))
+            X = float(airmass_from_alt_deg(alt))
+        except Exception:
+            continue
+        best_mjd = target.get("best_time_mjd")
+        mjd_use = best_mjd if isinstance(best_mjd, (float, int)) else now_mjd
+        try:
+            mjd_value = float(mjd_use)
+        except Exception:
+            continue
+        if not np.isfinite(mjd_value) or not np.isfinite(X):
+            continue
+        key = (mjd_value, float(coord[0]), float(coord[1]), X)
+        record = targets.setdefault(key, {"bands": []})
+        bands = record["bands"]
+        band = str(filt).strip().lower()
+        if isinstance(bands, list) and band and band not in bands:
+            bands.append(band)
+
+    by_mjd: dict[float, list[tuple[tuple[float, float, float, float], list[str]]]] = {}
+    for key, record in targets.items():
+        bands = record.get("bands", [])
+        if not isinstance(bands, list) or not bands:
+            continue
+        by_mjd.setdefault(key[0], []).append((key, bands))
+
+    stored = 0
+    for mjd_value, samples in by_mjd.items():
+        union_bands: list[str] = []
+        for _key, bands in samples:
+            for band in bands:
+                if band not in union_bands:
+                    union_bands.append(band)
+        try:
+            values = batch_method(
+                mjd_value,
+                [item[0][1] for item in samples],
+                [item[0][2] for item in samples],
+                union_bands,
+                [item[0][3] for item in samples],
+            )
+            pending: list[tuple[tuple[object, ...], float]] = []
+            for index, (key, requested) in enumerate(samples):
+                _mjd, ra, dec, X = key
+                for band in requested:
+                    value = float(values[band][index])
+                    cache_key = _saturation_sky_cache_key(
+                        sky_provider, _mjd, ra, dec, band, X
+                    )
+                    pending.append((cache_key, value))
+        except Exception:
+            continue
+        for cache_key, value in pending:
+            _put_saturation_sky_cache(cfg, cache_key, value)
+            stored += 1
+    return stored
 
 
 def _estimate_m5_for_pair(
@@ -358,7 +441,13 @@ def _build_global_pairs_for_window(
         else max_workers_cfg
     )
 
-    if use_parallel and len(tasks) > threshold and workers > 1:
+    parallel_active = use_parallel and len(tasks) > threshold and workers > 1
+    if not parallel_active:
+        _precache_saturation_sky_for_tasks(
+            tasks, cfg, sky_provider, float(now_mjd)
+        )
+
+    if parallel_active:
         chunksize = max(1, len(tasks) // (workers * 4))
         try:
             with ProcessPoolExecutor(

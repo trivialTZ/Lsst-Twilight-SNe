@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 
 import pandas as pd
 
 from twilight_planner_pkg.simlib_split import split_twilight_plan_by_source
+from twilight_planner_pkg.simlib_writer import SimlibHeader
 
 
 def _count_prefix(lines: list[str], prefix: str) -> int:
@@ -27,6 +29,7 @@ def test_split_twilight_plan_by_source_writes_two_simlibs(tmp_path: Path) -> Non
                 "PSF2_pix": 0.8,
                 "PSFRATIO": 1.0,
                 "ZPT": 27.0,
+                "ZPTERR": 0.012,
             },
             {
                 "SN": "WFD_LIBID_42",
@@ -78,3 +81,53 @@ def test_split_twilight_plan_by_source_writes_two_simlibs(tmp_path: Path) -> Non
     assert "WFD_LIBID_42" in libid_line
     assert _count_prefix(wfd_lines, "S:") == 1
 
+    assert "PSF_UNIT: PIXEL_SIGMA" in tns_lines
+    assert "SKYSIG_UNIT: ADU_PER_SQPIXEL" in tns_lines
+    tns_row = next(line for line in tns_lines if line.startswith("S:")).split()
+    assert float(tns_row[5]) == 3.0
+    assert float(tns_row[6]) == 12.0
+    assert float(tns_row[7]) == 0.8
+    assert float(tns_row[11]) == 0.012
+
+
+def test_split_respects_requested_output_units(tmp_path: Path) -> None:
+    plan_df = pd.DataFrame(
+        [
+            {
+                "SN": "TNS2023abc",
+                "visit_start_utc": "2023-03-01T01:02:03Z",
+                "filter": "r",
+                "RA_deg": 10.0,
+                "Dec_deg": -10.0,
+                "GAIN": 1.6,
+                "RDNOISE": 6.0,
+                "SKYSIG": 12.0,
+                "PSF1_pix": 0.8,
+                "PSF2_pix": 0.0,
+                "PSFRATIO": 0.0,
+                "ZPT": 27.0,
+            }
+        ]
+    )
+    catalog_df = pd.DataFrame(
+        [{"Name": "TNS2023abc", "source": "TNS"}]
+    )
+    out_tns = tmp_path / "tns_arcsec.simlib"
+    split_twilight_plan_by_source(
+        plan_df,
+        catalog_df,
+        out_tns_path=out_tns,
+        out_wfd_path=tmp_path / "empty_wfd.simlib",
+        header=SimlibHeader(
+            PIXSIZE=0.2,
+            PSF_UNIT="ARCSEC_FWHM",
+            SKYSIG_UNIT="ADU_PER_SQARCSEC",
+        ),
+    )
+
+    row = next(
+        line for line in out_tns.read_text().splitlines() if line.startswith("S:")
+    ).split()
+    assert float(row[5]) == 6.0
+    assert float(row[6]) == 60.0
+    assert math.isclose(float(row[7]), 0.377, abs_tol=5e-4)

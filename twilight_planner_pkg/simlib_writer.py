@@ -1,7 +1,109 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional, TextIO
+
+
+PSF_UNIT_PIXEL_SIGMA = "PIXEL_SIGMA"
+PSF_UNIT_ARCSEC_FWHM = "ARCSEC_FWHM"
+SKYSIG_UNIT_ADU_PER_SQPIXEL = "ADU_PER_SQPIXEL"
+SKYSIG_UNIT_ADU_PER_SQARCSEC = "ADU_PER_SQARCSEC"
+FWHM_SIGMA_RATIO = 2.355
+
+
+def normalize_psf_unit(value: str) -> str:
+    """Return a SNANA-supported PSF unit for three-column Gaussian rows."""
+
+    unit = str(value).strip().upper()
+    aliases = {
+        "PIXEL": PSF_UNIT_PIXEL_SIGMA,
+        "PIXELS": PSF_UNIT_PIXEL_SIGMA,
+        "PIXEL_SIGMA": PSF_UNIT_PIXEL_SIGMA,
+        "NORM": PSF_UNIT_PIXEL_SIGMA,
+        "ARCSEC": PSF_UNIT_ARCSEC_FWHM,
+        "ARCSEC_FWHM": PSF_UNIT_ARCSEC_FWHM,
+    }
+    try:
+        return aliases[unit]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported PSF_UNIT {value!r}; expected PIXEL_SIGMA or ARCSEC_FWHM"
+        ) from exc
+
+
+def normalize_skysig_unit(value: str) -> str:
+    """Return a SNANA-supported sky-RMS surface unit."""
+
+    unit = str(value).strip().upper()
+    aliases = {
+        "ADU_PER_PIXEL": SKYSIG_UNIT_ADU_PER_SQPIXEL,
+        "ADU_PER_SQPIXEL": SKYSIG_UNIT_ADU_PER_SQPIXEL,
+        "ADU_PER_ARCSEC": SKYSIG_UNIT_ADU_PER_SQARCSEC,
+        "ADU_PER_SQARCSEC": SKYSIG_UNIT_ADU_PER_SQARCSEC,
+    }
+    try:
+        return aliases[unit]
+    except KeyError as exc:
+        raise ValueError(
+            "Unsupported SKYSIG_UNIT "
+            f"{value!r}; expected ADU_PER_SQPIXEL or ADU_PER_SQARCSEC"
+        ) from exc
+
+
+def psf_sigma_pixels_to_simlib(
+    value: float, *, pixel_scale_arcsec: float, psf_unit: str
+) -> float:
+    """Convert Gaussian sigma in pixels to the requested SIMLIB PSF unit."""
+
+    unit = normalize_psf_unit(psf_unit)
+    if unit == PSF_UNIT_PIXEL_SIGMA:
+        return float(value)
+    return float(value) * float(pixel_scale_arcsec) * FWHM_SIGMA_RATIO
+
+
+def psf_sigma_pixels_from_simlib(
+    value: float, *, pixel_scale_arcsec: float, psf_unit: str
+) -> float:
+    """Convert a SIMLIB PSF value to Gaussian sigma in pixels."""
+
+    unit = normalize_psf_unit(psf_unit)
+    if unit == PSF_UNIT_PIXEL_SIGMA:
+        return float(value)
+    denom = float(pixel_scale_arcsec) * FWHM_SIGMA_RATIO
+    if not math.isfinite(denom) or denom <= 0.0:
+        raise ValueError("pixel_scale_arcsec must be finite and positive")
+    return float(value) / denom
+
+
+def skysig_adu_per_pixel_to_simlib(
+    value: float, *, pixel_scale_arcsec: float, skysig_unit: str
+) -> float:
+    """Convert sky RMS in ADU/pixel to the requested SIMLIB sky unit."""
+
+    unit = normalize_skysig_unit(skysig_unit)
+    if unit == SKYSIG_UNIT_ADU_PER_SQPIXEL:
+        return float(value)
+    pixel_scale = float(pixel_scale_arcsec)
+    if not math.isfinite(pixel_scale) or pixel_scale <= 0.0:
+        raise ValueError("pixel_scale_arcsec must be finite and positive")
+    # SNANA converts ADU/sqrt(arcsec^2) back to ADU/pixel by multiplying
+    # by PIXSIZE, so serialization performs the inverse operation.
+    return float(value) / pixel_scale
+
+
+def skysig_adu_per_pixel_from_simlib(
+    value: float, *, pixel_scale_arcsec: float, skysig_unit: str
+) -> float:
+    """Convert a SIMLIB sky RMS value to ADU/pixel."""
+
+    unit = normalize_skysig_unit(skysig_unit)
+    if unit == SKYSIG_UNIT_ADU_PER_SQPIXEL:
+        return float(value)
+    pixel_scale = float(pixel_scale_arcsec)
+    if not math.isfinite(pixel_scale) or pixel_scale <= 0.0:
+        raise ValueError("pixel_scale_arcsec must be finite and positive")
+    return float(value) * pixel_scale
 
 
 @dataclass
@@ -13,7 +115,8 @@ class SimlibHeader:
     PIXSIZE: float = 0.200
     NPE_PIXEL_SATURATE: int = 80000
     PHOTFLAG_SATURATE: int = 2048
-    PSF_UNIT: str = "NEA_PIXEL"
+    PSF_UNIT: str = PSF_UNIT_PIXEL_SIGMA
+    SKYSIG_UNIT: str = SKYSIG_UNIT_ADU_PER_SQPIXEL
 
     def __post_init__(self) -> None:
         # SNANA expects the y-band to be written as an uppercase 'Y'
@@ -24,6 +127,10 @@ class SimlibHeader:
         except Exception:
             filt_str = ""
         self.FILTERS = "".join("Y" if c == "y" else c for c in filt_str)
+        self.PSF_UNIT = normalize_psf_unit(self.PSF_UNIT)
+        self.SKYSIG_UNIT = normalize_skysig_unit(self.SKYSIG_UNIT)
+        if not math.isfinite(float(self.PIXSIZE)) or float(self.PIXSIZE) <= 0.0:
+            raise ValueError("SimlibHeader.PIXSIZE must be finite and positive")
 
 
 class SimlibWriter:
@@ -72,18 +179,17 @@ class SimlibWriter:
         w("  PURPOSE: LSST twilight cadence library for SNANA simulation\n")
         w("  INTENT: Nominal\n")
         w("  USAGE_KEY: SIMLIB_FILE\n")
-        w(
-            "  NOTE: SKYSIG and NOISE columns are ADU/pixel; SKYSIG excludes read noise.\n"
-        )
-        w(
-            "  NOTE: RDNOISE is converted via gain so SNANA recovers electrons per pixel.\n"
-        )
+        w("  NOTE: NOISE is read noise in electrons/pixel.\n")
+        w("  NOTE: SKYSIG excludes read noise and follows SKYSIG_UNIT.\n")
+        w("  NOTE: PSF1/PSF2 follow PSF_UNIT.\n")
         w("DOCUMENTATION_END:\n\n")
         # Global header keys
         w("# Generated by twilight_planner\n")
         w(f"SURVEY:   {h.SURVEY}\n")
         w(f"FILTERS:  {h.FILTERS}\n")
         w(f"PIXSIZE:  {h.PIXSIZE:.3f}\n")
+        w(f"PSF_UNIT: {h.PSF_UNIT}\n")
+        w(f"SKYSIG_UNIT: {h.SKYSIG_UNIT}\n")
         w(f"NPE_PIXEL_SATURATE: {h.NPE_PIXEL_SATURATE}\n")
         w(f"PHOTFLAG_SATURATE:  {h.PHOTFLAG_SATURATE}\n")
         w("\n")
@@ -155,7 +261,13 @@ class SimlibWriter:
         mag: float = -99.0,
         nexpose: int = 1,
     ) -> None:
-        """Buffer an `S:` row (no immediate file I/O)."""
+        """Buffer an ``S:`` row in planner-canonical units.
+
+        ``noise`` is read noise in electrons/pixel, ``skysig`` is sky RMS in
+        ADU/pixel, and ``psf1``/``psf2`` are Gaussian sigmas in pixels.  The
+        latter two are converted at serialization according to the global
+        header; ``noise`` is never divided by gain.
+        """
         if self._current_key is None:
             # Defensive: if caller forgot start_libid(), ignore silently or raise.
             # We choose to no-op to preserve backward compatibility.
@@ -254,10 +366,25 @@ class SimlibWriter:
                 if nexpose < 1:
                     nexpose = 1
                 id_field = f"{idx}*{nexpose}" if nexpose > 1 else f"{idx}"
+                skysig_out = skysig_adu_per_pixel_to_simlib(
+                    e["skysig"],
+                    pixel_scale_arcsec=h.PIXSIZE,
+                    skysig_unit=h.SKYSIG_UNIT,
+                )
+                psf1_out = psf_sigma_pixels_to_simlib(
+                    e["psf1"],
+                    pixel_scale_arcsec=h.PIXSIZE,
+                    psf_unit=h.PSF_UNIT,
+                )
+                psf2_out = psf_sigma_pixels_to_simlib(
+                    e["psf2"],
+                    pixel_scale_arcsec=h.PIXSIZE,
+                    psf_unit=h.PSF_UNIT,
+                )
                 w(
                     f"S: {e['mjd']:11.4f}  {id_field:>11s}  {band:1s}  "
-                    f"{e['gain']:5.2f}  {e['noise']:5.2f}  {e['skysig']:7.2f}  "
-                    f"{e['psf1']:7.3f}  {e['psf2']:7.3f}  {e['psfratio']:7.3f}  "
+                    f"{e['gain']:5.2f}  {e['noise']:5.2f}  {skysig_out:7.2f}  "
+                    f"{psf1_out:7.3f}  {psf2_out:7.3f}  {e['psfratio']:7.3f}  "
                     f"{e['zpavg']:6.3f}  {e['zperr']:5.3f}\n"
                 )
             w("END_LIBID:\n\n")

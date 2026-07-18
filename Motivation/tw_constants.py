@@ -4,12 +4,16 @@ from __future__ import annotations
 
 # Colors used in plots (preserve exact hex codes used)
 COLORS = {
-    "WFD": {"primary": "#1f77b4", "light": "#aec7e8"},
-    "WFD+Twilight": {"primary": "#2ca02c", "light": "#98df8a"},
+    # Paper palette (user request): WFD=navy, Twilight=orange
+    "WFD": {"primary": "#192D54", "light": "#AFB6C3"},
+    "WFD+Twilight": {"primary": "#C65F10", "light": "#EBC7AB"},
     # Direct Twilight-only label for clarity in new analyses
-    "Twilight": {"primary": "#2ca02c", "light": "#98df8a"},
-    # comparison color is added by notebook; export a slot here:
-    "WFD+Twilight (Guess)": {"primary": "#ff7f0e", "light": "#ffbb78"},
+    "Twilight": {"primary": "#C65F10", "light": "#EBC7AB"},
+    # Add-on scenarios (e.g., adding DDF on top of baseline samples)
+    "Twilight+DDF": {"primary": "#6A3D9A", "light": "#D1C4E9"},
+    "WFD+Twilight+DDF": {"primary": "#6A3D9A", "light": "#D1C4E9"},
+    # Backwards-compatible alias used in some notebooks
+    "WFD+Twilight (Guess)": {"primary": "#C65F10", "light": "#EBC7AB"},
 }
 
 # Fiducial centers used when drawing 1σ/2σ ellipses / 1D PDFs

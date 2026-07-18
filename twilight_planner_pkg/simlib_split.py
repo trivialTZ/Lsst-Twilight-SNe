@@ -40,6 +40,9 @@ def simlib_header_from_config(cfg: PlannerConfig) -> SimlibHeader:
         NPE_PIXEL_SATURATE=npe_int,
         PHOTFLAG_SATURATE=int(getattr(cfg, "simlib_photflag_saturate", 2048)),
         PSF_UNIT=str(getattr(cfg, "simlib_psf_unit", "PIXEL")),
+        SKYSIG_UNIT=str(
+            getattr(cfg, "simlib_skysig_unit", "ADU_PER_SQPIXEL")
+        ),
     )
 
 
@@ -80,6 +83,12 @@ def _infer_name_col(df: pd.DataFrame) -> str:
 
 
 def _row_to_epoch(row: pd.Series, *, default_zpt_err_mag: float) -> Optional[dict]:
+    """Translate a planner row using canonical writer-input units.
+
+    ``RDNOISE``/``read_noise_e`` are electrons per pixel, ``SKYSIG`` is
+    ADU/pixel, and ``PSF*_pix`` are Gaussian sigmas in pixels.
+    """
+
     mjd = None
     for col in ("visit_start_utc", "sn_start_utc", "best_twilight_time_utc"):
         if col in row:
@@ -108,7 +117,9 @@ def _row_to_epoch(row: pd.Series, *, default_zpt_err_mag: float) -> Optional[dic
     psfratio = _as_float(row.get("PSFRATIO"))
     zpavg = _as_float(row.get("ZPT"))
 
-    zperr = _as_float(row.get("zpt_err_mag", row.get("ZPTERR")))
+    zperr = _as_float(
+        row.get("zpt_err_mag", row.get("ZPTERR", row.get("zperr")))
+    )
     if zperr is None:
         zperr = float(default_zpt_err_mag)
 
@@ -339,4 +350,3 @@ def split_twilight_plan_csv_by_source(
         header=header,
         **kwargs,
     )
-

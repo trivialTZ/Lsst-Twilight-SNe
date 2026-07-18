@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
-from typing import Optional, Dict
+from typing import Iterable, Optional, Dict
 
 import astropy.units as u
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord
@@ -113,6 +113,108 @@ def _finite_or_none(val) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def _sky_cache_key(
+    *,
+    mjd: float,
+    minutes: int,
+    ra_deg: float | None,
+    dec_deg: float | None,
+    band: str,
+    airmass: float,
+) -> tuple[int, int, int, str, int, int]:
+    """Build the exact cache key used by scalar and batch sky lookups."""
+
+    bucket = _mjd_bucket(mjd, minutes)
+    ra_val = _finite_or_none(ra_deg)
+    dec_val = _finite_or_none(dec_deg)
+    X_val = _finite_or_none(airmass)
+    ra_q = 0 if ra_val is None else int(round(ra_val * 1e4))
+    dec_q = 0 if dec_val is None else int(round(dec_val * 1e4))
+    if X_val is None:
+        X_val = 1.2
+    X_q = int(round(X_val * 100.0))
+    return (_CACHE_TOKEN, bucket, ra_q, str(band), dec_q, X_q)
+
+
+def precache_sky_mags(
+    *,
+    sky_provider,
+    mjd: float,
+    samples: Iterable[tuple[float, float, float, Iterable[str]]],
+    minutes: int = 1,
+) -> int:
+    """Vectorize one-MJD Rubin sky query and fill the scalar lookup cache.
+
+    Each sample is ``(ra_deg, dec_deg, airmass, requested_bands)``.  Providers
+    without a vectorized ``sky_mags`` method are left untouched.  Any batch
+    failure also leaves the cache untouched so later scalar calls retain the
+    historical fallback behavior.
+    """
+
+    batch_method = getattr(sky_provider, "sky_mags", None)
+    if not callable(batch_method):
+        return 0
+
+    prepared: list[tuple[float, float, float, tuple[str, ...]]] = []
+    union_bands: list[str] = []
+    seen_bands: set[str] = set()
+    for ra_raw, dec_raw, X_raw, bands_raw in samples:
+        ra = _finite_or_none(ra_raw)
+        dec = _finite_or_none(dec_raw)
+        X = _finite_or_none(X_raw)
+        if ra is None or dec is None:
+            continue
+        if X is None:
+            X = 1.2
+        requested: list[str] = []
+        requested_seen: set[str] = set()
+        for value in bands_raw:
+            band = str(value).strip().lower()
+            if not band or band in requested_seen:
+                continue
+            requested_seen.add(band)
+            requested.append(band)
+            if band not in seen_bands:
+                seen_bands.add(band)
+                union_bands.append(band)
+        if requested:
+            prepared.append((ra, dec, X, tuple(requested)))
+    if not prepared or not union_bands:
+        return 0
+
+    try:
+        values = batch_method(
+            float(mjd),
+            [item[0] for item in prepared],
+            [item[1] for item in prepared],
+            union_bands,
+            [item[2] for item in prepared],
+        )
+    except Exception:
+        return 0
+
+    pending: list[tuple[tuple[int, int, int, str, int, int], float]] = []
+    try:
+        for row_index, (ra, dec, X, requested) in enumerate(prepared):
+            for band in requested:
+                value = float(values[band][row_index])
+                key = _sky_cache_key(
+                    mjd=float(mjd),
+                    minutes=minutes,
+                    ra_deg=ra,
+                    dec_deg=dec,
+                    band=band,
+                    airmass=X,
+                )
+                pending.append((key, value))
+    except Exception:
+        return 0
+
+    for key, value in pending:
+        _SKY_CACHE[key] = value
+    return len(pending)
+
+
 def _cached_sky_mag(
     *,
     sky_provider,
@@ -131,31 +233,17 @@ def _cached_sky_mag(
 ) -> float:
     """Sky μ (mag/arcsec²) cached per-minute for the target geometry."""
 
-    bucket = _mjd_bucket(mjd, minutes)
-    try:
-        ra_val = float(ra_deg) if ra_deg is not None else None
-    except Exception:
-        ra_val = None
-    if ra_val is None or not math.isfinite(ra_val):
-        ra_q = 0
-    else:
-        ra_q = int(round(ra_val * 1e4))
-    try:
-        dec_val = float(dec_deg) if dec_deg is not None else None
-    except Exception:
-        dec_val = None
-    if dec_val is None or not math.isfinite(dec_val):
-        dec_q = 0
-    else:
-        dec_q = int(round(dec_val * 1e4))
-    try:
-        X_val = float(airmass)
-    except Exception:
+    X_val = _finite_or_none(airmass)
+    if X_val is None:
         X_val = 1.2
-    if not math.isfinite(X_val):
-        X_val = 1.2
-    X_q = int(round(X_val * 100.0))
-    key = (_CACHE_TOKEN, bucket, ra_q, band, dec_q, X_q)
+    key = _sky_cache_key(
+        mjd=mjd,
+        minutes=minutes,
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+        band=band,
+        airmass=X_val,
+    )
     cached = _SKY_CACHE.get(key)
     if cached is not None:
         return cached
@@ -190,29 +278,15 @@ def _cached_sky_mag(
     return sky_val
 
 
-def _cached_m5_at_time(
-    *,
-    target: dict,
-    filt: str,
-    cfg: PlannerConfig,
-    phot_cfg: PhotomConfig,
-    sky_provider,
-    sky_cfg: SkyModelConfig,
-    mjd: float,
-    minutes: int = 1,
-    site: EarthLocation | None = None,
-    tag_best: bool = False,
-) -> Optional[float]:
-    """Return (and cache) m5 for a target/filter at the given MJD."""
+def _target_name(target: dict) -> str | None:
+    """Return the scheduler's canonical non-empty target identifier."""
 
-    name_fields = (
+    for val in (
         target.get("Name"),
         target.get("name"),
         target.get("ID"),
         target.get("id"),
-    )
-    name: str | None = None
-    for val in name_fields:
+    ):
         if val is None:
             continue
         try:
@@ -220,41 +294,24 @@ def _cached_m5_at_time(
         except Exception:
             continue
         if text:
-            name = text
-            break
-    if not name:
-        return None
+            return text
+    return None
 
-    bucket = _mjd_bucket(mjd, minutes)
-    m5_key = (_CACHE_TOKEN, name, filt, bucket)
-    cached = _M5_CACHE.get(m5_key)
-    if cached is not None:
-        return cached
-    if tag_best:
-        best_cached = _m5best_cache_get(name, filt, mjd)
-        if best_cached is not None:
-            return best_cached
 
-    # Inline candidate coord extraction to avoid cross-module dependency
+def _target_airmass_at_time(
+    target: dict,
+    mjd: float,
+    site_loc: EarthLocation,
+) -> tuple[float, float, float] | None:
+    """Return ``(ra_deg, dec_deg, airmass)`` using the scalar legacy path."""
+
     try:
-        ra = float(target.get("RA_deg"))
-        dec = float(target.get("Dec_deg"))
+        ra_deg = float(target.get("RA_deg"))
+        dec_deg = float(target.get("Dec_deg"))
     except Exception:
         return None
-    if not math.isfinite(ra) or not math.isfinite(dec):
+    if not math.isfinite(ra_deg) or not math.isfinite(dec_deg):
         return None
-    ra_deg, dec_deg = ra, dec
-
-    site_loc = site
-    if site_loc is None:
-        site_loc = getattr(cfg, "_site_location_cache", None)
-        if site_loc is None:
-            site_loc = EarthLocation(
-                lat=float(cfg.lat_deg) * u.deg,
-                lon=float(cfg.lon_deg) * u.deg,
-                height=float(cfg.height_m) * u.m,
-            )
-            setattr(cfg, "_site_location_cache", site_loc)
 
     try:
         obstime = Time(float(mjd), format="mjd", scale="utc")
@@ -275,6 +332,53 @@ def _cached_m5_at_time(
             airmass = _finite_or_none(target.get("airmass")) or 1.2
     if not math.isfinite(airmass) or airmass <= 0.0:
         airmass = 1.2
+    return ra_deg, dec_deg, float(airmass)
+
+
+def _cached_m5_at_time(
+    *,
+    target: dict,
+    filt: str,
+    cfg: PlannerConfig,
+    phot_cfg: PhotomConfig,
+    sky_provider,
+    sky_cfg: SkyModelConfig,
+    mjd: float,
+    minutes: int = 1,
+    site: EarthLocation | None = None,
+    tag_best: bool = False,
+) -> Optional[float]:
+    """Return (and cache) m5 for a target/filter at the given MJD."""
+
+    name = _target_name(target)
+    if not name:
+        return None
+
+    bucket = _mjd_bucket(mjd, minutes)
+    m5_key = (_CACHE_TOKEN, name, filt, bucket)
+    cached = _M5_CACHE.get(m5_key)
+    if cached is not None:
+        return cached
+    if tag_best:
+        best_cached = _m5best_cache_get(name, filt, mjd)
+        if best_cached is not None:
+            return best_cached
+
+    site_loc = site
+    if site_loc is None:
+        site_loc = getattr(cfg, "_site_location_cache", None)
+        if site_loc is None:
+            site_loc = EarthLocation(
+                lat=float(cfg.lat_deg) * u.deg,
+                lon=float(cfg.lon_deg) * u.deg,
+                height=float(cfg.height_m) * u.m,
+            )
+            setattr(cfg, "_site_location_cache", site_loc)
+
+    geometry = _target_airmass_at_time(target, float(mjd), site_loc)
+    if geometry is None:
+        return None
+    ra_deg, dec_deg, airmass = geometry
 
     seeing = (
         float(phot_cfg.fwhm_eff.get(filt, 0.83))
@@ -326,6 +430,175 @@ def _cached_m5_at_time(
     return m5_val
 
 
+def precache_m5_at_times(
+    *,
+    requests: Iterable[tuple[dict, str, float, int, bool]],
+    cfg: PlannerConfig,
+    phot_cfg: PhotomConfig,
+    sky_provider,
+    site: EarthLocation | None = None,
+) -> int:
+    """Batch Rubin sky calls for pending m5 cache entries.
+
+    Requests are ``(target, filter, mjd, minute_bucket_size, tag_best)``.
+    Geometry and the m5 formula intentionally reuse the scalar helpers above;
+    only the Rubin sky-model evaluation is vectorized.  Failed or unsupported
+    batches are left absent so the normal scalar path handles them later.
+    """
+
+    if not bool(getattr(cfg, "sky_batch_cache_enable", True)):
+        return 0
+    batch_method = getattr(sky_provider, "sky_mags", None)
+    if not callable(batch_method):
+        return 0
+
+    site_loc = site
+    if site_loc is None:
+        site_loc = getattr(cfg, "_site_location_cache", None)
+        if site_loc is None:
+            site_loc = EarthLocation(
+                lat=float(cfg.lat_deg) * u.deg,
+                lon=float(cfg.lon_deg) * u.deg,
+                height=float(cfg.height_m) * u.m,
+            )
+            setattr(cfg, "_site_location_cache", site_loc)
+
+    pending: list[dict[str, object]] = []
+    seen_m5_keys: set[tuple[int, str, str, int]] = set()
+    geometry_cache: dict[tuple[int, float], tuple[float, float, float] | None] = {}
+    for target, filt_raw, mjd_raw, minutes_raw, tag_best in requests:
+        name = _target_name(target)
+        if not name:
+            continue
+        filt = str(filt_raw).strip().lower()
+        try:
+            mjd = float(mjd_raw)
+            minutes = max(1, int(minutes_raw))
+        except Exception:
+            continue
+        if not math.isfinite(mjd) or not filt:
+            continue
+        m5_key = (_CACHE_TOKEN, name, filt, _mjd_bucket(mjd, minutes))
+        if m5_key in seen_m5_keys or m5_key in _M5_CACHE:
+            continue
+        if tag_best and _m5best_cache_get(name, filt, mjd) is not None:
+            continue
+        seen_m5_keys.add(m5_key)
+
+        geometry_key = (id(target), mjd)
+        if geometry_key not in geometry_cache:
+            geometry_cache[geometry_key] = _target_airmass_at_time(
+                target, mjd, site_loc
+            )
+        geometry = geometry_cache[geometry_key]
+        if geometry is None:
+            continue
+        ra_deg, dec_deg, airmass = geometry
+        provider_limit = _finite_or_none(getattr(sky_provider, "airmass_max", None))
+        if provider_limit is not None and airmass > provider_limit:
+            # The scalar Rubin provider returns its historical fallback for
+            # out-of-range points. Leave these few cases to that exact path.
+            continue
+        pending.append(
+            {
+                "target": target,
+                "name": name,
+                "filt": filt,
+                "mjd": mjd,
+                "minutes": minutes,
+                "tag_best": bool(tag_best),
+                "m5_key": m5_key,
+                "ra": ra_deg,
+                "dec": dec_deg,
+                "airmass": airmass,
+            }
+        )
+
+    by_mjd: dict[float, list[dict[str, object]]] = {}
+    for record in pending:
+        by_mjd.setdefault(float(record["mjd"]), []).append(record)
+
+    stored = 0
+    for mjd, records in by_mjd.items():
+        samples: list[dict[str, object]] = []
+        sample_index: dict[tuple[str, float, float, float], int] = {}
+        union_bands: list[str] = []
+        for record in records:
+            sample_key = (
+                str(record["name"]),
+                float(record["ra"]),
+                float(record["dec"]),
+                float(record["airmass"]),
+            )
+            index = sample_index.get(sample_key)
+            if index is None:
+                index = len(samples)
+                sample_index[sample_key] = index
+                samples.append(
+                    {
+                        "ra": record["ra"],
+                        "dec": record["dec"],
+                        "airmass": record["airmass"],
+                    }
+                )
+            record["sample_index"] = index
+            filt = str(record["filt"])
+            if filt not in union_bands:
+                union_bands.append(filt)
+        try:
+            sky_values = batch_method(
+                mjd,
+                [float(item["ra"]) for item in samples],
+                [float(item["dec"]) for item in samples],
+                union_bands,
+                [float(item["airmass"]) for item in samples],
+            )
+            completed: list[tuple[dict[str, object], float]] = []
+            for record in records:
+                filt = str(record["filt"])
+                sky_mag = float(sky_values[filt][int(record["sample_index"])])
+                seeing = (
+                    float(phot_cfg.fwhm_eff.get(filt, 0.83))
+                    if getattr(phot_cfg, "fwhm_eff", None)
+                    else 0.83
+                )
+                k_band = (
+                    float(phot_cfg.k_m.get(filt, 0.0))
+                    if getattr(phot_cfg, "k_m", None)
+                    else 0.0
+                )
+                t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
+                m5_value = float(
+                    _m5_scale(
+                        filt,
+                        m_sky_arcsec2=sky_mag,
+                        seeing_fwhm_arcsec=seeing,
+                        airmass=float(record["airmass"]),
+                        t_vis_s=t_vis,
+                        k_m=k_band,
+                    )
+                )
+                completed.append((record, m5_value))
+        except Exception:
+            continue
+
+        for record, m5_value in completed:
+            m5_key = record["m5_key"]
+            if not isinstance(m5_key, tuple):
+                continue
+            _M5_CACHE[m5_key] = m5_value
+            if bool(record["tag_best"]):
+                _m5best_cache_put(
+                    cfg,
+                    str(record["name"]),
+                    str(record["filt"]),
+                    float(record["mjd"]),
+                    m5_value,
+                )
+            stored += 1
+    return stored
+
+
 def bump_window_token() -> None:
     """Increment the per-window cache token and clear per-window caches."""
     global _CACHE_TOKEN
@@ -337,4 +610,3 @@ def bump_window_token() -> None:
 def prune_m5best_by_day(cfg: PlannerConfig, current_mjd: float) -> None:
     """Prune the persistent m5 LRU cache by day horizon."""
     _m5best_cache_prune_by_day(cfg, current_mjd)
-

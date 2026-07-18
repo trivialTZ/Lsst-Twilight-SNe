@@ -438,6 +438,89 @@ class RubinSkyProvider:
             except Exception:
                 pass
 
+    def sky_mags(
+        self,
+        mjd: float,
+        ra_deg,
+        dec_deg,
+        bands,
+        airmass=None,
+    ) -> dict[str, "np.ndarray"]:
+        """Return full-geometry sky magnitudes for many targets and bands.
+
+        This is the vectorized equivalent of repeated :meth:`sky_mag` calls
+        through Path A.  Rubin's full-geometry model derives airmass from
+        ``RA/Dec/MJD``, so ``airmass`` is accepted only for API symmetry and
+        is intentionally ignored.  Unlike :meth:`sky_mag`, this helper raises
+        on failure; callers can then leave their cache empty and fall back to
+        the scalar path without changing the scientific behavior.
+        """
+
+        import numpy as np
+
+        ra = np.atleast_1d(np.asarray(ra_deg, dtype=float))
+        dec = np.atleast_1d(np.asarray(dec_deg, dtype=float))
+        try:
+            ra, dec = np.broadcast_arrays(ra, dec)
+        except ValueError as exc:
+            raise ValueError("ra_deg and dec_deg are not broadcast-compatible") from exc
+        ra = np.asarray(ra, dtype=float).ravel()
+        dec = np.asarray(dec, dtype=float).ravel()
+        if ra.size == 0:
+            return {}
+        if not np.all(np.isfinite(ra)) or not np.all(np.isfinite(dec)):
+            raise ValueError("ra_deg and dec_deg must be finite")
+        mjd_value = float(mjd)
+        if not math.isfinite(mjd_value):
+            raise ValueError(f"Invalid MJD value {mjd!r}")
+
+        band_list: list[str] = []
+        seen: set[str] = set()
+        for value in bands:
+            band = str(value).strip().lower()
+            if band and band not in seen:
+                seen.add(band)
+                band_list.append(band)
+        if not band_list:
+            return {}
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Extrapolating twilight beyond a sun altitude of -11 degrees",
+            )
+            try:
+                self.model.set_ra_dec_mjd(
+                    ra=ra,
+                    dec=dec,
+                    mjd=mjd_value,
+                    degrees=True,
+                    filter_names=band_list,
+                )
+            except TypeError:
+                self.model.set_ra_dec_mjd(
+                    lon=ra,
+                    lat=dec,
+                    mjd=mjd_value,
+                    degrees=True,
+                    filter_names=band_list,
+                )
+            mags = self.model.return_mags()
+
+        result: dict[str, np.ndarray] = {}
+        for band in band_list:
+            arr = mags.get(band) if isinstance(mags, dict) else getattr(mags, band)
+            values = np.asarray(arr, dtype=float).ravel()
+            if values.size == 1 and ra.size > 1:
+                values = np.full(ra.size, float(values[0]), dtype=float)
+            if values.size != ra.size:
+                raise ValueError(
+                    f"Rubin sky model returned {values.size} {band}-band values "
+                    f"for {ra.size} targets"
+                )
+            result[band] = values.copy()
+        return result
+
 
 def rubin_sim_mu_sky_by_sun_alt(
     band: str,

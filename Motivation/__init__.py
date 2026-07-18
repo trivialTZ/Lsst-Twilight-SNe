@@ -36,6 +36,20 @@ from .tw_plots import (
     show_fig_y1_nz,
     summarize_y1_counts_in_range,
 )
+from .tw_pv_sensitivity import (
+    DEFAULT_Z_RANGES,
+    build_velocity_power_spectrum,
+    compute_fs8_sigma_by_ranges,
+    load_v7_pv_samples,
+    lowz_robustness_summary,
+    make_flip_ready,
+    plot_sigv_gain,
+    plot_sigv_scan,
+    repo_root,
+    run_sigmau_scan,
+    run_sigv_scan,
+    summarize_scan,
+)
 from .tw_qc import densest_year_window, ross_qc_with_report
 
 __all__ = [name for name in dir() if not name.startswith("_")]

@@ -305,6 +305,7 @@ def _attempt_schedule_one(
             "sky_mag_arcsec2": round(sky_mag, 2),
             "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
             "ZPT": round(eph.ZPTAVG, 3),
+            "ZPTERR": round(eph.ZPTERR, 3),
             "SKYSIG": round(eph.SKYSIG, 3),
             "NEA_pix": round(eph.NEA_pix, 2),
             "RDNOISE": round(eph.RDNOISE, 2),
@@ -388,4 +389,3 @@ def _attempt_schedule_one(
     }
 
     return True, effects
-

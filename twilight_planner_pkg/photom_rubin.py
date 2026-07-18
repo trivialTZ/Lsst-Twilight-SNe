@@ -98,7 +98,14 @@ class PhotomConfig:
 
 @dataclass
 class EpochPhotom:
-    """Photometric scalars for a single exposure."""
+    """Photometric scalars for a single exposure.
+
+    ``SKYSIG`` is the sky RMS in ADU per pixel, ``RDNOISE`` is the read
+    noise in electrons per pixel (the unit required by SNANA), and
+    ``PSF1_pix``/``PSF2_pix`` are Gaussian sigmas in pixels.  These are the
+    planner's canonical units; :mod:`simlib_writer` handles any conversion
+    requested by a SIMLIB global header.
+    """
 
     ZPTAVG: float
     ZPT_pe: float
@@ -204,9 +211,10 @@ def compute_epoch_photom(
 ) -> EpochPhotom:
     """Compute photometric parameters for a single exposure.
 
-    The returned ``SKYSIG`` and ``RDNOISE`` fields are emitted as ADU/pixel for
-    SIMLIB rows: ``SKYSIG`` corresponds to ``sqrt(sky electrons) / gain`` (read
-    noise excluded) while ``NOISE`` in the SIMLIB output is ``RDNOISE / gain``.
+    The returned values use the planner's canonical SIMLIB-input units:
+    ``SKYSIG`` is ``sqrt(sky electrons) / gain`` in ADU per pixel (read noise
+    excluded), while ``RDNOISE`` is in electrons per pixel.  SNANA defines the
+    SIMLIB ``NOISE`` column in electrons, so it must not be divided by gain.
     """
 
     X = airmass_from_alt_deg(alt_deg)
@@ -220,7 +228,7 @@ def compute_epoch_photom(
     SKYSIG = sky_rms_adu_per_pix(
         sky_mag_arcsec2, ZPT_pe, cfg.pixel_scale_arcsec, cfg.gain_e_per_adu
     )
-    RDNOISE = cfg.read_noise_e / cfg.gain_e_per_adu
+    RDNOISE = cfg.read_noise_e
     return EpochPhotom(
         ZPTAVG=ZPTAVG,
         ZPT_pe=ZPT_pe,
@@ -234,6 +242,125 @@ def compute_epoch_photom(
         PSF2_pix=0.0,
         PSFRATIO=0.0,
     )
+
+
+def _point_source_noise_terms(
+    band: str,
+    *,
+    t_exp_s: float,
+    airmass: float,
+    sky_mag_arcsec2: float,
+    cfg: PhotomConfig,
+    fwhm_eff_arcsec: float | None = None,
+    k_m: float | None = None,
+) -> tuple[float, float]:
+    """Return ``(electron zeropoint, background variance)`` for a point source.
+
+    The background variance is evaluated over the Gaussian noise-equivalent
+    area and includes sky Poisson noise plus read noise.  It is expressed in
+    electron squared, matching the quantities reconstructed by SNANA from the
+    SIMLIB ``GAIN``, ``NOISE``, ``SKYSIG``, and PSF columns.
+    """
+
+    if band not in cfg.zpt1s:
+        raise KeyError(f"Unknown photometric band {band!r}")
+    if t_exp_s <= 0.0:
+        raise ValueError("t_exp_s must be positive")
+    if not math.isfinite(airmass) or airmass <= 0.0:
+        raise ValueError("airmass must be finite and positive")
+
+    extinction = float(cfg.k_m[band] if k_m is None else k_m)
+    zpt_pe, _ = epoch_zeropoints(
+        float(cfg.zpt1s[band]),
+        float(t_exp_s),
+        extinction,
+        float(airmass),
+        float(cfg.gain_e_per_adu),
+    )
+    fwhm = float(
+        cfg.fwhm_eff[band] if fwhm_eff_arcsec is None else fwhm_eff_arcsec
+    )
+    if fwhm <= 0.0:
+        raise ValueError("fwhm_eff_arcsec must be positive")
+    nea_pix = nea_pixels(fwhm, float(cfg.pixel_scale_arcsec))
+    sky_e_per_pix = electrons_per_pixel_from_sb(
+        float(sky_mag_arcsec2), zpt_pe, float(cfg.pixel_scale_arcsec)
+    )
+    variance_background_e2 = nea_pix * (
+        sky_e_per_pix + float(cfg.read_noise_e) ** 2
+    )
+    return zpt_pe, variance_background_e2
+
+
+def point_source_snr(
+    band: str,
+    magnitude: float,
+    *,
+    t_exp_s: float,
+    airmass: float,
+    sky_mag_arcsec2: float,
+    cfg: PhotomConfig,
+    fwhm_eff_arcsec: float | None = None,
+    k_m: float | None = None,
+) -> float:
+    """Return the optimal-PSF signal-to-noise ratio for a point source.
+
+    Source Poisson noise, sky noise over the Gaussian NEA, and per-pixel read
+    noise are included in electron units.
+    """
+
+    zpt_pe, variance_background_e2 = _point_source_noise_terms(
+        band,
+        t_exp_s=t_exp_s,
+        airmass=airmass,
+        sky_mag_arcsec2=sky_mag_arcsec2,
+        cfg=cfg,
+        fwhm_eff_arcsec=fwhm_eff_arcsec,
+        k_m=k_m,
+    )
+    source_e = 10 ** (-0.4 * (float(magnitude) - zpt_pe))
+    return source_e / math.sqrt(source_e + variance_background_e2)
+
+
+def point_source_limiting_mag(
+    band: str,
+    *,
+    t_exp_s: float,
+    airmass: float,
+    sky_mag_arcsec2: float,
+    cfg: PhotomConfig,
+    fwhm_eff_arcsec: float | None = None,
+    k_m: float | None = None,
+    snr: float = 5.0,
+) -> float:
+    """Return the point-source limiting magnitude at the requested S/N.
+
+    If ``S`` is the source electron count and ``B`` is the sky-plus-read
+    background variance over the NEA, the model is
+
+    ``S/N = S / sqrt(S + B)``.
+
+    Solving the resulting quadratic for ``S`` keeps this scheduler depth
+    exactly aligned with the physical noise quantities written to the SIMLIB.
+    """
+
+    target_snr = float(snr)
+    if not math.isfinite(target_snr) or target_snr <= 0.0:
+        raise ValueError("snr must be finite and positive")
+    zpt_pe, variance_background_e2 = _point_source_noise_terms(
+        band,
+        t_exp_s=t_exp_s,
+        airmass=airmass,
+        sky_mag_arcsec2=sky_mag_arcsec2,
+        cfg=cfg,
+        fwhm_eff_arcsec=fwhm_eff_arcsec,
+        k_m=k_m,
+    )
+    snr2 = target_snr * target_snr
+    source_e = 0.5 * snr2 * (
+        1.0 + math.sqrt(1.0 + 4.0 * variance_background_e2 / snr2)
+    )
+    return zpt_pe - 2.5 * math.log10(source_e)
 
 
 def cap_exposure_for_saturation(

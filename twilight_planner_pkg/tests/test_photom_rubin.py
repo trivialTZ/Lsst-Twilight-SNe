@@ -1,3 +1,6 @@
+import math
+
+from twilight_planner_pkg.astro_utils import airmass_from_alt_deg
 from twilight_planner_pkg.photom_rubin import (
     PhotomConfig,
     cap_exposure_for_saturation,
@@ -6,6 +9,8 @@ from twilight_planner_pkg.photom_rubin import (
     compute_epoch_photom,
     electrons_per_pixel_from_sb,
     observed_sb_from_rest,
+    point_source_limiting_mag,
+    point_source_snr,
 )
 
 
@@ -19,6 +24,50 @@ def test_compute_epoch_photom_basics():
     assert eph.PSF2_pix == 0.0
     assert eph.PSFRATIO == 0.0
     assert eph.FWHM_eff_arcsec > 0
+    # SNANA's SIMLIB NOISE column is in electrons, not ADU.
+    assert eph.RDNOISE == cfg.read_noise_e
+
+
+def test_m5_reconstructs_five_sigma_from_simlib_noise_columns():
+    cfg = PhotomConfig(gain_e_per_adu=1.6, read_noise_e=6.0)
+    band = "r"
+    exposure_s = 5.0
+    altitude_deg = 60.0
+    sky_mag = 20.5
+    airmass = airmass_from_alt_deg(altitude_deg)
+
+    m5 = point_source_limiting_mag(
+        band,
+        t_exp_s=exposure_s,
+        airmass=airmass,
+        sky_mag_arcsec2=sky_mag,
+        cfg=cfg,
+    )
+    assert math.isclose(
+        point_source_snr(
+            band,
+            m5,
+            t_exp_s=exposure_s,
+            airmass=airmass,
+            sky_mag_arcsec2=sky_mag,
+            cfg=cfg,
+        ),
+        5.0,
+        rel_tol=1e-12,
+    )
+
+    # Independently reconstruct the same S/N from the exact quantities that
+    # the writer puts in a native-unit SIMLIB row.
+    eph = compute_epoch_photom(
+        band, exposure_s, altitude_deg, sky_mag, cfg
+    )
+    source_adu = 10 ** (-0.4 * (m5 - eph.ZPTAVG))
+    source_e = source_adu * eph.GAIN
+    background_var_e2 = eph.NEA_pix * (
+        (eph.SKYSIG * eph.GAIN) ** 2 + eph.RDNOISE**2
+    )
+    reconstructed_snr = source_e / math.sqrt(source_e + background_var_e2)
+    assert math.isclose(reconstructed_snr, 5.0, rel_tol=1e-12)
 
 
 def test_cap_exposure_warns_and_caps_source():

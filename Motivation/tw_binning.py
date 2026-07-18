@@ -8,11 +8,12 @@ import numpy as np
 import pandas as pd
 
 from .tw_constants import DZ_DEFAULT, Z_MAX_DEFAULT, Z_TW_MAX_DEFAULT, Z_TW_MIN_DEFAULT
+from .tw_io import salt_covariance_mB_x1_c
 
 
-# σ_int(c) grid derived from Motivation/data/FITOPT000_MUOPT000.FITRES
-# using robust MAD scatter in equal-count color windows following the
-# BS21 analysis recipe (see Motivation/data/sigma_int_color.py).
+# σ_int(c) grid derived from Motivation/data/FITOPT000_MUOPT000.FITRES.
+# Defined using SNANA/SALT2mu intrinsic terms (biasCor_muCOVADD / MUERR
+# decomposition), binned in color (see sigma_int_color.py).
 _SIGMA_INT_COLOR_CENTERS = np.array(
     [
         -0.30,
@@ -82,67 +83,67 @@ _SIGMA_INT_COLOR_CENTERS = np.array(
 
 _SIGMA_INT_COLOR_VALUES = np.array(
     [
-        0.16642185,
-        0.16642185,
-        0.16642185,
-        0.16642185,
-        0.16642185,
-        0.16642185,
-        0.16642185,
-        0.1647987,
-        0.16167194,
-        0.1590642,
-        0.15662178,
-        0.15357066,
-        0.1500981,
-        0.14577584,
-        0.13981851,
-        0.12880488,
-        0.11359442,
-        0.10363266,
-        0.09524205,
-        0.09262461,
-        0.08891656,
-        0.08796724,
-        0.09010543,
-        0.08494435,
-        0.08729228,
-        0.09406961,
-        0.09241226,
-        0.1030234,
-        0.09525565,
-        0.10110439,
-        0.11705488,
-        0.12325214,
-        0.13039753,
-        0.13903228,
-        0.1360722,
-        0.13626762,
-        0.13844767,
-        0.1369876,
-        0.13686772,
-        0.15317435,
-        0.15935812,
-        0.17103491,
-        0.17902357,
-        0.19332936,
-        0.20446487,
-        0.21450821,
-        0.22303603,
-        0.2264977,
-        0.23251645,
-        0.23990584,
-        0.24604105,
-        0.2545365,
-        0.26145664,
-        0.26573578,
-        0.26959421,
-        0.27126735,
-        0.27219691,
-        0.27313039,
-        0.27375337,
-        0.27375337,
-        0.27375337,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00000000,
+        0.00534522,
+        0.00534522,
+        0.00534522,
+        0.00534522,
+        0.01379677,
+        0.02305497,
+        0.03355278,
+        0.03990092,
+        0.05267845,
+        0.06649208,
+        0.08120012,
+        0.08865648,
+        0.09636162,
+        0.10285720,
+        0.10992659,
+        0.11663218,
+        0.12263917,
+        0.12831019,
+        0.13325161,
+        0.13656693,
+        0.14112083,
+        0.14458143,
+        0.14804457,
+        0.15076642,
+        0.15416353,
+        0.15717606,
+        0.15968747,
+        0.16217247,
+        0.16469270,
+        0.16424361,
+        0.16431141,
+        0.16328050,
+        0.16317335,
+        0.16398715,
+        0.16405075,
+        0.16340307,
+        0.16500180,
+        0.16648742,
+        0.16783806,
+        0.16817925,
     ],
     dtype=float,
 )
@@ -175,7 +176,9 @@ def nz_hist(z: np.ndarray, z_edges: np.ndarray) -> np.ndarray:
     return h
 
 
-def _num_series(df: pd.DataFrame, cols: list[str] | tuple[str, ...] | str, default: float) -> pd.Series:
+def _num_series(
+    df: pd.DataFrame, cols: list[str] | tuple[str, ...] | str, default: float
+) -> pd.Series:
     """Return numeric Series for the first present column in `cols`, else a constant Series.
 
     Ensures a Series is always returned (never a scalar), avoiding `.fillna` errors
@@ -206,7 +209,9 @@ def sigma_mu_per_sn(
     df : pandas.DataFrame
         FITRES-like table with SALT2 columns.
     alpha, beta : float, optional
-        Stretch/color coefficients (fallback if not present in df).
+        Fixed stretch/color coefficients.  FITRES simulation-truth columns are
+        intentionally ignored; pass explicit values here to override the
+        methodology defaults of 0.14 and 3.1.
     sigma_int : float | str, optional
         Intrinsic scatter added in quadrature. If set to ``"color_binned"``
         (the default) the intrinsic term is interpolated from the
@@ -220,25 +225,23 @@ def sigma_mu_per_sn(
     pandas.Series
         Per-SN distance-modulus uncertainty.
     """
-    alpha = _num_series(df, ["SIM_alpha", "alpha"], alpha)
-    beta = _num_series(df, ["SIM_beta", "beta"], beta)
-    mBERR = _num_series(df, "mBERR", 0.12)
-    x1ERR = _num_series(df, "x1ERR", 0.9)
-    cERR = _num_series(df, "cERR", 0.04)
-    cov_x1_c = _num_series(df, ["COV_x1_c", "COV_x1c"], 0.0)
-    cov_mB_x1 = _num_series(df, "COV_mB_x1", 0.0)
-    cov_mB_c = _num_series(df, "COV_mB_c", 0.0)
+    alpha = float(alpha)
+    beta = float(beta)
+    if not np.isfinite(alpha) or not np.isfinite(beta):
+        raise ValueError("alpha and beta must be finite fixed coefficients")
+    covariance = salt_covariance_mB_x1_c(df)
     z = _num_series(df, "z", np.nan).astype(float)
     color = _num_series(df, "c", np.nan).astype(float)
 
-    # SALT2 error propagation with full covariances
+    # For mu = mB + alpha*x1 - beta*c - M, propagate g^T C g with
+    # g = (1, alpha, -beta) and C expressed in the (mB, x1, c) basis.
     mu2 = (
-        (mBERR ** 2)
-        + (alpha * x1ERR) ** 2
-        + (beta * cERR) ** 2
-        + 2.0 * alpha * cov_mB_x1
-        - 2.0 * beta * cov_mB_c
-        - 2.0 * alpha * beta * cov_x1_c
+        covariance["VAR_mB"]
+        + alpha**2 * covariance["VAR_x1"]
+        + beta**2 * covariance["VAR_c"]
+        + 2.0 * alpha * covariance["COV_mB_x1"]
+        - 2.0 * beta * covariance["COV_mB_c"]
+        - 2.0 * alpha * beta * covariance["COV_x1_c"]
     )
 
     # Lensing and peculiar-velocity terms
@@ -259,7 +262,7 @@ def sigma_mu_per_sn(
     else:
         sigma_int_series = pd.Series(float(sigma_int), index=df.index)
 
-    mu2 = mu2 + sigma_int_series.pow(2) + (sig_lens ** 2) + (sig_vpec ** 2)
+    mu2 = mu2 + sigma_int_series.pow(2) + (sig_lens**2) + (sig_vpec**2)
     return np.sqrt(np.maximum(mu2, 0.0))
 
 
@@ -307,18 +310,30 @@ def sample_sigma_mu_promoted(
             idx = rng.integers(0, len(s), size=n_needed)
             return s[idx], z[idx]
 
-    # Case 2: detection dataframe has SALT2-like columns
+    # Case 2: detection dataframe has SALT2-like columns in either the mB or
+    # native SNANA x0 covariance basis.
     if df_det_bin is not None and len(df_det_bin) > 0:
-        cols = {
-            "mBERR",
-            "x1ERR",
-            "cERR",
-            "COV_x1_c",
-            "COV_mB_x1",
-            "COV_mB_c",
-            "z",
-        }
-        if cols.issubset(set(df_det_bin.columns)):
+        available = set(df_det_bin.columns)
+        has_diagonal = all(
+            any(name in available for name in choices)
+            for choices in (
+                ("mBERR", "COV_mB_mB", "x0ERR", "COV_x0_x0"),
+                ("x1ERR", "COV_x1_x1"),
+                ("cERR", "COV_c_c"),
+            )
+        )
+        has_mb_x1 = any(name in available for name in ("COV_mB_x1", "COV_x1_mB")) or (
+            "x0" in available
+            and any(name in available for name in ("COV_x0_x1", "COV_x1_x0"))
+        )
+        has_mb_c = any(name in available for name in ("COV_mB_c", "COV_c_mB")) or (
+            "x0" in available
+            and any(name in available for name in ("COV_x0_c", "COV_c_x0"))
+        )
+        has_x1_c = any(
+            name in available for name in ("COV_x1_c", "COV_c_x1", "COV_x1c")
+        )
+        if "z" in available and has_diagonal and has_mb_x1 and has_mb_c and has_x1_c:
             s = sigma_mu_per_sn(
                 df_det_bin,
                 alpha=alpha,
@@ -350,6 +365,10 @@ def write_binned_catalogs(
     derived_dir: Path,
     base_label: str = "ep_lsst",
     sigma_agg: str = "ivar",
+    alpha: float = 0.14,
+    beta: float = 3.1,
+    sigma_int: float | str = "color_binned",
+    sigma_vpec_kms: float = 300.0,
 ) -> tuple[Path, Path]:
     """Build and write binned catalogs for WFD and WFD+Twilight.
 
@@ -374,21 +393,34 @@ def write_binned_catalogs(
     N_cos_tw[band] = np.maximum(N_cos_tw[band], N_det[band])
     fit_qc_y1 = fit_qc_y1.copy()
     # Per-SN uncertainty
-    fit_qc_y1["sigma_mu_sn"] = sigma_mu_per_sn(fit_qc_y1)
+    fit_qc_y1["sigma_mu_sn"] = sigma_mu_per_sn(
+        fit_qc_y1,
+        alpha=alpha,
+        beta=beta,
+        sigma_int=sigma_int,
+        sigma_vpec_kms=sigma_vpec_kms,
+    )
 
     # Build unbinned, per-SN dataframe for diagnostics/exports
     # Components consistent with sigma_mu_per_sn defaults
-    alpha_s = _num_series(fit_qc_y1, ["SIM_alpha", "alpha"], 0.14)
-    beta_s = _num_series(fit_qc_y1, ["SIM_beta", "beta"], 3.1)
+    alpha_s = pd.Series(float(alpha), index=fit_qc_y1.index)
+    beta_s = pd.Series(float(beta), index=fit_qc_y1.index)
     z_s = _num_series(fit_qc_y1, "z", np.nan).astype(float)
     c_s = _num_series(fit_qc_y1, "c", np.nan).astype(float)
-    sigma_int_s = pd.Series(
-        _sigma_int_from_color(c_s.to_numpy(dtype=float, na_value=np.nan)),
-        index=fit_qc_y1.index,
-    )
+    if isinstance(sigma_int, str):
+        if sigma_int.lower() != "color_binned":
+            raise ValueError(
+                "sigma_int string must be 'color_binned' or a numeric value"
+            )
+        sigma_int_s = pd.Series(
+            _sigma_int_from_color(c_s.to_numpy(dtype=float, na_value=np.nan)),
+            index=fit_qc_y1.index,
+        )
+    else:
+        sigma_int_s = pd.Series(float(sigma_int), index=fit_qc_y1.index)
     sig_lens_s = 0.055 * z_s
     sig_vpec_s = (5.0 / np.log(10.0)) * (
-        300.0 / (299792.458 * np.maximum(z_s, 1e-3))
+        sigma_vpec_kms / (299792.458 * np.maximum(z_s, 1e-3))
     )
 
     cols_id: dict[str, pd.Series] = {}
@@ -407,9 +439,9 @@ def write_binned_catalogs(
         "sigma_int": sigma_int_s,
         "sigma_lens": sig_lens_s,
         "sigma_vpec": sig_vpec_s,
-        "sigma_mu": pd.to_numeric(
-            fit_qc_y1["sigma_mu_sn"], errors="coerce"
-        ).astype(float),
+        "sigma_mu": pd.to_numeric(fit_qc_y1["sigma_mu_sn"], errors="coerce").astype(
+            float
+        ),
     }
     df_unbinned = pd.DataFrame(df_unbinned_cols, index=fit_qc_y1.index)
     sigma_bin = np.full_like(z_mid, np.nan, dtype=float)
@@ -418,11 +450,13 @@ def write_binned_catalogs(
         if not m.any():
             continue
         if sigma_agg.lower() == "ivar":
-            sig = pd.to_numeric(fit_qc_y1.loc[m, "sigma_mu_sn"], errors="coerce").astype(float)
+            sig = pd.to_numeric(
+                fit_qc_y1.loc[m, "sigma_mu_sn"], errors="coerce"
+            ).astype(float)
             sig = sig.replace([np.inf, -np.inf], np.nan).dropna()
             if len(sig) == 0:
                 continue
-            invvar_sum = np.sum(1.0 / (sig ** 2))
+            invvar_sum = np.sum(1.0 / (sig**2))
             n_bin = float(len(sig))
             if invvar_sum > 0:
                 sigma_bin[k] = float(np.sqrt(n_bin / invvar_sum))
@@ -430,7 +464,7 @@ def write_binned_catalogs(
             # Fallback: robust median within the bin (original behavior)
             sigma_bin[k] = float(fit_qc_y1.loc[m, "sigma_mu_sn"].median())
     if np.isnan(sigma_bin).any():
-        s = pd.Series(sigma_bin).fillna(method="ffill").fillna(method="bfill")
+        s = pd.Series(sigma_bin).ffill().bfill()
         global_med = (
             float(np.nanmedian(fit_qc_y1["sigma_mu_sn"]))
             if "sigma_mu_sn" in fit_qc_y1
@@ -508,8 +542,10 @@ def write_binned_catalogs_v2(
         sigma_vpec_kms=sigma_vpec_kms,
     )
 
-    # Optional per-SN σμ for explicit promoted-fit rows
-    if fit_promoted_y1 is not None and "sigma_mu_sn" not in fit_promoted_y1:
+    # Recompute explicit promoted-fit rows through the same corrected path;
+    # do not retain a pre-existing sigma_mu_sn made with truth coefficients or
+    # an incomplete covariance basis.
+    if fit_promoted_y1 is not None:
         fit_promoted_y1 = fit_promoted_y1.copy()
         fit_promoted_y1["sigma_mu_sn"] = sigma_mu_per_sn(
             fit_promoted_y1,
@@ -523,8 +559,8 @@ def write_binned_catalogs_v2(
     def _per_sn_df(df: pd.DataFrame, source_label: str) -> pd.DataFrame:
         if df is None or len(df) == 0:
             return pd.DataFrame()
-        a_s = _num_series(df, ["SIM_alpha", "alpha"], alpha)
-        b_s = _num_series(df, ["SIM_beta", "beta"], beta)
+        a_s = pd.Series(float(alpha), index=df.index)
+        b_s = pd.Series(float(beta), index=df.index)
         z_s = _num_series(df, "z", np.nan).astype(float)
         c_s = _num_series(df, "c", np.nan).astype(float)
         if isinstance(sigma_int, str):
@@ -657,7 +693,7 @@ def write_binned_catalogs_v2(
         ``values`` (e.g., using ``z_mid`` to fill ``z_eff_*``).
         """
         s = pd.Series(values).replace([np.inf, -np.inf], np.nan).astype(float)
-        s = s.fillna(method="ffill").fillna(method="bfill")
+        s = s.ffill().bfill()
         if np.isscalar(fill):
             return s.fillna(fill).to_numpy(dtype=float)
         # Vector-like: align by index
@@ -771,7 +807,8 @@ def write_binned_catalogs_v3(
     sigma_agg : {"ivar", "median"}
         Per-bin σμ aggregation. "ivar" = inverse-variance; "median" = robust median.
     alpha, beta : float
-        Stretch/color coefficients for σμ pipeline (fallback if cols absent).
+        Fixed stretch/color coefficients for the σμ pipeline.  FITRES
+        simulation-truth coefficients are not used.
     sigma_int : float | str
         Intrinsic scatter; if "color_binned", interpolate from color-grid.
     sigma_vpec_kms : float
@@ -854,7 +891,7 @@ def write_binned_catalogs_v3(
             sigma_bin[k] = float(np.nanmedian(s.values))
 
     # ---- fill missing ----
-# --- 用下面这个实现替换 v3 里的 _fill() 辅助函数 ---
+    # --- 用下面这个实现替换 v3 里的 _fill() 辅助函数 ---
     def _fill(values: np.ndarray, fill: float | np.ndarray | pd.Series) -> np.ndarray:
         s = pd.Series(values).replace([np.inf, -np.inf], np.nan).astype(float)
         s = s.ffill().bfill()
@@ -873,7 +910,6 @@ def write_binned_catalogs_v3(
             fill_s = pd.Series(fill_arr, index=s.index)
         out = s.where(s.notna(), fill_s)   # 只在 NaN 的位置用 fill_s
         return out.to_numpy(dtype=float)
-
 
     global_med = float(np.nanmedian(sig_sn.values)) if sig_sn.size else 0.12
     sigma_bin  = _fill(sigma_bin, global_med)

@@ -8,6 +8,7 @@ from twilight_planner_pkg.simlib_reader import (
     simlib_to_catalog_df,
     simlib_visits_by_name,
 )
+from twilight_planner_pkg.simlib_writer import SimlibHeader, SimlibWriter
 
 
 def _toy_path() -> Path:
@@ -47,3 +48,29 @@ def test_parse_round_trips_document_structure():
     assert any("BEGIN LIBGEN" in h for h in doc.global_header)
     assert len(doc.entries) == 2
     assert doc.entries[0].peakmjd == 60000.0
+
+
+def test_parse_reads_standalone_redshift_line(tmp_path):
+    path = tmp_path / "standalone_redshift.SIMLIB"
+    with path.open("w") as handle:
+        writer = SimlibWriter(handle, SimlibHeader())
+        writer.write_header()
+        writer.start_libid(
+            1,
+            1.0,
+            2.0,
+            1,
+            comment="SN1",
+            redshift=0.03456,
+            peakmjd=60001.5,
+        )
+        writer.add_epoch(
+            60000.0, "r", 1.0, 1.0, 1.0, 0.8, 0.0, 0.0, 25.0, 0.01
+        )
+        writer.end_libid()
+        writer.close()
+
+    entry = parse_simlib(path).entries[0]
+    assert entry.nobs == 1
+    assert entry.redshift == 0.03456
+    assert entry.peakmjd == 60001.5

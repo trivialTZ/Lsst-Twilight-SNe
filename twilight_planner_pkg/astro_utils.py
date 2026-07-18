@@ -677,6 +677,51 @@ def peak_mag_from_redshift(
     return mu + M_eff + K_approx + Ab_MW + Ab_host
 
 
+def _saturation_sky_cache_key(
+    sky_provider,
+    mjd,
+    ra_deg,
+    dec_deg,
+    band: str,
+    airmass: float,
+) -> tuple[object, ...]:
+    """Return the exact key used to reuse saturation sky-model queries."""
+
+    def _number(value):
+        try:
+            result = float(value)
+        except Exception:
+            return None
+        return result if math.isfinite(result) else None
+
+    return (
+        id(sky_provider),
+        _number(mjd),
+        _number(ra_deg),
+        _number(dec_deg),
+        str(band).strip().lower(),
+        _number(airmass),
+    )
+
+
+def _put_saturation_sky_cache(
+    cfg: PlannerConfig,
+    key: tuple[object, ...],
+    value: float,
+) -> None:
+    """Store one saturation-sky result in a bounded per-config cache."""
+
+    cache = getattr(cfg, "_saturation_sky_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(cfg, "_saturation_sky_cache", cache)
+    # A window needs at most a few thousand entries.  Bound long year-runs
+    # without adding a second cache eviction policy to the science config.
+    if len(cache) >= 50_000:
+        cache.clear()
+    cache[key] = float(value)
+
+
 def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[str]]:
     """Return a saturation-safe exposure time and flags for ``band``.
 
@@ -744,13 +789,27 @@ def compute_capped_exptime(band: str, cfg: PlannerConfig) -> tuple[float, set[st
         mjd = getattr(cfg, "current_mjd", None)
         ra_now = getattr(cfg, "current_ra_deg", None)
         dec_now = getattr(cfg, "current_dec_deg", None)
-        sky_mag = cfg.sky_provider.sky_mag(
-            mjd,
-            ra_now if isinstance(ra_now, (int, float)) else None,
-            dec_now if isinstance(dec_now, (int, float)) else None,
-            band,
-            airmass_from_alt_deg(cfg.current_alt_deg),
+        ra_arg = ra_now if isinstance(ra_now, (int, float)) else None
+        dec_arg = dec_now if isinstance(dec_now, (int, float)) else None
+        X_sky = airmass_from_alt_deg(cfg.current_alt_deg)
+        use_cache = bool(getattr(cfg, "sky_batch_cache_enable", True))
+        cache_key = _saturation_sky_cache_key(
+            cfg.sky_provider, mjd, ra_arg, dec_arg, band, X_sky
         )
+        cache = getattr(cfg, "_saturation_sky_cache", None)
+        cached = cache.get(cache_key) if use_cache and isinstance(cache, dict) else None
+        if cached is None:
+            sky_mag = cfg.sky_provider.sky_mag(
+                mjd,
+                ra_arg,
+                dec_arg,
+                band,
+                X_sky,
+            )
+            if use_cache:
+                _put_saturation_sky_cache(cfg, cache_key, sky_mag)
+        else:
+            sky_mag = float(cached)
     else:
         sky_mag = 21.0
 

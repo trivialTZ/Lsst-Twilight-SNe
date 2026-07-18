@@ -318,6 +318,10 @@ class PlannerConfig:
     # Pair-building m5 minute resolution and optional early prune per filter.
     pairs_m5_minutes: int = 1
     pairs_topk_per_filter: Optional[int] = None
+    # Batch Rubin sky-model calls and reuse identical saturation-sky queries.
+    # This changes only execution strategy; set False for scalar-path regression
+    # comparisons against historical scheduler output.
+    sky_batch_cache_enable: bool = True
 
     # -- Debug / diagnostics ----------------------------------------------
     debug_planner: bool = False

@@ -3,30 +3,12 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, TYPE_CHECKING, Callable
+from typing import Callable, Dict, List, Optional
 
+from .photom_rubin import PhotomConfig, point_source_limiting_mag
 from .sky_model import SkyModelConfig, SimpleSkyProvider, sky_mag_arcsec2
 
-if TYPE_CHECKING:
-    from .photom_rubin import PhotomConfig
-
 MIN_SNR = 5.0
-
-# Reference dark-sky m5 at X=1, seeing=0.7", t_vis=30s (approximate PSTN-054)
-M5_REF = {"u": 23.87, "g": 24.64, "r": 24.21, "i": 23.79, "z": 23.18, "y": 22.37}
-
-# Zenith dark sky (mag/arcsec^2) per band (SMTN-002)
-DARK_SKY_MAG = {
-    "u": 23.05,
-    "g": 22.25,
-    "r": 21.20,
-    "i": 20.46,
-    "z": 19.61,
-    "y": 18.60,
-}
-
-# Read-noise correction asymptote ΔC_m^∞ (mag)
-DELTA_CM_INF = {"u": 0.54, "g": 0.09, "r": 0.04, "i": 0.03, "z": 0.02, "y": 0.02}
 
 
 def _m5_scale(
@@ -37,24 +19,27 @@ def _m5_scale(
     airmass: float,
     t_vis_s: float,
     k_m: Optional[float] = None,
+    phot_cfg: Optional[PhotomConfig] = None,
 ) -> float:
-    """Scaled m5 using LSST depth relations including read-noise correction."""
-    base = M5_REF.get(band, 23.0)
-    msky0 = DARK_SKY_MAG.get(band, 21.0)
-    term_sky = 0.50 * (float(m_sky_arcsec2) - float(msky0))
-    term_see = 2.5 * math.log10(max(1e-3, 0.7 / max(1e-3, seeing_fwhm_arcsec)))
-    term_t = 1.25 * math.log10(max(1e-3, float(t_vis_s) / 30.0))
-    term_air = -float(k_m or 0.0) * (float(airmass) - 1.0)
-    delta_inf = DELTA_CM_INF.get(band, 0.0)
-    if delta_inf > 0.0:
-        # T_scale per SMTN-002 uses the band-specific dark-sky reference
-        tau = max(1e-3, (float(t_vis_s) / 30.0) * 10 ** (-0.4 * (m_sky_arcsec2 - msky0)))
-        term_delta = delta_inf - 1.25 * math.log10(
-            1.0 + (10 ** (0.8 * delta_inf) - 1.0) / tau
-        )
-    else:
-        term_delta = 0.0
-    return float(base + term_sky + term_see + term_t + term_air + term_delta)
+    """Return physical 5-sigma depth from the SIMLIB photometric model.
+
+    This wrapper is retained for scheduler call-site compatibility, but the
+    calculation lives in :func:`photom_rubin.point_source_limiting_mag` so the
+    feasibility gate and generated SIMLIB cannot drift to different noise
+    models.
+    """
+
+    cfg = phot_cfg or PhotomConfig()
+    return point_source_limiting_mag(
+        band,
+        t_exp_s=float(t_vis_s),
+        airmass=float(airmass),
+        sky_mag_arcsec2=float(m_sky_arcsec2),
+        cfg=cfg,
+        fwhm_eff_arcsec=float(seeing_fwhm_arcsec),
+        k_m=k_m,
+        snr=MIN_SNR,
+    )
 
 
 def heuristic_filters_from_sun_alt(sun_alt_deg: float) -> List[str]:
@@ -116,12 +101,7 @@ def allowed_filters_for_window(
     user-configured ``sun_alt_policy`` at the window stage.
     """
 
-    try:
-        from .photom_rubin import PhotomConfig
-    except Exception:  # pragma: no cover - fallback for unexpected import issues
-        PhotomConfig = None  # type: ignore
-
-    if phot_cfg is None and PhotomConfig is not None:
+    if phot_cfg is None:
         phot_cfg = PhotomConfig()
 
     exp_map = exposure_by_filter or {}
@@ -227,6 +207,7 @@ def allowed_filters_for_window(
             airmass=airmass,
             t_vis_s=t_vis,
             k_m=k_band,
+            phot_cfg=phot_cfg,
         )
 
         if float(m5) - float(target_mag) >= snr_threshold:

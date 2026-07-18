@@ -222,6 +222,7 @@ def parse_simlib(source: str | Path | TextIO | Iterable[str]) -> SimlibDocument:
             if stripped_line.startswith("#"):
                 idx += 1
                 continue
+            parsed_header_value = False
             if "RA:" in raw_line:
                 ra = _extract_float(raw_line, "RA:")
                 dec = _extract_float(raw_line, "DEC:")
@@ -232,8 +233,7 @@ def parse_simlib(source: str | Path | TextIO | Iterable[str]) -> SimlibDocument:
                     entry.dec_deg = dec
                 if mw is not None:
                     entry.mwebv = mw
-                idx += 1
-                continue
+                parsed_header_value = True
             if "NOBS:" in raw_line:
                 nobs = _extract_float(raw_line, "NOBS:")
                 if nobs is not None:
@@ -244,6 +244,16 @@ def parse_simlib(source: str | Path | TextIO | Iterable[str]) -> SimlibDocument:
                 pk = _extract_float(raw_line, "PEAKMJD:")
                 if pk is not None:
                     entry.peakmjd = pk
+                parsed_header_value = True
+            if "REDSHIFT:" in raw_line:
+                rz = _extract_float(raw_line, "REDSHIFT:")
+                if rz is not None:
+                    entry.redshift = rz
+                pk = _extract_float(raw_line, "PEAKMJD:")
+                if pk is not None:
+                    entry.peakmjd = pk
+                parsed_header_value = True
+            if parsed_header_value:
                 idx += 1
                 continue
             if stripped_line.startswith("S:"):

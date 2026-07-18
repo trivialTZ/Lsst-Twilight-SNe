@@ -12,10 +12,12 @@ from __future__ import annotations
 import gzip
 from pathlib import Path
 import re
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 from astropy.io import fits
+
 try:
     from astropy.table import Table  # for HEAD FITS convenience
 except Exception:  # pragma: no cover - optional import
@@ -55,6 +57,151 @@ def _to_numeric_if_possible(s: pd.Series) -> pd.Series:
         return pd.to_numeric(s)
     except Exception:
         return s
+
+
+def _first_finite_numeric(df: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
+    """Return the first finite numeric value available in each row."""
+
+    result = pd.Series(np.nan, index=df.index, dtype=float)
+    for name in names:
+        if name not in df.columns:
+            continue
+        candidate = pd.to_numeric(df[name], errors="coerce").astype(float)
+        candidate = candidate.replace([np.inf, -np.inf], np.nan)
+        result = result.where(result.notna(), candidate)
+    return result
+
+
+def _variance_from_error(df: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
+    """Return the square of the first finite error available in each row."""
+
+    error = _first_finite_numeric(df, names)
+    return error.pow(2)
+
+
+def salt_covariance_mB_x1_c(
+    df: pd.DataFrame,
+    *,
+    missing: Literal["raise", "zero"] = "raise",
+) -> pd.DataFrame:
+    """Return each SALT covariance in the ``(mB, x1, c)`` basis.
+
+    SNANA FITRES files commonly store the amplitude cross-covariances as
+    ``COV_x1_x0`` and ``COV_c_x0`` even when they also report ``mB`` and
+    ``mBERR``.  For ``mB = -2.5 log10(x0) + constant``, this function applies
+
+    ``dmB/dx0 = -2.5 / (ln(10) x0)``
+
+    row by row to transform those terms.  A finite covariance already supplied
+    in the ``mB`` basis takes precedence; an ``x0``-basis value only fills rows
+    where the direct value is absent.  The returned columns are ``VAR_mB``,
+    ``VAR_x1``, ``VAR_c``, ``COV_mB_x1``, ``COV_mB_c``, and ``COV_x1_c``.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        FITRES-like rows containing SALT errors/covariances.  Covariance names
+        are accepted in either order (for example, ``COV_x1_x0`` or
+        ``COV_x0_x1``).
+    missing : {"raise", "zero"}, optional
+        Missing covariance elements raise a descriptive ``ValueError`` by
+        default.  ``"zero"`` is an explicit opt-in for legacy/toy tables; it
+        never suppresses an available ``x0``-basis covariance.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One covariance row per input row, with the same index as ``df``.
+    """
+
+    if missing not in {"raise", "zero"}:
+        raise ValueError("missing must be either 'raise' or 'zero'")
+
+    x0 = _first_finite_numeric(df, ("x0", "X0"))
+    dm_b_dx0 = pd.Series(np.nan, index=df.index, dtype=float)
+    # SALT amplitudes must be positive for the logarithmic magnitude mapping.
+    valid_x0 = x0.notna() & (x0 > 0.0)
+    dm_b_dx0.loc[valid_x0] = -2.5 / (np.log(10.0) * x0.loc[valid_x0])
+
+    var_x0 = _first_finite_numeric(df, ("COV_x0_x0", "COV_X0_X0", "VAR_x0", "VAR_X0"))
+    var_x0 = var_x0.where(var_x0.notna(), _variance_from_error(df, ("x0ERR", "X0ERR")))
+
+    var_mb = _first_finite_numeric(df, ("COV_mB_mB", "COV_MB_MB", "VAR_mB", "VAR_MB"))
+    var_mb = var_mb.where(var_mb.notna(), _variance_from_error(df, ("mBERR", "MBERR")))
+    var_mb = var_mb.where(var_mb.notna(), dm_b_dx0.pow(2) * var_x0)
+
+    var_x1 = _first_finite_numeric(df, ("COV_x1_x1", "COV_X1_X1", "VAR_x1", "VAR_X1"))
+    var_x1 = var_x1.where(var_x1.notna(), _variance_from_error(df, ("x1ERR", "X1ERR")))
+
+    var_c = _first_finite_numeric(df, ("COV_c_c", "COV_C_C", "VAR_c", "VAR_C"))
+    var_c = var_c.where(var_c.notna(), _variance_from_error(df, ("cERR", "CERR")))
+
+    cov_x0_x1 = _first_finite_numeric(
+        df,
+        ("COV_x0_x1", "COV_x1_x0", "COV_X0_X1", "COV_X1_X0"),
+    )
+    cov_x0_c = _first_finite_numeric(
+        df,
+        ("COV_x0_c", "COV_c_x0", "COV_X0_C", "COV_C_X0"),
+    )
+
+    cov_mb_x1 = _first_finite_numeric(
+        df,
+        ("COV_mB_x1", "COV_x1_mB", "COV_MB_X1", "COV_X1_MB"),
+    )
+    cov_mb_x1 = cov_mb_x1.where(cov_mb_x1.notna(), dm_b_dx0 * cov_x0_x1)
+
+    cov_mb_c = _first_finite_numeric(
+        df,
+        ("COV_mB_c", "COV_c_mB", "COV_MB_C", "COV_C_MB"),
+    )
+    cov_mb_c = cov_mb_c.where(cov_mb_c.notna(), dm_b_dx0 * cov_x0_c)
+
+    cov_x1_c = _first_finite_numeric(
+        df,
+        ("COV_x1_c", "COV_c_x1", "COV_x1c", "COV_X1_C", "COV_C_X1"),
+    )
+
+    covariance = pd.DataFrame(
+        {
+            "VAR_mB": var_mb,
+            "VAR_x1": var_x1,
+            "VAR_c": var_c,
+            "COV_mB_x1": cov_mb_x1,
+            "COV_mB_c": cov_mb_c,
+            "COV_x1_c": cov_x1_c,
+        },
+        index=df.index,
+        dtype=float,
+    )
+
+    negative_variances = {
+        name: int((covariance[name] < 0.0).sum())
+        for name in ("VAR_mB", "VAR_x1", "VAR_c")
+        if bool((covariance[name] < 0.0).any())
+    }
+    if negative_variances:
+        details = ", ".join(
+            f"{name} ({count} row(s))" for name, count in negative_variances.items()
+        )
+        raise ValueError(f"SALT covariance contains negative variances: {details}")
+
+    missing_counts = covariance.isna().sum()
+    missing_counts = missing_counts[missing_counts > 0]
+    if not missing_counts.empty:
+        if missing == "raise":
+            details = ", ".join(
+                f"{name} ({int(count)} row(s))"
+                for name, count in missing_counts.items()
+            )
+            raise ValueError(
+                "Could not construct a complete (mB, x1, c) SALT covariance: "
+                f"missing {details}. Provide direct mB-basis terms or x0 and "
+                "the corresponding x0-basis covariances."
+            )
+        covariance = covariance.fillna(0.0)
+
+    return covariance
 
 
 # -----------------------------------------------------------------------------
@@ -216,9 +363,8 @@ def read_fitres_any(path: str | Path) -> pd.DataFrame:
         return pd.DataFrame()
     # Prefer compressed ASCII, then plain ASCII, then ROOT
     for cand in candidates:
-        if (
-            cand.suffixes[-2:] == [".FITRES", ".gz"]
-            or cand.name.upper().endswith(".FITRES.GZ")
+        if cand.suffixes[-2:] == [".FITRES", ".gz"] or cand.name.upper().endswith(
+            ".FITRES.GZ"
         ):
             try:
                 return read_fitres_ascii_gz(cand)
@@ -243,6 +389,7 @@ def read_fitres_any(path: str | Path) -> pd.DataFrame:
 # -----------------------------------------------------------------------------
 # New loaders for SNANA Twilight data
 # -----------------------------------------------------------------------------
+
 
 def _read_fitres_ascii(path: str | Path) -> pd.DataFrame:
     """Robust reader for SNANA FITRES ASCII (whitespace separated).

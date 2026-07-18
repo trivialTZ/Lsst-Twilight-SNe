@@ -15,11 +15,25 @@ from .simlib_reader import (
     entry_name,
     parse_simlib,
 )
-from .simlib_writer import SimlibHeader, SimlibWriter
+from .simlib_writer import (
+    PSF_UNIT_PIXEL_SIGMA,
+    SKYSIG_UNIT_ADU_PER_SQPIXEL,
+    SimlibHeader,
+    SimlibWriter,
+    psf_sigma_pixels_from_simlib,
+    skysig_adu_per_pixel_from_simlib,
+)
 
 
-def _copy_entry(entry: SimlibEntry) -> SimlibEntry:
-    """Return a deep-ish copy of a parsed SIMLIB entry."""
+def _copy_entry(entry: SimlibEntry, *, source_header: SimlibHeader) -> SimlibEntry:
+    """Return a copy whose epochs use planner-canonical units.
+
+    Parsed WFD values follow the source SIMLIB's global unit declarations.
+    Convert them to Gaussian sigma in pixels and sky RMS in ADU/pixel before
+    mixing them with planner-generated Twilight epochs.
+    """
+
+    pixel_scale = float(source_header.PIXSIZE)
 
     epochs = [
         SimlibEpoch(
@@ -28,9 +42,33 @@ def _copy_entry(entry: SimlibEntry) -> SimlibEntry:
             id_expose=e.id_expose,
             gain=e.gain,
             noise=e.noise,
-            skysig=e.skysig,
-            psf1=e.psf1,
-            psf2=e.psf2,
+            skysig=(
+                skysig_adu_per_pixel_from_simlib(
+                    e.skysig,
+                    pixel_scale_arcsec=pixel_scale,
+                    skysig_unit=source_header.SKYSIG_UNIT,
+                )
+                if e.skysig is not None
+                else None
+            ),
+            psf1=(
+                psf_sigma_pixels_from_simlib(
+                    e.psf1,
+                    pixel_scale_arcsec=pixel_scale,
+                    psf_unit=source_header.PSF_UNIT,
+                )
+                if e.psf1 is not None
+                else None
+            ),
+            psf2=(
+                psf_sigma_pixels_from_simlib(
+                    e.psf2,
+                    pixel_scale_arcsec=pixel_scale,
+                    psf_unit=source_header.PSF_UNIT,
+                )
+                if e.psf2 is not None
+                else None
+            ),
             psfratio=e.psfratio,
             zpavg=e.zpavg,
             zperr=e.zperr,
@@ -50,6 +88,37 @@ def _copy_entry(entry: SimlibEntry) -> SimlibEntry:
         comment=entry.comment,
         match_tns_name=entry.match_tns_name,
         epochs=epochs,
+    )
+
+
+def _global_header_value(doc: SimlibDocument, key: str) -> Optional[str]:
+    """Return a scalar value from the parsed global SIMLIB header."""
+
+    key_upper = str(key).strip().rstrip(":").upper()
+    for line in doc.global_header:
+        stripped = line.strip()
+        if ":" not in stripped:
+            continue
+        name, value = stripped.split(":", 1)
+        if name.strip().upper() == key_upper:
+            token = value.strip().split()
+            return token[0] if token else None
+    return None
+
+
+def _source_unit_header(doc: SimlibDocument) -> SimlibHeader:
+    """Build the unit specification used by a source WFD SIMLIB."""
+
+    pixsize = _as_float(_global_header_value(doc, "PIXSIZE"))
+    return SimlibHeader(
+        PIXSIZE=pixsize if pixsize is not None else SimlibHeader().PIXSIZE,
+        PSF_UNIT=(
+            _global_header_value(doc, "PSF_UNIT") or PSF_UNIT_PIXEL_SIGMA
+        ),
+        SKYSIG_UNIT=(
+            _global_header_value(doc, "SKYSIG_UNIT")
+            or SKYSIG_UNIT_ADU_PER_SQPIXEL
+        ),
     )
 
 
@@ -75,7 +144,21 @@ def _timestamp_to_mjd(value) -> Optional[float]:
         return None
 
 
-def _row_to_epoch(row: pd.Series) -> Optional[SimlibEpoch]:
+def _first_finite_float(row: pd.Series, keys: tuple[str, ...]) -> Optional[float]:
+    """Return the first finite numeric value among ``keys``."""
+
+    for key in keys:
+        if key not in row:
+            continue
+        value = _as_float(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _row_to_epoch(
+    row: pd.Series, *, default_zpt_err_mag: Optional[float]
+) -> Optional[SimlibEpoch]:
     mjd = None
     for col in ("visit_start_utc", "sn_start_utc", "best_twilight_time_utc"):
         if col in row:
@@ -101,7 +184,14 @@ def _row_to_epoch(row: pd.Series) -> Optional[SimlibEpoch]:
     psf2 = _as_float(row.get("PSF2_pix"))
     psfratio = _as_float(row.get("PSFRATIO"))
     zpavg = _as_float(row.get("ZPT"))
-    zperr = _as_float(row.get("zpt_err_mag", row.get("ZPTERR")))
+    zperr = _first_finite_float(row, ("zpt_err_mag", "ZPTERR", "zperr"))
+    if zperr is None:
+        zperr = _as_float(default_zpt_err_mag)
+    if zperr is None:
+        raise ValueError(
+            "Twilight planner row has no finite zeropoint uncertainty; "
+            "provide zpt_err_mag/ZPTERR/zperr or default_zpt_err_mag"
+        )
     nexpose = row.get("nexpose", 1)
     try:
         nexpose_int = int(nexpose)
@@ -119,12 +209,14 @@ def _row_to_epoch(row: pd.Series) -> Optional[SimlibEpoch]:
         psf2=psf2 if psf2 is not None else 0.0,
         psfratio=psfratio if psfratio is not None else 0.0,
         zpavg=zpavg if zpavg is not None else 0.0,
-        zperr=zperr if zperr is not None else 0.0,
+        zperr=zperr,
         nexpose=nexpose_int,
     )
 
 
-def _group_twilight_epochs(df: pd.DataFrame) -> dict[str, dict]:
+def _group_twilight_epochs(
+    df: pd.DataFrame, *, default_zpt_err_mag: Optional[float]
+) -> dict[str, dict]:
     grouped: dict[str, dict] = {}
     for _, row in df.iterrows():
         name = None
@@ -148,13 +240,18 @@ def _group_twilight_epochs(df: pd.DataFrame) -> dict[str, dict]:
             info["dec"] = _as_float(row["Dec_deg"])
         if info["redshift"] is None and "redshift" in row:
             info["redshift"] = _as_float(row["redshift"])
-        ep = _row_to_epoch(row)
+        ep = _row_to_epoch(row, default_zpt_err_mag=default_zpt_err_mag)
         if ep:
             info["epochs"].append(ep)
     return grouped
 
 
-def _build_preamble(doc: SimlibDocument, source_path: Path, n_entries: int) -> List[str]:
+def _build_preamble(
+    doc: SimlibDocument,
+    source_path: Path,
+    n_entries: int,
+    output_header: SimlibHeader,
+) -> List[str]:
     """Compose the header for the merged SIMLIB."""
 
     lines: List[str] = []
@@ -162,6 +259,7 @@ def _build_preamble(doc: SimlibDocument, source_path: Path, n_entries: int) -> L
     merge_note_lines = [
         f"  NOTE: Merged twilight planner output into WFD SIMLIB: {source_path}",
         "  SOURCE: twilight_planner_pkg.simlib_merge",
+        "  NOTE: NOISE is electrons/pixel; PSF and SKYSIG follow the global unit keys.",
     ]
     # Keep a single DOCUMENTATION block; if the input has one, inject our note
     # just before DOCUMENTATION_END.
@@ -188,44 +286,61 @@ def _build_preamble(doc: SimlibDocument, source_path: Path, n_entries: int) -> L
         doc_lines = ["DOCUMENTATION:"] + merge_note_lines + ["DOCUMENTATION_END:", ""]
 
     lines.extend(doc_lines)
-    inserted_pixsize = any(l.strip().startswith("PIXSIZE:") for l in doc.global_header)
+    replacements = {
+        "PIXSIZE": f"PIXSIZE:  {output_header.PIXSIZE:.3f}",
+        "PSF_UNIT": f"PSF_UNIT: {output_header.PSF_UNIT}",
+        "SKYSIG_UNIT": f"SKYSIG_UNIT: {output_header.SKYSIG_UNIT}",
+    }
+    seen_unit_keys: set[str] = set()
     for line in doc.global_header:
         stripped = line.strip()
         if stripped.upper().startswith("BEGIN LIBGEN"):
             break
-        if (not inserted_pixsize) and stripped.startswith("FILTERS:"):
-            lines.append(line)
-            lines.append(f"PIXSIZE:  {SimlibHeader().PIXSIZE:.3f}")
-            inserted_pixsize = True
-            continue
-        if stripped.startswith("NLIBID:"):
+        key = stripped.split(":", 1)[0].upper() if ":" in stripped else ""
+        if key in replacements:
+            if key not in seen_unit_keys:
+                lines.append(replacements[key])
+                seen_unit_keys.add(key)
+        elif key == "NLIBID":
             lines.append(f"NLIBID:      {n_entries}")
         else:
             lines.append(line)
-    if not inserted_pixsize:
-        lines.append(f"PIXSIZE:  {SimlibHeader().PIXSIZE:.3f}")
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+    for key in ("PIXSIZE", "PSF_UNIT", "SKYSIG_UNIT"):
+        if key not in seen_unit_keys:
+            lines.append(replacements[key])
     # Ensure at least one blank line between global header and the forthcoming
     # BEGIN LIBGEN emitted by SimlibWriter.close().
-    if lines and lines[-1].strip():
-        lines.append("")
+    lines.append("")
     return lines
 
 
 def merge_simlib_with_twilight(
-    wfd_simlib_path: str | Path, twilight_df: pd.DataFrame, out_path: str | Path
+    wfd_simlib_path: str | Path,
+    twilight_df: pd.DataFrame,
+    out_path: str | Path,
+    *,
+    default_zpt_err_mag: Optional[float] = None,
 ) -> Path:
     """Merge a WFD SIMLIB with twilight planner epochs."""
 
     doc = parse_simlib(wfd_simlib_path)
+    output_header = _source_unit_header(doc)
     wfd_entries: Dict[int, SimlibEntry] = {}
     name_by_libid: Dict[int, str] = {}
     for entry in doc.entries:
         name = entry_name(entry)
-        wfd_entries[entry.libid] = _copy_entry(entry)
+        wfd_entries[entry.libid] = _copy_entry(
+            entry, source_header=output_header
+        )
         name_by_libid[entry.libid] = name
 
     max_wfd_libid = max(wfd_entries) if wfd_entries else 0
-    twilight_grouped = _group_twilight_epochs(twilight_df)
+    twilight_grouped = _group_twilight_epochs(
+        twilight_df, default_zpt_err_mag=default_zpt_err_mag
+    )
     merged: Dict[int, SimlibEntry] = dict(wfd_entries)
     has_wfd_epochs: Dict[int, bool] = {lid: True for lid in merged}
     has_twilight_epochs: Dict[int, bool] = {lid: False for lid in merged}
@@ -272,14 +387,16 @@ def merge_simlib_with_twilight(
         has_twilight_epochs[libid] = True
 
     total_entries = len(merged)
-    preamble_lines = _build_preamble(doc, Path(wfd_simlib_path), total_entries)
+    preamble_lines = _build_preamble(
+        doc, Path(wfd_simlib_path), total_entries, output_header
+    )
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as fp:
         for line in preamble_lines:
             fp.write(str(line).rstrip("\n") + "\n")
-        writer = SimlibWriter(fp, SimlibHeader(), preserve_ids=True)
+        writer = SimlibWriter(fp, output_header, preserve_ids=True)
         for libid in sorted(merged.keys()):
             entry = merged[libid]
             epochs_sorted = sorted(entry.epochs, key=lambda e: e.mjd)
