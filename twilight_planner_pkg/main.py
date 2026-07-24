@@ -65,6 +65,15 @@ def build_parser():
         help="Maximum Sun altitude (deg) for twilight windows",
     )
     p.add_argument(
+        "--min-sun-sep",
+        type=float,
+        default=90.0,
+        help=(
+            "Hard minimum topocentric Sun-target separation in degrees "
+            "(default: 90)"
+        ),
+    )
+    p.add_argument(
         "--filters",
         default="g,r,i,z",
         help="Filter list, e.g. 'g,r,i,z' or 'griz'",
@@ -213,6 +222,7 @@ def main():
         min_alt_deg=args.min_alt,
         twilight_sun_alt_min_deg=args.twilight_sun_alt_min,
         twilight_sun_alt_max_deg=args.twilight_sun_alt_max,
+        min_sun_sep_deg=args.min_sun_sep,
         filters=parse_filters(args.filters),
         exposure_by_filter=exp_map,
         twilight_step_min=args.twilight_step,

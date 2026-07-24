@@ -6,15 +6,11 @@ from twilight_planner_pkg.astro_utils import allowed_filters_for_sun_alt
 from twilight_planner_pkg.config import PlannerConfig
 
 
-def test_twilight_policy_sets():
+def test_default_twilight_policy_leaves_photometric_gating_to_m5():
     cfg = PlannerConfig()
-    for alt, expected in [
-        (-16, ["y", "z", "i"]),
-        (-13, ["z", "i", "r"]),
-        (-5, ["i", "z", "y"]),
-    ]:
+    for alt in (-16.0, -13.0, -5.0):
         allowed = allowed_filters_for_sun_alt(alt, cfg)
-        assert allowed == expected
+        assert allowed == cfg.filters
         assert set(allowed).issubset(set(cfg.filters))
 
 

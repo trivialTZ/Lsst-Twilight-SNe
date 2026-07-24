@@ -1,4 +1,10 @@
-from twilight_planner_pkg.astro_utils import compute_capped_exptime, default_host_mu_obs
+import pytest
+
+from twilight_planner_pkg.astro_utils import (
+    compute_capped_exptime,
+    default_host_mu_obs,
+    exposure_midpoint_offsets_s,
+)
 from twilight_planner_pkg.config import PlannerConfig
 
 
@@ -42,3 +48,26 @@ def test_default_host_mu_obs_scales_with_redshift():
     mu_low = default_host_mu_obs("i", cfg)
     assert mu_high is not None and mu_low is not None
     assert mu_high > mu_low
+
+
+def test_exposure_midpoints_include_filter_change_delays():
+    cfg = PlannerConfig(
+        filters=["g", "r"],
+        exposure_by_filter={"g": 15.0, "r": 15.0},
+        readout_s=2.0,
+        filter_change_s=120.0,
+    )
+    timing = {
+        "slew_s": 4.0,
+        "cross_filter_change_s": 120.0,
+        "guard_first_s": 0.0,
+        "guard_internal_s": 0.0,
+        "exp_times": {"g": 15.0, "r": 15.0},
+        "total_s": 274.0,
+    }
+
+    offsets = exposure_midpoint_offsets_s(["g", "r"], timing, cfg)
+
+    assert offsets["g"] == pytest.approx(131.5)
+    assert offsets["r"] == pytest.approx(266.5)
+    assert offsets["r"] + 7.5 == pytest.approx(timing["total_s"])

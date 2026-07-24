@@ -67,6 +67,8 @@ def allowed_filters_for_window(
     mjd: Optional[float] = None,
     ra_deg: Optional[float] = None,
     dec_deg: Optional[float] = None,
+    sun_sep_deg: Optional[float] = None,
+    sun_az_rel_deg: Optional[float] = None,
     sky_lookup: Optional[Callable[..., float]] = None,
 ) -> List[str]:
     """Select filters that are predicted to reach the target's magnitude.
@@ -170,6 +172,14 @@ def allowed_filters_for_window(
                         mjd=float(mjd),
                         minutes=1,
                         sun_alt_deg=float(sun_alt_deg),
+                        sun_sep_deg=(
+                            float(sun_sep_deg) if sun_sep_deg is not None else None
+                        ),
+                        sun_az_rel_deg=(
+                            float(sun_az_rel_deg)
+                            if sun_az_rel_deg is not None
+                            else None
+                        ),
                         moon_alt_deg=float(moon_alt_deg),
                         moon_phase=float(moon_phase),
                         moon_sep_deg=float(moon_sep_deg),
@@ -197,6 +207,8 @@ def allowed_filters_for_window(
                     moon_phase,
                     moon_sep_deg,
                     airmass,
+                    sun_sep_deg=sun_sep_deg,
+                    sun_az_rel_deg=sun_az_rel_deg,
                     k_band=k_band,
                 )
 

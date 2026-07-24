@@ -85,6 +85,7 @@ def test_cadence_promotion(tmp_path, monkeypatch):
         min_moon_sep_by_filter={"g": 0.0},
         require_single_time_for_all_filters=False,
         min_alt_deg=0.0,
+        min_sun_sep_deg=0.0,
         twilight_step_min=1,
         allow_filter_changes_in_twilight=True,
     )

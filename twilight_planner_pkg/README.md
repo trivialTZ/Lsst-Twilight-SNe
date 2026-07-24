@@ -222,6 +222,9 @@ used for the filename prefix.
 >   `PlannerConfig`; the CLI helper starts at 20°) during at least one twilight
 >   window where the Sun altitude lies between `twilight_sun_alt_min_deg` and
 >   `twilight_sun_alt_max_deg` (defaults −18° to 0°).
+> - The topocentric target–Sun separation must remain at or above
+>   `min_sun_sep_deg` (default 90°). This hard gate is rechecked at the
+>   serialized visit start, exposure midpoint, and end.
 > - Eligibility duration after discovery is scaled from a `typical_days_by_type` value (or a default if type unknown) and multiplied by 1.2 to provide a buffer.
 > - Observation times must also pass the Moon separation rule, which applies a filter-dependent minimum separation, waived if the Moon is below the horizon.
 
@@ -232,15 +235,17 @@ used for the filename prefix.
 ```
 (defaults −18° to 0°)
 - Sample each window every `twilight_step_min` minutes
-- For each SN, choose the time of maximum altitude that passes altitude and Moon constraints (below)
+- For each SN, choose the time of maximum altitude that passes altitude,
+  hard Sun-separation, and Moon constraints (below)
 
 ### Selection & Scheduling
 - Rank visible SNe by need score (how far from meeting the current goal) and altitude
 - Rank by priority/altitude, drop non‑positive scores for ``unique_first``, then
 - apply a stratified cap per twilight window based on ``max_sn_per_night``
   (default infinity).
-- Within each window, build a global pool of `(SN, filter)` pairs that pass Sun-altitude,
-  Moon, cadence, and m₅/SNR gates.  Guard-aware visit durations combine the 15 s
+- Within each window, build a global pool of `(SN, filter)` pairs that pass
+  Sun-separation, Sun-altitude, Moon, cadence, and m₅/SNR gates. Guard-aware
+  visit durations combine the 15 s
   inter-exposure minimum, slew+settle, and saturation-capped exposure time. A compact
   dynamic program allocates visits across filters, explicitly charging the 120 s
   filter-change cost.  Only swaps that beat the “stay put” plan by the configured
@@ -253,9 +258,17 @@ used for the filename prefix.
 - **Guard-Aware Visit Time**
   - For a single-band visit to target `sn` in filter `f` with saturation-aware exposure, the scheduler uses
     ```math
-    t_{\rm visit}(sn,f) = \max(\texttt{inter\_exposure\_min\_s},\ \texttt{readout\_s} + t_{\rm slew}(\mathrm{prev}\to sn)+\texttt{settle\_s}) + t^{\rm cap}_{\rm exp}(sn,f).
+    t_{\rm motion}=\max(t_{\rm telescope},t_{\rm dome}),\qquad
+    t_{\rm visit}(sn,f) =
+    \max\!\left[\texttt{inter\_exposure\_min\_s},
+    \max(t_{\rm motion},\texttt{readout\_s})+t_{\rm filter}\right]
+    +t^{\rm cap}_{\rm exp}(sn,f).
     ```
-    Here `t_exp^cap(sn,f)` is computed via `compute_capped_exptime` (source+sky saturation guard). In practice the 15 s guard dominates unless slews are large. External filter changes are charged once per swap via `filter_change_s` (Rubin ≈ 120 s).
+    Here `t_exp^cap(sn,f)` is computed via `compute_capped_exptime`
+    (source+sky saturation guard). Telescope motion, dome motion, and readout
+    overlap; a filter change is charged once per swap and does not overlap
+    with the effective motion term. In practice the 15 s guard dominates
+    small target changes.
 
 - **Visit Units (N, K)**
   - Define a reference per-visit duration for the DP:
@@ -324,8 +337,10 @@ Key tuning knobs for the planner:
   (after any ladder overrides) all enter, and the read-noise correction
   `ΔC_m(τ)` is applied so short visits lose depth appropriately.
 - Sky brightness comes from `rubin_sim.skybrightness` when available, falling
-  back to a twilight brightening term plus a Krisciunas & Schaefer (1991)
-  moon-scatter model.
+  back to a directional twilight model using Sun altitude, target airmass,
+  and Sun-relative azimuth, plus a Krisciunas & Schaefer (1991) moon-scatter
+  term. At equal airmass, the Sun-facing side is brighter than the anti-Sun
+  side during twilight.
 - The selector requires `m5 ≥ m_target` (equivalently SNR ≥ 5) for a band to be
   eligible. There are no hard‑coded bans for `g`; the final allowed set is the
   intersection with the user’s `sun_alt_policy`.
@@ -347,6 +362,13 @@ Key tuning knobs for the planner:
 
 ### Slews & Overheads
 - Two‑regime slew: small moves ≤3.5° take ≈4 s; larger moves add $t_{\rm slew} \approx 4\,\mathrm{s} + \frac{\max(0,\Delta\theta-3.5^\circ)}{5.25^\circ/\mathrm{s}} + 1\,\mathrm{s}_{\rm settle}$
+- Optional dome motion uses Rubin's jerk-limited model. The canonical science
+  rerun enables strict recentering at the design-minimum rates:
+  azimuth `(v,a,j)=(1.50,0.75,3.00)` and elevation
+  `(1.75,0.875,3.50)` in degree/second units, with 1 s azimuth settle.
+  The axes move in parallel, and the charged motion time is the slower of the
+  telescope and dome. Strict mode conservatively gives no credit for
+  predictive dome crawling.
 - Readout: 2 s per exposure; filter change: 120 s per swap
 - Per‑SN budget: $T_{\rm SN} = t_{\rm slew} + \sum_{f \in \mathcal{F}}(t_{\rm exp}(f) + t_{\rm read}) + N_{\rm changes}\,t_{\rm filt}$
 
@@ -433,7 +455,50 @@ X(h) = \left[\cos z + 0.50572 \left(96.07995^\circ - z\right)^{-1.6364}\right]^{
 Eligibility requires $h \ge h_{\min}$ at some sampled time in a twilight window
 (`PlannerConfig` default $30^\circ$; CLI helper default $20^\circ$).
 
-### 2) Moon Separation (Graded Policy)
+### 2) Sun Separation (Hard Policy)
+
+Let $\Delta\theta_\odot$ be the topocentric great-circle separation between
+the target and Sun in one shared `AltAz` frame. A sampled visit is eligible
+only when
+
+```math
+\Delta\theta_\odot \ge \texttt{min\_sun\_sep\_deg}.
+```
+
+The default is $90^\circ$. Unlike the Moon rule, the Sun threshold is not
+scaled by phase, altitude, or filter and is never waived. It is a conservative
+project-level exclusion for ordinary SN observations, not a claimed Rubin
+hardware safety specification; near-Sun programs must lower it explicitly and
+perform their own operational review.
+
+For serialized execution, the separation, Sun-altitude range, filter policy,
+and m5/SNR gate are evaluated at both the start and end of the complete visit
+block. This covers pre-exposure slew/filter overhead and rejects morning visits
+whose sky becomes infeasible before the block completes.
+
+The hard separation rule and sky model have different jobs. Separation rejects
+the bright near-Sun region outright. For surviving targets, twilight
+brightness still depends on Sun altitude, target airmass, and Sun-relative
+azimuth; the full `rubin_sim` model uses RA/Dec/MJD. The fallback implements
+Rubin's empirical twilight component in flux:
+
+```math
+\frac{F_{\rm twi}}{F_{\rm dark}} =
+R_{12}\,10^{\,a(h_\odot+12^\circ)\pi/180
++b(X-1)+c\,\max(0,\cos\Delta{\rm Az}_\odot)(X-1)},
+\qquad
+F_{\rm bg}=F_{\rm dark}+F_{\rm twi}.
+```
+
+Here $R_{12}$, $a$, $b$, and $c$ are the LSST-band coefficients from Rubin's
+`TwilightInterp`; the directional term applies only on the Sun-facing
+hemisphere. Rubin notes that the empirical fit was originally cut at
+$h_\odot=-11^\circ$, so brighter-twilight predictions are extrapolations even
+in the full model. Every scheduled row records
+`twilight_model_extrapolated=True` if either serialized visit endpoint is above
+that limit.
+
+### 3) Moon Separation (Graded Policy)
 
 Let $\Delta\theta_{\rm Moon}$ be the angular separation from the Moon, $f\in[0,1]$ the Moon illuminated fraction, and $h_{\rm Moon}$ the Moon altitude. The baseline per-filter requirements come from `PlannerConfig.min_moon_sep_by_filter` (defaults: $u:80^\circ$, $g:50^\circ$, $r:35^\circ$, $i:30^\circ$, $z:25^\circ$, $y:20^\circ$). These baselines are multiplied by the moon-separation weight
 
@@ -447,7 +512,7 @@ W(f, h_{\rm Moon}) = \begin{cases}
 
 where `clip` limits the factor to the indicated interval. The effective requirement is $\Delta\theta_{\min} = \Delta\theta_0 \times W(f, h_{\rm Moon})$. When the Moon is sufficiently far below the horizon ($h_{\rm Moon} \le -10^\circ$) the weight is zero and the separation constraint is fully relaxed.
 
-### 3) Photometric Kernel (Zeropoint, Extinction, Sky, SNR)
+### 4) Photometric Kernel (Zeropoint, Extinction, Sky, SNR)
 
 We treat counts in photo‑electrons. For filter $m$, define a 1‑s instrumental zeropoint ($ZP_{1\rm s,m}$) such that a source of magnitude $ZP_{1\rm s,m}$ yields 1 e⁻ s⁻¹ at unit airmass.
 
@@ -497,7 +562,7 @@ n_{\rm pix} \approx 4\pi\sigma_{\rm pix}^2, \qquad \sigma_{\rm pix}=\frac{\theta
 
 with RN the read‑noise (e⁻). This SNR is used for feasibility checks and for the 5σ depth below.
 
-### 4) 5σ Depth (m_5) (Twilight‑aware)
+### 5) 5σ Depth (m_5) (Twilight‑aware)
 
 Solve SNR (=5) for the magnitude that just reaches 5σ in exposure t.
 
@@ -517,7 +582,7 @@ Filter feasibility rule (per candidate/time): select filters where `m5 ≥ m_tar
 (equivalently SNR ≥ 5 by definition of `m5`). If magnitudes are unavailable, the
 code falls back to policy ordering but still honours `sun_alt_policy`.
 
-### 5) Saturation Guard (Central‑Pixel Sum)
+### 6) Saturation Guard (Central‑Pixel Sum)
 
 To avoid CCD blooming we evaluate the total electrons in the brightest pixel as the sum of three components:
 
@@ -635,7 +700,7 @@ inferred for any target, the planner raises a `ValueError`
 silently bypassed. Set this flag to `False` only if you explicitly want to
 allow baseline exposures in rare cases where discovery metadata are unusable.
 
-### 6) Priority Scoring (Hybrid → LC)
+### 7) Priority Scoring (Hybrid → LC)
 
 The planner keeps a small per‑SN history (detections, total exposure, filters used,
 time of last visits per filter). Nightly ranking across SNe uses a binary need
@@ -770,7 +835,7 @@ where `\mathcal A` is the allowed set after Sun/Moon and policy checks. If a
 preference `first_filter` is available and passes the gate, it is kept;
 otherwise `f*` is used.
 
-### 7) SIMLIB Export (SNANA)
+### 8) SIMLIB Export (SNANA)
 
 When `--simlib-out` is provided, the planner writes `S:` rows with the following fields per visit:
 
@@ -797,9 +862,9 @@ curve model.
 ---
 
 ## Outputs
-- Per‑SN plan — CSV (`lsst_twilight_plan_<run_label>_<start>_to_<end>.csv`): date, window, chosen time, altitude, filters, exposure settings, and a detailed time budget (slew/readout/filter‑change). Represents the **best‑in‑theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on‑sky order.
-- True sequence CSV — `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv`: **true, non‑overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is recorded as `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, and `filters_used_csv`. One row per SN visit (multi‑filter visits are a single row).
-- Night summary — CSV (`lsst_twilight_summary_<run_label>_<start>_to_<end>.csv`): counts of visible vs planned targets, cumulative time per window
+- Per‑SN plan — CSV (`lsst_twilight_plan_<run_label>_<start>_to_<end>.csv`): date, window, chosen time, altitude, filters, exposure settings, Sun geometry at the visit start, each exposure midpoint, and visit end, and a detailed time budget (slew/readout/filter‑change). `sky_mag_arcsec2`, airmass, photometric quantities, and SIMLIB epochs use `exposure_mid_utc`, so a long pre-exposure filter change is reflected in the twilight background. Represents the **best‑in‑theory** schedule keyed to each target's `best_time_utc`; times may overlap across different SNe and do not reflect the serialized on‑sky order.
+- True sequence CSV — `lsst_twilight_sequence_true_<run_label>_<start>_to_<end>.csv`: **true, non‑overlapping execution order** within each twilight window. Visits are packed as soon as the previous one ends (ignoring `best_time_utc` slack); the original preference is recorded as `preferred_best_utc`. Columns include `order_in_window`, `sn_start_utc`, `sn_end_utc`, `filters_used_csv`, and the actual visit-time Sun geometry. One row per SN visit (multi‑filter visits are a single row).
+- Night summary — CSV (`lsst_twilight_summary_<run_label>_<start>_to_<end>.csv`): counts of visible vs planned targets, cumulative time per window, the configured Sun-separation threshold, and minimum/median executed Sun geometry
 - SIMLIB — optional SNANA SIMLIB for the planned visits
 
 In all filenames above, ``<run_label>`` defaults to ``hybrid`` to reflect the
@@ -810,11 +875,11 @@ default priority strategy.
 ## Module Overview
 - `config.py` — `PlannerConfig` (site, filters, caps, overheads, photometry)
 - `priority.py` — per‑SN visit logging with unified cadence/cosmology/color bonus; hybrid→LC escalation (Ia keep priority; non‑Ia drop after quick color)
-- `scheduler.py` — nightly visibility, scoring, per‑window scheduling, palette rotation, swap‑cost amortization, and time accounting; applies `sun_alt_policy` and optional exposure ladder
+- `scheduler.py` — nightly visibility, scoring, per‑window scheduling, palette rotation, swap‑cost amortization, and time accounting; applies hard Sun separation, `sun_alt_policy`, and optional exposure ladder
 - `astro_utils.py` — twilight windows, airmass, Sun/Moon geometry, slews
 - `filter_policy.py` — m₅/SNR feasibility with Sun/Moon-aware sky brightness; intersects with `sun_alt_policy`
 - `photom_rubin.py` — Rubin‑tuned photometric kernel with source+sky saturation guard
-- `sky_model.py` — twilight/dark sky providers with Sun-altitude brightening; optional `rubin_sim.skybrightness`
+- `sky_model.py` — twilight/dark sky providers with Sun-altitude, airmass, and Sun-relative-azimuth brightening; optional `rubin_sim.skybrightness`
 - `simlib_reader.py` — lightweight SIMLIB parser (header/LIBID/epochs) + helpers to build WFD cadence tables
 - `simlib_writer.py` — minimal SNANA SIMLIB exporter
 - `simlib_merge.py` — merge a WFD SIMLIB with twilight planner epochs while preserving LIBIDs
@@ -830,7 +895,12 @@ and algorithmic behavior for reference.
 ---
 
 ## Known Limitations / Roadmap
-- Heuristic $m_5$ during twilight is conservative; prefer `rubin_sim` sky brightness when available
+- The fallback reproduces Rubin's empirical twilight flux coefficients but
+  omits some full-model sky components; prefer `rubin_sim.skybrightness`.
+  Both paths extrapolate the twilight fit for Sun altitudes above −11°;
+  `twilight_model_extrapolated` identifies affected scheduled rows
+- The 90° Sun exclusion is a conservative project policy, not a Rubin hardware
+  safety limit; validate any change with operations/instrument experts
 - Moon model uses graded geometric separation; empirical tuning welcome
 - Saturation threshold default is moderately conservative; tighten if blooming artifacts matter
 - Single‑filter visits maximize breadth; enable multi‑filter only if caps and filter‑change budgets allow
@@ -844,10 +914,13 @@ Below is a compact table summarizing key default values, with direct links to th
 | Parameter | Default Value | Source & Link |
 | --- | --- | --- |
 | Sun altitude for twilight | `twilight_sun_alt_min_deg` to `twilight_sun_alt_max_deg` (default −18° to 0°) | — |
+| Minimum Sun–target separation | `min_sun_sep_deg = 90°` (hard, topocentric) | conservative project policy |
 | Minimum target altitude | 30° (`PlannerConfig`; CLI `--min_alt` default 20°) | — |
 | Hybrid detections threshold | 2 detections or 300 s | — |
 | Light‑curve (LC) threshold | 5 detections or 300 s | — |
-| Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin slew & settle specs](https://en.wikipedia.org/wiki/Vera_C._Rubin_Observatory) |
+| Slew small‑angle threshold | ≤ 3.5° ≈ 4 s | [Rubin telescope specifications](https://rubinobservatory.org/for-scientists/rubin-101/telescopes) |
+| Dome azimuth `(v,a,j)` | `(1.50°/s, 0.75°/s², 3.00°/s³)` | [Rubin telescope specifications](https://rubinobservatory.org/for-scientists/rubin-101/telescopes) |
+| Dome elevation `(v,a,j)` | `(1.75°/s, 0.875°/s², 3.50°/s³)` | [Rubin telescope specifications](https://rubinobservatory.org/for-scientists/rubin-101/telescopes) |
 | Readout time | 2 s per exposure | [Rubin Observatory key numbers](https://www.lsst.org/scientists/keynumbers) |
 | Filter change overhead | 120 s | [DMTN-065](https://dmtn-065.lsst.io) |
 | Inter-exposure minimum | `inter_exposure_min_s = 15 s` | thermal/operational margin |
@@ -871,5 +944,7 @@ Below is a compact table summarizing key default values, with direct links to th
 4. [LCA-48-J](https://project.lsst.org/lsst-camera/lca-48-j) — camera read-noise requirement (≤9 e⁻).
 5. Kasten, F., & Young, A. T. (1989). Revised optical air mass tables and approximation formula. *Applied Optics*, 28(22), 4735–4738. [DOI: 10.1364/AO.28.004735](https://doi.org/10.1364/AO.28.004735)
 6. Wikipedia: Air mass (astronomy) — airmass ≈38 at horizon per Kasten–Young formula
-7. Wikipedia: Vera C. Rubin Observatory — slew of 3.5° and settle within 4 s
+7. [Rubin Observatory telescope specifications](https://rubinobservatory.org/for-scientists/rubin-101/telescopes) — telescope slew/settle and dome velocity, acceleration, and jerk.
 8. Ivezić, Ž., et al. (2019). LSST: From Science Drivers to Reference Design and Anticipated Data Products. *ApJ*, 873, 111. [DOI: 10.3847/1538-4357/ab042c](https://doi.org/10.3847/1538-4357/ab042c)
+9. [Rubin `skybrightness` API](https://rubin-sim.lsst.io/skybrightness-api.html) — full RA/Dec/MJD twilight geometry and `azRelSun`.
+10. Patat, F., Ugolnikov, O. S., & Postylyakov, O. V. (2006). UBVRI twilight sky brightness at ESO-Paranal. *A&A*, 455, 385. [DOI: 10.1051/0004-6361:20064992](https://doi.org/10.1051/0004-6361:20064992)

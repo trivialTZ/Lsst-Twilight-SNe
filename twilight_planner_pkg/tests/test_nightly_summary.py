@@ -58,6 +58,17 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
     # Ensure deterministic first-filter choice and avoid extra swaps/repeats
     monkeypatch.setattr(scheduler, "pick_first_filter_for_target", lambda *a, **k: "z")
     monkeypatch.setattr(scheduler, "allowed_filters_for_window", lambda *a, **k: ["z"]) 
+    monkeypatch.setattr(
+        scheduler,
+        "sun_target_geometry",
+        lambda *a, **k: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *a, **k: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *a, **k: 30.0
+    )
 
     # Set start_filter to match the likely first-choice filter ('z') so
     # the initial target does not count as a swap.
@@ -91,5 +102,26 @@ def test_nightly_summary_fields(tmp_path, monkeypatch):
     assert row["window_duration_s"] == 1800
     assert row["cap_source"] == "morning_cap_s"
     assert row["median_alt_deg"] == pytest.approx(pernight["alt_deg"].median())
+    assert row["sun_sep_policy_deg"] == 90.0
+    assert row["min_sun_sep_deg_observed"] == pytest.approx(120.0)
+    assert row["median_sun_az_rel_deg"] == pytest.approx(180.0)
+    assert {
+        "sun_alt_deg",
+        "sun_sep_deg",
+        "sun_az_rel_deg",
+        "sun_alt_end_deg",
+        "sun_sep_end_deg",
+        "sun_az_rel_end_deg",
+        "sun_alt_exposure_mid_deg",
+        "sun_sep_exposure_mid_deg",
+        "sun_az_rel_exposure_mid_deg",
+        "twilight_model_extrapolated",
+    } <= set(pernight.columns)
+    assert "exposure_mid_utc" in pernight.columns
+    exposure_mid = pd.to_datetime(pernight.iloc[0]["exposure_mid_utc"], utc=True)
+    visit_start = pd.to_datetime(pernight.iloc[0]["visit_start_utc"], utc=True)
+    visit_end = pd.to_datetime(pernight.iloc[0]["sn_end_utc"], utc=True)
+    assert visit_start < exposure_mid < visit_end
+    assert pernight["twilight_model_extrapolated"].all()
     assert row["unique_targets_observed"] == row["n_planned"]
     assert row["repeat_fraction"] == 0.0

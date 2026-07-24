@@ -21,7 +21,8 @@ def summarize_night(
         DataFrame describing the executed or planned observations. Required
         columns are ``exposure_s``, ``readout_s``, ``filter_changes_s``,
         ``cross_filter_change_s``, ``slew_s``, ``filter`` and ``Name``. Optional
-        columns ``airmass`` and ``moon_sep`` enable additional metrics.
+        columns ``airmass``, ``moon_sep`` and ``sun_sep_deg`` enable
+        additional geometry metrics.
     twilight : float | dict | pandas.DataFrame
         Total twilight duration in seconds (float), per-window durations
         (mapping of label→seconds), or a DataFrame with columns
@@ -98,6 +99,13 @@ def summarize_night(
         kpi["median_airmass"] = float(plan_df["airmass"].median())
     if "moon_sep" in plan_df:
         kpi["median_moon_sep_deg"] = float(plan_df["moon_sep"].median())
+    if "sun_sep_deg" in plan_df:
+        sun_sep_samples = [plan_df["sun_sep_deg"]]
+        if "sun_sep_end_deg" in plan_df:
+            sun_sep_samples.append(plan_df["sun_sep_end_deg"])
+        all_sun_seps = pd.concat(sun_sep_samples, ignore_index=True)
+        kpi["min_sun_sep_deg"] = float(all_sun_seps.min())
+        kpi["median_sun_sep_deg"] = float(all_sun_seps.median())
     kpi["filter_swaps"] = int(
         (plan_df["filter"] != plan_df["filter"].shift()).sum() - 1
         if len(plan_df)

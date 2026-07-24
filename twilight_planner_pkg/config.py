@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import warnings
-from math import inf
+from math import inf, isfinite
 from typing import Any, Dict, List, Literal, Optional, Tuple, Callable
 
 
@@ -38,6 +38,14 @@ class PlannerConfig:
     min_alt_deg: float = 30.0
     twilight_sun_alt_min_deg: float = -18.0
     twilight_sun_alt_max_deg: float = 0.0
+    min_sun_sep_deg: float = 90.0
+    """Hard minimum topocentric Sun--target separation in degrees.
+
+    This is a conservative planner policy, not a published Rubin hardware
+    safety limit.  It keeps ordinary SN twilight observations away from the
+    bright near-Sun region; specialized near-Sun surveys must opt into a
+    smaller value explicitly.
+    """
 
     # -- Filters and hardware ---------------------------------------------
     filters: List[str] = field(default_factory=lambda: ["g", "r", "i", "z", "y"])
@@ -81,15 +89,14 @@ class PlannerConfig:
     # or returns an invalid band, the scheduler falls back to the default
     # policy.
     pick_first_filter: Optional[Callable[..., Optional[str]]] = None
-    # Default Sun-altitude policy across astronomical twilight.
-    # low < h_sun <= high → allowed filters (ordered list)
-    # Matches tests expecting:
-    #   -16 → ["y","z","i"], -13 → ["z","i","r"], -5 → ["i","z","y"]
+    # Hard Sun-altitude policy across astronomical twilight.
+    # low < h_sun <= high → allowed filters. The default leaves all Rubin
+    # bands available and lets the geometry-aware m5/SNR calculation determine
+    # feasibility; Sun-altitude-dependent filter ordering still prefers redder
+    # bands in bright twilight. Users may configure narrower operational bans.
     sun_alt_policy: List[Tuple[float, float, List[str]]] = field(
         default_factory=lambda: [
-            (-18.0, -15.0, ["y", "z", "i"]),
-            (-15.0, -12.0, ["z", "i", "r"]),
-            (-12.0, 0.0, ["i", "z", "y"]),
+            (-18.0, 0.0, ["u", "g", "r", "i", "z", "y"]),
         ]
     )
     # Exposure overrides per Sun-altitude range; later entries take precedence
@@ -108,6 +115,21 @@ class PlannerConfig:
     slew_small_time_s: float = 4.0
     slew_rate_deg_per_s: float = 5.25
     slew_settle_s: float = 1.0
+
+    # -- Dome motion ------------------------------------------------------
+    # The canonical science rerun enables this model explicitly. Defaults use
+    # Rubin's conservative design-minimum dome rates. The strict model
+    # recenters the slit for every target and does not credit predictive dome
+    # crawling during the preceding exposure.
+    dome_motion_enabled: bool = False
+    dome_motion_model: Literal["strict_recenter"] = "strict_recenter"
+    dome_azimuth_max_speed_deg_per_s: float = 1.50
+    dome_azimuth_accel_deg_per_s2: float = 0.75
+    dome_azimuth_jerk_deg_per_s3: float = 3.00
+    dome_elevation_max_speed_deg_per_s: float = 1.75
+    dome_elevation_accel_deg_per_s2: float = 0.875
+    dome_elevation_jerk_deg_per_s3: float = 3.50
+    dome_azimuth_settle_s: float = 1.0
 
     # -- Moon --------------------------------------------------------------
     min_moon_sep_by_filter: Dict[str, float] = field(
@@ -479,6 +501,33 @@ class PlannerConfig:
             raise TypeError("filters_per_visit_cap must be coercible to int") from exc
         if self.filters_per_visit_cap < 1:
             raise ValueError("filters_per_visit_cap must be >= 1")
+        try:
+            self.min_sun_sep_deg = float(self.min_sun_sep_deg)
+        except Exception as exc:
+            raise TypeError("min_sun_sep_deg must be coercible to float") from exc
+        if not 0.0 <= self.min_sun_sep_deg <= 180.0:
+            raise ValueError("min_sun_sep_deg must be within [0, 180] degrees")
+        if self.dome_motion_model != "strict_recenter":
+            raise ValueError("Only dome_motion_model='strict_recenter' is supported")
+        dome_positive_fields = (
+            "dome_azimuth_max_speed_deg_per_s",
+            "dome_azimuth_accel_deg_per_s2",
+            "dome_azimuth_jerk_deg_per_s3",
+            "dome_elevation_max_speed_deg_per_s",
+            "dome_elevation_accel_deg_per_s2",
+            "dome_elevation_jerk_deg_per_s3",
+        )
+        for field_name in dome_positive_fields:
+            value = float(getattr(self, field_name))
+            if not isfinite(value) or value <= 0.0:
+                raise ValueError(f"{field_name} must be finite and > 0")
+            setattr(self, field_name, value)
+        self.dome_azimuth_settle_s = float(self.dome_azimuth_settle_s)
+        if (
+            not isfinite(self.dome_azimuth_settle_s)
+            or self.dome_azimuth_settle_s < 0.0
+        ):
+            raise ValueError("dome_azimuth_settle_s must be finite and >= 0")
 
         def _norm_filter_name(value: Any) -> str | None:
             """Return a canonical, lowercase filter name or ``None`` if invalid."""

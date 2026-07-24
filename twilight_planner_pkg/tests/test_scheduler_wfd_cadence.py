@@ -44,8 +44,19 @@ def test_scheduler_respects_future_wfd_gate(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", lambda *args, **kwargs: 0.0)
     monkeypatch.setattr(
         scheduler,
+        "sun_target_geometry",
+        lambda *a, **k: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *a, **k: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *a, **k: 30.0
+    )
+    monkeypatch.setattr(
+        scheduler,
         "RubinSkyProvider",
-        lambda: scheduler.SimpleSkyProvider(scheduler.SkyModelConfig()),
+        lambda *a, **k: scheduler.SimpleSkyProvider(scheduler.SkyModelConfig()),
     )
 
     csv_path = tmp_path / "catalog.csv"

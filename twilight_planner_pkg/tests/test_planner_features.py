@@ -144,6 +144,22 @@ def test_window_cap_skips_last(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)
+    monkeypatch.setattr(
+        scheduler,
+        "sun_target_geometry",
+        lambda *args, **kwargs: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *args, **kwargs: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "allowed_filters_for_sun_alt",
+        lambda *args, **kwargs: list(cfg.filters),
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *args, **kwargs: 30.0
+    )
 
     pernight, nights = plan_twilight_range_with_caps(
         str(csv), tmp_path, "2024-01-01", "2024-01-01", cfg, verbose=False

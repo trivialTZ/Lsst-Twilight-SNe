@@ -61,6 +61,17 @@ def _patch_scheduler(monkeypatch, allowed_filters):
     monkeypatch.setattr(scheduler, "pick_first_filter_for_target", mock_pick_first)
     monkeypatch.setattr(
         scheduler,
+        "sun_target_geometry",
+        lambda *a, **k: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *a, **k: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *a, **k: 30.0
+    )
+    monkeypatch.setattr(
+        scheduler,
         "RubinSkyProvider",
         lambda *a, **k: (_ for _ in ()).throw(Exception("no rubin_sim")),
     )

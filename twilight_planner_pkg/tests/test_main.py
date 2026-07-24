@@ -20,6 +20,12 @@ def test_build_parser_required_args_present():
         assert actions[name].required is True
 
 
+def test_build_parser_has_conservative_sun_separation_default():
+    parser = build_parser()
+    action = next(a for a in parser._actions if a.dest == "min_sun_sep")
+    assert action.default == 90.0
+
+
 def test_parse_exp_map_valid_and_empty():
     assert parse_exp_map("g:5,r:10") == {"g": 5.0, "r": 10.0}
     assert parse_exp_map("") == {}

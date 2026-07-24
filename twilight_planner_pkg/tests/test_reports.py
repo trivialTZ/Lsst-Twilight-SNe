@@ -19,6 +19,8 @@ def make_plan_df():
             "slew_s": [1.0, 1.0, 1.0],
             "airmass": [1.1, 1.2, 1.3],
             "moon_sep": [40.0, 50.0, 60.0],
+            "sun_sep_deg": [75.0, 80.0, 100.0],
+            "sun_sep_end_deg": [74.0, 81.0, 101.0],
         }
     )
 
@@ -31,5 +33,7 @@ def test_summarize_night_basic(tmp_path, monkeypatch):
     m = summarize_night(plan, twilight=600, outdir=str(out_dir))
     assert 0.0 <= m["science_efficiency"] <= 1.0
     assert m["color_completeness_frac"] >= 0.5
+    assert m["min_sun_sep_deg"] == 74.0
+    assert m["median_sun_sep_deg"] == 80.5
     csv_path = out_dir / "nightly_metrics.csv"
     assert csv_path.exists()

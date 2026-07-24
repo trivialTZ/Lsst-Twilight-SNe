@@ -62,6 +62,17 @@ def test_scheduler_unique_first_no_repeats(tmp_path, monkeypatch) -> None:
         mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    monkeypatch.setattr(
+        scheduler,
+        "sun_target_geometry",
+        lambda *a, **k: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *a, **k: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *a, **k: 30.0
+    )
 
     cfg = PlannerConfig(
         filters=["i"],
@@ -124,6 +135,17 @@ def test_scheduler_unique_first_filters_after_detection(tmp_path, monkeypatch) -
         mock_twilight_windows_for_local_night,
     )
     monkeypatch.setattr(scheduler, "_best_time_with_moon", mock_best_time_with_moon)
+    monkeypatch.setattr(
+        scheduler,
+        "sun_target_geometry",
+        lambda *a, **k: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *a, **k: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *a, **k: 30.0
+    )
 
     cfg = PlannerConfig(
         filters=["i"],

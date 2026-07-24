@@ -201,6 +201,16 @@ def _build_window_summary_row(
     sun_alt_mid = _mid_sun_alt_of_window(win, site)
     policy_filters_mid_csv = ",".join(_policy_filters_mid(sun_alt_mid, cfg))
     alts = [r["alt_deg"] for r in pernight_rows_for_window]
+    sun_seps = []
+    for r in pernight_rows_for_window:
+        for key in ("sun_sep_deg", "sun_sep_end_deg"):
+            if pd.notna(r.get(key)):
+                sun_seps.append(float(r[key]))
+    sun_az_rels = [
+        float(r["sun_az_rel_deg"])
+        for r in pernight_rows_for_window
+        if pd.notna(r.get("sun_az_rel_deg"))
+    ]
     guard_s_total = float(sum(r.get("guard_s", 0.0) for r in pernight_rows_for_window))
     guard_count = int(sum(1 for r in pernight_rows_for_window if r.get("inter_exposure_guard_enforced")))
     ids = [r.get("SN") for r in pernight_rows_for_window if r.get("SN") is not None]
@@ -261,6 +271,16 @@ def _build_window_summary_row(
         "window_duration_s": int(dur_s),
         "window_mid_utc": mid_utc,
         "sun_alt_mid_deg": round(sun_alt_mid, 2),
+        "sun_sep_policy_deg": float(getattr(cfg, "min_sun_sep_deg", 90.0)),
+        "min_sun_sep_deg_observed": (
+            float(np.min(sun_seps)) if sun_seps else np.nan
+        ),
+        "median_sun_sep_deg": (
+            float(np.median(sun_seps)) if sun_seps else np.nan
+        ),
+        "median_sun_az_rel_deg": (
+            float(np.median(sun_az_rels)) if sun_az_rels else np.nan
+        ),
         "policy_filters_mid_csv": policy_filters_mid_csv,
         "window_utilization": round(ws_summary["window_sum"] / max(1.0, dur_s), 4),
         "cap_utilization": round(ws_summary["window_sum"] / max(1.0, cap_s), 4),

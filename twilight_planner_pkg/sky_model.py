@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import TYPE_CHECKING, Optional, Protocol
 
 from astropy.coordinates import AltAz, EarthLocation, get_sun
 from astropy.time import Time
@@ -12,6 +12,9 @@ from astropy.time import Time
 
 
 from .astro_utils import airmass_from_alt_deg
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 DEFAULT_DARK_SKY_MAG = {
@@ -23,12 +26,38 @@ DEFAULT_DARK_SKY_MAG = {
     "y": 18.60,
 }
 
+
+# Rubin ``TwilightInterp`` coefficients after interpolation onto the LSST
+# effective wavelengths. Each tuple is:
+#   (twilight/dark flux ratio at Sun altitude -12 deg,
+#    solar-altitude slope per radian,
+#    airmass flux exponent,
+#    Sun-facing azimuth flux exponent).
+# These reproduce the functional coefficients shipped in rubin_sim 2.6.1.
+# Rubin notes that z/y are provisional extrapolations of the empirical fits.
+RUBIN_TWILIGHT_PARAMS = {
+    "u": (16.000000, 22.962212, 0.285863, 0.299903),
+    "g": (6.846105, 23.005221, 0.288207, 0.302541),
+    "r": (1.841221, 22.068044, 0.298340, 0.330527),
+    "i": (2.263650, 22.782541, 0.298616, 0.318993),
+    "z": (2.290000, 24.080000, 0.300000, 0.300000),
+    "y": (2.000000, 24.080000, 0.300000, 0.300000),
+}
+
+# Rubin's empirical fit used data only through this solar altitude. The
+# upstream implementation permits brighter twilight but emits an extrapolation
+# warning, so schedules retain an explicit provenance flag above this limit.
+TWILIGHT_FIT_MAX_SUN_ALT_DEG = -11.0
+
+
 @dataclass
 class SkyModelConfig:
     """Settings controlling simple sky-brightness estimates."""
 
     dark_sky_mag: dict | None = None
     twilight_delta_mag: float = 2.5
+    twilight_airmass_coeff: float | None = None
+    twilight_sunward_azimuth_coeff: float | None = None
     use_override: bool = False
     override_mag: Optional[float] = None
 
@@ -63,6 +92,8 @@ def sky_mag_arcsec2(
     moon_sep_deg: float | None = None,
     airmass: float = 1.0,
     *,
+    sun_sep_deg: float | None = None,
+    sun_az_rel_deg: float | None = None,
     k_band: float = 0.2,
 ) -> float:
     """Return sky brightness for a band in mag/arcsec².
@@ -74,11 +105,20 @@ def sky_mag_arcsec2(
     cfg
         Configuration controlling dark-sky reference magnitudes.
     sun_alt_deg
-        Altitude of the Sun in degrees.  If provided the sky brightness is
-        brightened when the Sun is above astronomical twilight using a simple
-        linear model following Tyson & Gal (1993).  Negative values denote the
-        Sun below the horizon.  ``None`` falls back to the fixed
-        ``twilight_delta_mag`` offset used historically.
+        Altitude of the Sun in degrees. If provided, scattered-sunlight flux
+        follows Rubin's empirical ``TwilightInterp`` equation. Negative values
+        denote the Sun below the horizon. Values above -11 degrees extrapolate
+        beyond the data used for the Rubin fit. ``None`` falls back to the
+        fixed ``twilight_delta_mag`` offset used historically.
+    sun_sep_deg
+        Topocentric target--Sun separation in degrees. It is carried alongside
+        the sky estimate for consistent geometry, but the empirical twilight
+        brightness term uses Sun-relative azimuth and target airmass.
+    sun_az_rel_deg
+        Absolute target azimuth relative to the Sun in degrees. Zero points
+        toward the Sun and 180 points toward the anti-Sun. When supplied, the
+        fallback follows the geometry of Rubin's ``twilight_func`` by making
+        the high-airmass Sun-facing hemisphere brighter.
 
     Returns
     -------
@@ -89,26 +129,57 @@ def sky_mag_arcsec2(
     if cfg.use_override and cfg.override_mag is not None:
         return cfg.override_mag
 
+    band = str(band).strip().lower()
     base = float(cfg.dark_sky_mag.get(band, DEFAULT_DARK_SKY_MAG.get(band, 21.0)))
+
+    # Conventional zero-point for surface-brightness conversions:
+    #   mu [mag/arcsec^2] = 26.33 - 2.5 log10(B).
+    # Only relative fluxes matter when adding twilight and moonlight.
+    SB_ZP = 26.33
+    flux_dark = 10 ** (-0.4 * (base - SB_ZP))
     if sun_alt_deg is None:
-        mu_twilight = base - cfg.twilight_delta_mag
+        flux_background = flux_dark * 10 ** (0.4 * float(cfg.twilight_delta_mag))
     else:
         sun_alt = float(sun_alt_deg)
-        if sun_alt <= -18.0:
-            mu_twilight = base
-        else:
-            alt = min(sun_alt, 0.0)
-            factors = {"g": 0.35, "r": 0.30, "i": 0.15, "z": 0.10, "y": 0.05}
-            penalty = (alt + 18.0) * factors.get(band, 0.2)
-            mu_twilight = base - penalty
+        alt = min(sun_alt, 0.0)
+        ratio_at_minus12, slope_per_radian, am_fit, az_fit = (
+            RUBIN_TWILIGHT_PARAMS.get(band, (2.0, 23.0, 0.30, 0.30))
+        )
+        try:
+            X_twilight = float(airmass)
+        except Exception:
+            X_twilight = 1.0
+        if not math.isfinite(X_twilight):
+            X_twilight = 1.0
+        X_twilight = min(max(X_twilight, 1.0), 3.0)
+        x_minus_one = X_twilight - 1.0
 
-    # Convert twilight sky brightness to flux-like units. Use a conventional
-    # zero-point for surface-brightness conversions:
-    #   mu [mag/arcsec^2] ≈ 26.33 - 2.5 log10(B)
-    # Hence B ∝ 10^(-0.4*(mu - 26.33)). The absolute scale cancels when
-    # adding moonlight and converting back to mag/arcsec^2.
-    SB_ZP = 26.33
-    flux_twilight = 10 ** (-0.4 * (mu_twilight - SB_ZP))
+        am_coeff = (
+            float(cfg.twilight_airmass_coeff)
+            if cfg.twilight_airmass_coeff is not None
+            else am_fit
+        )
+        az_coeff = (
+            float(cfg.twilight_sunward_azimuth_coeff)
+            if cfg.twilight_sunward_azimuth_coeff is not None
+            else az_fit
+        )
+        exponent = slope_per_radian * math.radians(alt + 12.0)
+        exponent += am_coeff * x_minus_one
+        if sun_az_rel_deg is not None:
+            az_rel = abs(float(sun_az_rel_deg)) % 360.0
+            if az_rel > 180.0:
+                az_rel = 360.0 - az_rel
+            sunward_cos = max(0.0, math.cos(math.radians(az_rel)))
+            exponent += az_coeff * sunward_cos * x_minus_one
+
+        # Rubin models the twilight component in flux. Add it to the
+        # configured dark-sky flux rather than linearly subtracting
+        # magnitudes; this naturally converges to dark sky in deep
+        # twilight and follows the measured ~1 mag/deg bright-twilight
+        # slope.
+        twilight_to_dark = ratio_at_minus12 * 10**exponent
+        flux_background = flux_dark * (1.0 + twilight_to_dark)
 
     # Moon contribution (Krisciunas & Schaefer 1991). Falls back to 0 if inputs
     # are missing or the Moon is below the horizon.
@@ -145,7 +216,7 @@ def sky_mag_arcsec2(
         flux_moon = f * I_star * 10 ** (-0.4 * k * X_moon) * (
             1.0 - 10 ** (-0.4 * k * X_target)
         )
-    flux_total = flux_twilight + max(0.0, flux_moon)
+    flux_total = flux_background + max(0.0, flux_moon)
     return -2.5 * math.log10(max(1e-9, flux_total)) + SB_ZP
 
 
@@ -200,7 +271,8 @@ class SimpleSkyProvider:
                 airmass=airmass,
             )
 
-        # Full geometry at (RA,Dec,MJD): include Moon altitude, separation and phase
+        # Full geometry at (RA,Dec,MJD): include Sun direction plus Moon
+        # altitude, separation, and phase.
         import numpy as np
         from astropy.coordinates import get_body, SkyCoord
         import astropy.units as u
@@ -213,6 +285,16 @@ class SimpleSkyProvider:
         moon_altaz = get_body("moon", t).transform_to(altaz)
 
         sun_alt_deg = float(sun_altaz.alt.deg)
+        sun_sep_deg = float(sun_altaz.separation(tgt_altaz).deg)
+        sun_az_rel_deg = abs(
+            (
+                float(tgt_altaz.az.deg)
+                - float(sun_altaz.az.deg)
+                + 180.0
+            )
+            % 360.0
+            - 180.0
+        )
         moon_alt_deg = float(moon_altaz.alt.deg)
         moon_sep_deg = float(moon_altaz.separation(tgt_altaz).deg)
         # Fractional illumination in [0,1] from Sun–Moon angle
@@ -230,6 +312,8 @@ class SimpleSkyProvider:
             band,
             self.cfg,
             sun_alt_deg=sun_alt_deg,
+            sun_sep_deg=sun_sep_deg,
+            sun_az_rel_deg=sun_az_rel_deg,
             moon_alt_deg=moon_alt_deg,
             moon_phase=phase,
             moon_sep_deg=moon_sep_deg,
@@ -259,7 +343,13 @@ class RubinSkyProvider:
     the first element of each array.
     """
 
-    def __init__(self, site: EarthLocation | None = None, *, strict: bool = False):
+    def __init__(
+        self,
+        site: EarthLocation | None = None,
+        *,
+        strict: bool = False,
+        fallback_cfg: SkyModelConfig | None = None,
+    ):
         import rubin_sim.skybrightness as sb
 
         # Try a few constructor signatures observed across versions.
@@ -281,6 +371,9 @@ class RubinSkyProvider:
             raise errors[0]
         self.site = site
         self.strict = strict
+        self.fallback_provider = SimpleSkyProvider(
+            fallback_cfg or SkyModelConfig(), site=site
+        )
         # Twilight parametric range (deg) and airmass bounds used for clamping.
         self.sun_alt_min_deg: float = -20.0
         self.sun_alt_max_deg: float = 15.0
@@ -425,13 +518,20 @@ class RubinSkyProvider:
                 try:
                     arr = getattr(mags, band)
                 except Exception:
-                    return DEFAULT_DARK_SKY_MAG.get(band, 21.0)
+                    if self.strict:
+                        raise
+                    return self.fallback_provider.sky_mag(
+                        mjd, ra_deg, dec_deg, band, X
+                    )
             return float(np.asarray(arr).ravel()[0])
         except Exception:
-            # strict=True surfaces the error; otherwise fall back to a reasonable value.
+            # Fail over to the geometry-aware model. Returning a dark-sky
+            # constant here would be dangerously optimistic during twilight.
             if self.strict:
                 raise
-            return DEFAULT_DARK_SKY_MAG.get(band, 21.0)
+            return self.fallback_provider.sky_mag(
+                mjd, ra_deg, dec_deg, band, X
+            )
         finally:
             try:
                 _catch.__exit__(None, None, None)

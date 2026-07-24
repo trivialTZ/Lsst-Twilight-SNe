@@ -226,6 +226,8 @@ def _cached_sky_mag(
     mjd: float,
     minutes: int = 1,
     sun_alt_deg: float | None = None,
+    sun_sep_deg: float | None = None,
+    sun_az_rel_deg: float | None = None,
     moon_alt_deg: float | None = None,
     moon_phase: float | None = None,
     moon_sep_deg: float | None = None,
@@ -266,6 +268,8 @@ def _cached_sky_mag(
                 band,
                 sky_cfg,
                 sun_alt_deg=sun_alt_deg,
+                sun_sep_deg=sun_sep_deg,
+                sun_az_rel_deg=sun_az_rel_deg,
                 moon_alt_deg=moon_alt_deg,
                 moon_phase=moon_phase,
                 moon_sep_deg=moon_sep_deg,
@@ -391,6 +395,8 @@ def _cached_m5_at_time(
     t_vis = float(cfg.exposure_by_filter.get(filt, 30.0))
 
     sun_alt = _finite_or_none(target.get("sun_alt_policy"))
+    sun_sep = _finite_or_none(target.get("sun_sep"))
+    sun_az_rel = _finite_or_none(target.get("sun_az_rel"))
     moon_alt = _finite_or_none(target.get("moon_alt"))
     moon_phase = _finite_or_none(target.get("moon_phase"))
     moon_sep = _finite_or_none(target.get("moon_sep"))
@@ -405,6 +411,8 @@ def _cached_m5_at_time(
         mjd=mjd,
         minutes=minutes,
         sun_alt_deg=sun_alt,
+        sun_sep_deg=sun_sep,
+        sun_az_rel_deg=sun_az_rel,
         moon_alt_deg=moon_alt,
         moon_phase=moon_phase,
         moon_sep_deg=moon_sep,

@@ -106,6 +106,7 @@ def test_plan_twilight_range_basic(tmp_path, monkeypatch):
         min_moon_sep_by_filter={"g": 0.0, "r": 0.0},
         require_single_time_for_all_filters=False,
         min_alt_deg=0.0,
+        min_sun_sep_deg=0.0,
         twilight_step_min=1,
         allow_filter_changes_in_twilight=True,
     )
@@ -462,6 +463,7 @@ def test_exposure_ladder_applied(tmp_path, monkeypatch):
         min_moon_sep_by_filter={"r": 0.0},
         require_single_time_for_all_filters=False,
         min_alt_deg=0.0,
+        min_sun_sep_deg=0.0,
         twilight_step_min=1,
         allow_filter_changes_in_twilight=True,
         sun_alt_exposure_ladder=[(-12.0, -8.0, {"r": 5.0})],
@@ -798,6 +800,20 @@ def test_swap_cap_zero_blocks_changes(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduler, "great_circle_sep_deg", mock_sep)
     monkeypatch.setattr(scheduler, "allowed_filters_for_window", mock_allowed_filters)
     monkeypatch.setattr(scheduler, "pick_first_filter_for_target", mock_pick_first)
+    monkeypatch.setattr(
+        scheduler,
+        "sun_target_geometry",
+        lambda *args, **kwargs: (-10.0, 120.0, 180.0),
+    )
+    monkeypatch.setattr(
+        scheduler, "get_sun_alt_deg_cached", lambda *args, **kwargs: -10.0
+    )
+    monkeypatch.setattr(
+        scheduler, "allowed_filters_for_sun_alt", lambda alt, cfg: list(cfg.filters)
+    )
+    monkeypatch.setattr(
+        scheduler, "_cached_m5_at_time", lambda *args, **kwargs: 30.0
+    )
 
     pernight, nights = plan_twilight_range_with_caps(
         str(csv), str(tmp_path), "2024-01-01", "2024-01-01", cfg, verbose=False

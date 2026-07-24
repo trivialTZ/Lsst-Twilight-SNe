@@ -40,6 +40,13 @@ except Exception:
 from .config import PlannerConfig
 from .constraints import moon_separation_factor
 
+try:
+    from rubin_scheduler.scheduler.model_observatory.jerk import (
+        jerk_time as _rubin_jerk_time,
+    )
+except Exception:  # pragma: no cover - exercised only without Rubin scheduler
+    _rubin_jerk_time = None
+
 if TYPE_CHECKING:
     from .priority import PriorityTracker
 
@@ -340,14 +347,56 @@ def great_circle_sep_deg(ra1, dec1, ra2, dec2) -> float:
     return float(np.rad2deg(2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))))
 
 
+def sun_target_geometry(
+    sc: SkyCoord,
+    obstime: Time | datetime,
+    loc: EarthLocation,
+) -> tuple[float, float, float]:
+    """Return topocentric Sun geometry for one target.
+
+    Parameters
+    ----------
+    sc
+        Target coordinate. It is transformed into the same topocentric
+        :class:`~astropy.coordinates.AltAz` frame as the Sun.
+    obstime
+        UTC observation time as an Astropy ``Time`` or timezone-aware
+        ``datetime``.
+    loc
+        Observatory location.
+
+    Returns
+    -------
+    sun_alt_deg, sun_sep_deg, sun_az_rel_deg
+        Sun altitude, target--Sun great-circle separation, and absolute
+        target azimuth relative to the Sun, all in degrees. The relative
+        azimuth is folded into ``[0, 180]``.
+    """
+
+    time = obstime if isinstance(obstime, Time) else Time(obstime)
+    frame = AltAz(obstime=time, location=loc)
+    target_altaz = sc.transform_to(frame)
+    sun_altaz = get_sun(time).transform_to(frame)
+    sun_alt_deg = float(sun_altaz.alt.to_value(u.deg))
+    sun_sep_deg = float(target_altaz.separation(sun_altaz).to_value(u.deg))
+    az_delta = (
+        float(target_altaz.az.to_value(u.deg))
+        - float(sun_altaz.az.to_value(u.deg))
+        + 180.0
+    ) % 360.0 - 180.0
+    return sun_alt_deg, sun_sep_deg, abs(float(az_delta))
+
+
 def allowed_filters_for_sun_alt(sun_alt_deg: float, cfg: PlannerConfig) -> List[str]:
     """Return filters permitted for a given Sun altitude.
 
     The mapping is defined by :attr:`PlannerConfig.sun_alt_policy`, a list of
     ``(low, high, filters)`` tuples.  The first tuple with ``low < sun_alt_deg
     <= high`` is selected.  The result is intersected with ``cfg.filters`` so
-    that only loaded carousel filters are returned.  If no policy applies, all
-    configured filters are allowed.
+    that only loaded carousel filters are returned. If a non-empty policy has
+    no matching interval, no filters are returned. This fail-closed behavior
+    keeps manual window overrides and policy gaps from silently bypassing the
+    Sun-altitude constraint.
     """
 
     allowed: List[str] | None = None
@@ -356,7 +405,7 @@ def allowed_filters_for_sun_alt(sun_alt_deg: float, cfg: PlannerConfig) -> List[
             allowed = list(flist)
             break
     if allowed is None:
-        allowed = list(cfg.filters)
+        allowed = [] if cfg.sun_alt_policy else list(cfg.filters)
     return [f for f in allowed if f in cfg.filters]
 
 
@@ -591,6 +640,77 @@ def slew_time_seconds(
     else:
         t = small_time + (sep_deg - small_deg) / max(rate_deg_per_s, 1e-3)
     return t + settle_s
+
+
+def dome_motion_seconds(
+    start_alt_deg: float,
+    start_az_deg: float,
+    end_alt_deg: float,
+    end_az_deg: float,
+    cfg: PlannerConfig,
+) -> dict[str, float | bool | str]:
+    """Return conservative Rubin dome motion diagnostics for one target change.
+
+    The altitude and shortest-path azimuth axes move in parallel. Each axis
+    uses Rubin scheduler's jerk-limited motion profile with the design-minimum
+    rates stored in :class:`PlannerConfig`. The strict-recenter model adds the
+    Rubin scheduler's one-second azimuth settle and intentionally does not
+    credit predictive dome crawling.
+    """
+
+    disabled = {
+        "enabled": False,
+        "model": str(getattr(cfg, "dome_motion_model", "strict_recenter")),
+        "azimuth_delta_deg": 0.0,
+        "elevation_delta_deg": 0.0,
+        "azimuth_time_s": 0.0,
+        "elevation_time_s": 0.0,
+        "total_time_s": 0.0,
+    }
+    if not bool(getattr(cfg, "dome_motion_enabled", False)):
+        return disabled
+    if str(getattr(cfg, "dome_motion_model", "strict_recenter")) != "strict_recenter":
+        raise ValueError("Only dome_motion_model='strict_recenter' is supported")
+    values = [start_alt_deg, start_az_deg, end_alt_deg, end_az_deg]
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("Dome motion requires finite start/end altitude and azimuth")
+    if _rubin_jerk_time is None:
+        raise RuntimeError(
+            "rubin_scheduler is required when dome_motion_enabled=True"
+        )
+
+    az_delta = abs(
+        ((float(end_az_deg) - float(start_az_deg) + 180.0) % 360.0) - 180.0
+    )
+    el_delta = abs(float(end_alt_deg) - float(start_alt_deg))
+    az_time = float(
+        _rubin_jerk_time(
+            az_delta,
+            float(cfg.dome_azimuth_max_speed_deg_per_s),
+            float(cfg.dome_azimuth_accel_deg_per_s2),
+            float(cfg.dome_azimuth_jerk_deg_per_s3),
+        )[0]
+    )
+    el_time = float(
+        _rubin_jerk_time(
+            el_delta,
+            float(cfg.dome_elevation_max_speed_deg_per_s),
+            float(cfg.dome_elevation_accel_deg_per_s2),
+            float(cfg.dome_elevation_jerk_deg_per_s3),
+        )[0]
+    )
+    if az_delta > 0.0:
+        az_time += max(0.0, float(cfg.dome_azimuth_settle_s))
+
+    return {
+        "enabled": True,
+        "model": "strict_recenter",
+        "azimuth_delta_deg": az_delta,
+        "elevation_delta_deg": el_delta,
+        "azimuth_time_s": az_time,
+        "elevation_time_s": el_time,
+        "total_time_s": max(az_time, el_time),
+    }
 
 
 def per_sn_time_seconds(filters: Sequence[str], sep_deg: float, cfg: PlannerConfig):
@@ -881,6 +1001,7 @@ def choose_filters_with_cap(
     filters_per_visit_cap: int | None = None,
     max_filters_per_visit: int | None = None,
     use_capped_exposure: bool = True,
+    dome_slew_s: float = 0.0,
 ) -> tuple[list[str], dict]:
     """Greedily choose filters that fit within ``cap_s`` seconds.
 
@@ -904,13 +1025,15 @@ def choose_filters_with_cap(
             getattr(cfg, "filters_per_visit_cap", getattr(cfg, "max_filters_per_visit", 1))
         )
     max_filters = max(1, int(filters_per_visit_cap))
-    slew = slew_time_seconds(
+    telescope_slew = slew_time_seconds(
         sep_deg,
         small_deg=cfg.slew_small_deg,
         small_time=cfg.slew_small_time_s,
         rate_deg_per_s=cfg.slew_rate_deg_per_s,
         settle_s=cfg.slew_settle_s,
     )
+    dome_slew = max(0.0, float(dome_slew_s))
+    slew = max(telescope_slew, dome_slew)
 
     used: list[str] = []
     exp_times: dict[str, float] = {}
@@ -970,6 +1093,9 @@ def choose_filters_with_cap(
     timing = {
         "total_s": total,
         "slew_s": slew,
+        "telescope_slew_s": telescope_slew,
+        "dome_slew_s": dome_slew,
+        "dome_limited": bool(dome_slew > telescope_slew),
         "cross_filter_change_s": cross_change,
         "internal_filter_changes_s": internal_changes,
         "filter_changes_s": cross_change + internal_changes,
@@ -980,6 +1106,47 @@ def choose_filters_with_cap(
         "flags_by_filter": flags_by_filter,
     }
     return used, timing
+
+
+def exposure_midpoint_offsets_s(
+    filters_used: Sequence[str],
+    timing: dict,
+    cfg: PlannerConfig,
+) -> Dict[str, float]:
+    """Return each exposure midpoint offset from the serialized block start.
+
+    The offsets follow the same timing decomposition used by the scheduler:
+    the first shutter opening follows the slew/readout overlap, any cross-band
+    change, and the first guard; subsequent exposures follow their predecessor,
+    an internal band change, and the per-gap guard. This matters in bright
+    twilight, where the sky can change appreciably during a 120 s band change.
+    """
+
+    filters = list(filters_used)
+    if not filters:
+        return {}
+
+    exp_times = timing.get("exp_times", {})
+    cursor_s = (
+        max(float(timing.get("slew_s", 0.0)), float(cfg.readout_s))
+        + float(timing.get("cross_filter_change_s", 0.0))
+        + float(timing.get("guard_first_s", 0.0))
+    )
+    n_internal = max(0, len(filters) - 1)
+    guard_internal_per = (
+        float(timing.get("guard_internal_s", 0.0)) / n_internal
+        if n_internal
+        else 0.0
+    )
+
+    offsets: Dict[str, float] = {}
+    for index, filt in enumerate(filters):
+        exp_s = float(exp_times.get(filt, cfg.exposure_by_filter.get(filt, 0.0)))
+        offsets[filt] = cursor_s + 0.5 * exp_s
+        cursor_s += exp_s
+        if index < len(filters) - 1:
+            cursor_s += float(cfg.filter_change_s) + guard_internal_per
+    return offsets
 
 
 def parse_sn_type_to_window_days(type_str: str, cfg: PlannerConfig) -> int:
@@ -1016,16 +1183,19 @@ def _best_time_with_moon(
     min_alt_deg: float,
     min_moon_sep_deg: float,
     *,
+    min_sun_sep_deg: float = 0.0,
     precomputed: dict | None = None,
 ) -> Tuple[float, datetime | None, float, float, float]:
     """Sample a window and return the best observation time.
 
     Both the target and the Moon are transformed into the same topocentric
     :class:`~astropy.coordinates.AltAz` frame to evaluate the separation.  The
-    separation requirement is scaled by :func:`~twilight_planner_pkg.constraints.moon_separation_factor`,
-    which gradually relaxes the minimum separation when the Moon is low or
-    below the horizon.  The function is vectorised and avoids Astropy's
-    angular-separation warnings by construction.
+    Moon separation requirement is scaled by
+    :func:`~twilight_planner_pkg.constraints.moon_separation_factor`, which
+    gradually relaxes the minimum separation when the Moon is low or below the
+    horizon. ``min_sun_sep_deg`` is an independent, unscaled hard exclusion.
+    The function is vectorised and avoids Astropy's angular-separation warnings
+    by construction.
     """
     t0, t1 = window
     if t1 <= t0:
@@ -1042,12 +1212,16 @@ def _best_time_with_moon(
             "ts": ts,
             "altaz": altaz,
             "moon_altaz": moon_altaz,
+            "sun_altaz": sun_altaz,
             "moon_alt": moon_alt,
             "phase": phase,
         }
     ts = precomputed["ts"]
     altaz = precomputed["altaz"]
     moon_altaz = precomputed["moon_altaz"]
+    sun_altaz = precomputed.get("sun_altaz")
+    if sun_altaz is None:
+        sun_altaz = get_sun(ts).transform_to(altaz)
     moon_alt = precomputed["moon_alt"]
     phase = precomputed["phase"]
 
@@ -1058,6 +1232,9 @@ def _best_time_with_moon(
     factor = moon_separation_factor(moon_alt, phase)
     eff = min_moon_sep_deg * factor
     ok = (alt >= min_alt_deg) & (sep_deg >= eff)
+    if float(min_sun_sep_deg) > 0.0:
+        sun_sep_deg = sc_altaz.separation(sun_altaz).deg
+        ok &= sun_sep_deg >= float(min_sun_sep_deg)
     if not np.any(ok):
         return -np.inf, None, float("nan"), float("nan"), float("nan")
     alt_ok = np.where(ok, alt, -np.inf)
@@ -1095,6 +1272,7 @@ def precompute_window_ephemerides(
         "ts": ts,
         "altaz": altaz,
         "moon_altaz": moon_altaz,
+        "sun_altaz": sun_altaz,
         "moon_alt": moon_alt,
         "phase": phase,
     }

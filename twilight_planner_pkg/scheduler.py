@@ -46,9 +46,12 @@ from .astro_utils import (
     airmass_from_alt_deg,
     choose_filters_with_cap,
     compute_capped_exptime,
+    dome_motion_seconds,
+    exposure_midpoint_offsets_s,
     parse_sn_type_to_window_days,
     precompute_window_ephemerides,
     slew_time_seconds,
+    sun_target_geometry,
 )
 from .config import PlannerConfig
 from .constraints import effective_min_sep
@@ -56,11 +59,12 @@ from .filter_policy import _m5_scale
 from .io_utils import standardize_columns
 from .photom_rubin import PhotomConfig, compute_epoch_photom
 from .priority import PriorityTracker
-from .simlib_writer import SimlibHeader
+from .simlib_writer import SimlibHeader, SimlibWriter
 from .sky_model import (
     RubinSkyProvider,
     SimpleSkyProvider,
     SkyModelConfig,
+    TWILIGHT_FIT_MAX_SUN_ALT_DEG,
     sky_mag_arcsec2,
 )
 from .twilight_sched.caching import (  # noqa: F401
@@ -146,6 +150,7 @@ __all__ = [
     "prune_m5best_by_day",
     "bump_window_token",
     "_opportunity_cost_seconds",
+    "_route_motion_seconds_for_batch",
 ]
 
 # Normalize optional external cadence tables (e.g., WFD SIMLIB visits) so the
@@ -213,6 +218,7 @@ PER_SN_COLUMNS = [
     "Dec_deg",
     "best_twilight_time_utc",
     "visit_start_utc",
+    "exposure_mid_utc",
     "sn_end_utc",
     "filter",
     "t_exp_s",
@@ -220,6 +226,16 @@ PER_SN_COLUMNS = [
     "airmass",
     "alt_deg",
     "sky_mag_arcsec2",
+    "sun_alt_deg",
+    "sun_sep_deg",
+    "sun_az_rel_deg",
+    "sun_alt_end_deg",
+    "sun_sep_end_deg",
+    "sun_az_rel_end_deg",
+    "sun_alt_exposure_mid_deg",
+    "sun_sep_exposure_mid_deg",
+    "sun_az_rel_exposure_mid_deg",
+    "twilight_model_extrapolated",
     "moon_sep",
     "ZPT",
     "ZPTERR",
@@ -237,6 +253,11 @@ PER_SN_COLUMNS = [
     "cadence_target_d",
     "cadence_gate_passed",
     "slew_s",
+    "telescope_slew_s",
+    "dome_slew_s",
+    "dome_limited",
+    "dome_azimuth_delta_deg",
+    "dome_elevation_delta_deg",
     "cross_filter_change_s",
     "filter_changes_s",
     "readout_s",
@@ -245,6 +266,76 @@ PER_SN_COLUMNS = [
     "total_time_s",
     "elapsed_overhead_s",
 ]
+
+
+def _route_motion_seconds_for_batch(
+    prev: Optional[dict],
+    batch: List[dict],
+    current_time_utc: datetime,
+    cfg: PlannerConfig,
+    site: EarthLocation,
+) -> List[float]:
+    """Return effective telescope+dome motion times for route ranking.
+
+    Telescope and dome motion occur in parallel, so each route cost uses the
+    slower component.  The Alt/Az transform is vectorized over the candidate
+    batch because the dome axes have different rate, acceleration, and jerk
+    limits and therefore cannot be represented by sky separation alone.
+    """
+
+    if not batch:
+        return []
+    if prev is None:
+        return [0.0] * len(batch)
+
+    telescope_times = [
+        slew_time_seconds(
+            great_circle_sep_deg(
+                float(prev["RA_deg"]),
+                float(prev["Dec_deg"]),
+                float(target["RA_deg"]),
+                float(target["Dec_deg"]),
+            ),
+            small_deg=cfg.slew_small_deg,
+            small_time=cfg.slew_small_time_s,
+            rate_deg_per_s=cfg.slew_rate_deg_per_s,
+            settle_s=cfg.slew_settle_s,
+        )
+        for target in batch
+    ]
+    if not bool(getattr(cfg, "dome_motion_enabled", False)):
+        return telescope_times
+
+    ra_values = np.asarray(
+        [float(prev["RA_deg"])] + [float(target["RA_deg"]) for target in batch],
+        dtype=float,
+    )
+    dec_values = np.asarray(
+        [float(prev["Dec_deg"])] + [float(target["Dec_deg"]) for target in batch],
+        dtype=float,
+    )
+    frame = AltAz(obstime=Time(current_time_utc), location=site)
+    altaz = SkyCoord(
+        ra=ra_values * u.deg,
+        dec=dec_values * u.deg,
+        frame="icrs",
+    ).transform_to(frame)
+    previous_alt_deg = float(altaz.alt.deg[0])
+    previous_az_deg = float(altaz.az.deg[0])
+
+    effective_times: List[float] = []
+    for idx, telescope_time in enumerate(telescope_times, start=1):
+        dome_motion = dome_motion_seconds(
+            previous_alt_deg,
+            previous_az_deg,
+            float(altaz.alt.deg[idx]),
+            float(altaz.az.deg[idx]),
+            cfg,
+        )
+        effective_times.append(
+            max(float(telescope_time), float(dome_motion["total_time_s"]))
+        )
+    return effective_times
 
 warnings.filterwarnings("ignore", message=".*get_moon.*deprecated.*")
 warnings.filterwarnings(
@@ -527,6 +618,22 @@ def _prepare_window_candidates(
             except Exception:
                 best_time_mjd = None
 
+        try:
+            sun_sep_for_policy = float(row["_sun_sep"])
+            sun_az_rel_for_policy = float(row["_sun_az_rel"])
+        except Exception:
+            # Sun geometry is a hard constraint. Missing/non-numeric values
+            # fail closed rather than silently admitting a target.
+            continue
+        if (
+            not math.isfinite(sun_sep_for_policy)
+            or sun_sep_for_policy
+            < float(getattr(cfg, "min_sun_sep_deg", 90.0))
+        ):
+            continue
+        if not math.isfinite(sun_az_rel_for_policy):
+            continue
+
         ra_val = row.get("RA_deg")
         ra_float = float(ra_val) if pd.notna(ra_val) else None
         dec_val = row.get("Dec_deg")
@@ -544,20 +651,27 @@ def _prepare_window_candidates(
             phot_cfg=phot_cfg,
             sky_provider=sky_provider,
             sky_cfg=sky_cfg,
-            mjd=Time(current_time_utc).mjd,
+            mjd=(
+                best_time_mjd
+                if best_time_mjd is not None
+                else float(Time(current_time_utc).mjd)
+            ),
             ra_deg=ra_float,
             dec_deg=dec_float,
+            sun_sep_deg=sun_sep_for_policy,
+            sun_az_rel_deg=sun_az_rel_for_policy,
             sky_lookup=_cached_sky_mag,
         )
         allowed = [f for f in allowed if f in cfg.filters]
-        # Apply sun-alt policy via monkeypatchable alias; if intersection is empty,
-        # fall back to feasibility-allowed filters to avoid discarding the target.
+        # Sun altitude is a hard policy intersection. An empty intersection
+        # rejects the candidate rather than restoring disallowed filters.
         if getattr(cfg, "sun_alt_policy", None):
             pol = allowed_filters_for_sun_alt(sun_alt_for_policy, cfg)
         else:
             pol = list(cfg.filters)
-        policy_intersection = [f for f in allowed if f in pol]
-        allowed = policy_intersection if policy_intersection else list(allowed)
+        allowed = [f for f in allowed if f in pol]
+        if not allowed:
+            continue
         moon_sep_ok = {
             f: row["_moon_sep"]
             >= effective_min_sep(
@@ -633,6 +747,8 @@ def _prepare_window_candidates(
             "moon_alt": float(row["_moon_alt"]),
             "moon_phase": float(row["_moon_phase"]),
             "sun_alt_policy": float(sun_alt_for_policy),
+            "sun_sep": sun_sep_for_policy,
+            "sun_az_rel": sun_az_rel_for_policy,
             "airmass": float(airmass_from_alt_deg(row["max_alt_deg"])),
         }
         candidates.append(cand)
@@ -707,6 +823,70 @@ def _attempt_schedule_one(
         float(t.get("redshift")) if t.get("redshift") is not None else None
     )
     now_mjd = Time(current_time_utc).mjd
+    try:
+        sc_actual = SkyCoord(
+            float(t["RA_deg"]) * u.deg,
+            float(t["Dec_deg"]) * u.deg,
+            frame="icrs",
+        )
+        actual_time = Time(float(now_mjd), format="mjd", scale="utc")
+        actual_frame = AltAz(obstime=actual_time, location=site)
+        actual_altaz = sc_actual.transform_to(actual_frame)
+        actual_alt_deg = float(actual_altaz.alt.deg)
+        sun_alt_now, sun_sep_now, sun_az_rel_now = sun_target_geometry(
+            sc_actual, actual_time, site
+        )
+    except Exception:
+        return False, {"failure_reason": "sun_geometry_unavailable"}
+    if not (
+        float(cfg.twilight_sun_alt_min_deg)
+        < sun_alt_now
+        < float(cfg.twilight_sun_alt_max_deg)
+    ):
+        return False, {"failure_reason": "sun_altitude_reject"}
+    if sun_sep_now < float(getattr(cfg, "min_sun_sep_deg", 90.0)):
+        return False, {"failure_reason": "sun_separation_reject"}
+    sun_policy_now = (
+        allowed_filters_for_sun_alt(sun_alt_now, cfg)
+        if getattr(cfg, "sun_alt_policy", None)
+        else list(cfg.filters)
+    )
+    if not sun_policy_now:
+        return False, {"failure_reason": "sun_policy_reject"}
+
+    # Serialized visits can be minutes away from the preferred best time.
+    # Recompute sky/depth at the actual visit start and fail closed.
+    cfg.current_alt_deg = actual_alt_deg
+    cfg.current_mjd = float(now_mjd)
+    t["sun_alt_policy"] = float(sun_alt_now)
+    t["sun_sep"] = float(sun_sep_now)
+    t["sun_az_rel"] = float(sun_az_rel_now)
+    actual_policy_allowed: list[str] = []
+    target_mags = mag_lookup.get(t["Name"], {})
+    for filt in t.get("policy_allowed", t.get("allowed", [])):
+        if filt not in sun_policy_now:
+            continue
+        m5_now = _cached_m5_at_time(
+            target=t,
+            filt=filt,
+            cfg=cfg,
+            phot_cfg=phot_cfg,
+            sky_provider=sky_provider,
+            sky_cfg=sky_cfg,
+            mjd=float(now_mjd),
+            minutes=int(getattr(cfg, "primary_m5_minutes", 1) or 1),
+            site=site,
+        )
+        target_mag = target_mags.get(filt, target_mags.get("r", 21.5))
+        if (
+            m5_now is not None
+            and math.isfinite(float(m5_now))
+            and float(m5_now) >= float(target_mag)
+        ):
+            actual_policy_allowed.append(filt)
+    if not actual_policy_allowed:
+        return False, {"failure_reason": "actual_m5_reject"}
+
     # When forced (allow_defer=False upstream), evaluate cadence at the later of
     # current time and the target's preferred best_time_utc so eligible items
     # can be promoted once their window-appropriate time is reached.
@@ -765,11 +945,11 @@ def _attempt_schedule_one(
         #   leftover time near the end of a window/backfill, trading strict
         #   cadence for increased utilization.
         if relax_cadence:
-            gated = list(t["policy_allowed"])  # ignore cadence gate in relaxed mode
+            gated = list(actual_policy_allowed)  # ignore cadence gate in relaxed mode
         else:
             gated = [
                 f
-                for f in t["policy_allowed"]
+                for f in actual_policy_allowed
                 if tracker.cadence_gate(t["Name"], f, now_mjd_for_cad, cad_tgt_eff, cad_jit)
             ]
             if not gated:
@@ -803,8 +983,12 @@ def _attempt_schedule_one(
         rest = [f for f in gated if f != first]
         filters_pref = [first] + rest
     else:
-        first = t["first_filter"]
-        rest = [f for f in t.get("policy_allowed", []) if f != first]
+        first = (
+            t["first_filter"]
+            if t["first_filter"] in actual_policy_allowed
+            else actual_policy_allowed[0]
+        )
+        rest = [f for f in actual_policy_allowed if f != first]
         filters_pref = [first] + rest
     # When single_filter_mode is active we assume the carousel is already at the
     # desired filter for the visit (no cross-filter change at segment entry), so
@@ -812,6 +996,28 @@ def _attempt_schedule_one(
     effective_current_filter = (
         t["first_filter"] if single_filter_mode else state
     )
+    try:
+        if prev is None:
+            previous_alt_deg = actual_alt_deg
+            previous_az_deg = float(actual_altaz.az.deg)
+        else:
+            previous_coord = SkyCoord(
+                float(prev["RA_deg"]) * u.deg,
+                float(prev["Dec_deg"]) * u.deg,
+                frame="icrs",
+            )
+            previous_altaz = previous_coord.transform_to(actual_frame)
+            previous_alt_deg = float(previous_altaz.alt.deg)
+            previous_az_deg = float(previous_altaz.az.deg)
+        dome_motion = dome_motion_seconds(
+            previous_alt_deg,
+            previous_az_deg,
+            actual_alt_deg,
+            float(actual_altaz.az.deg),
+            cfg,
+        )
+    except Exception:
+        return False, {"failure_reason": "dome_motion_unavailable"}
     filters_used, timing = choose_filters_with_cap(
         filters_pref,
         sep,
@@ -819,6 +1025,13 @@ def _attempt_schedule_one(
         cfg,
         current_filter=effective_current_filter,
         filters_per_visit_cap=cap_per_visit,
+        dome_slew_s=float(dome_motion["total_time_s"]),
+    )
+    timing["dome_azimuth_delta_deg"] = float(
+        dome_motion["azimuth_delta_deg"]
+    )
+    timing["dome_elevation_delta_deg"] = float(
+        dome_motion["elevation_delta_deg"]
     )
     if not filters_used:
         return False, {"failure_reason": "no_viable_filter"}
@@ -858,6 +1071,65 @@ def _attempt_schedule_one(
     sn_start_utc = current_time_utc
     sn_end_utc = sn_start_utc + pd.to_timedelta(timing["total_s"], unit="s")
     visit_mjd = Time(sn_start_utc).mjd
+    end_mjd = Time(sn_end_utc).mjd
+
+    # A visit can include a long filter change before the shutter opens.
+    # Recheck the other endpoint so the complete serialized block remains
+    # inside the Sun constraints and photometrically feasible. In morning
+    # twilight this also catches the brighter sky at the end of the block.
+    try:
+        sun_alt_end, sun_sep_end, sun_az_rel_end = sun_target_geometry(
+            sc_actual,
+            Time(float(end_mjd), format="mjd", scale="utc"),
+            site,
+        )
+    except Exception:
+        return False, {"failure_reason": "visit_end_sun_geometry_unavailable"}
+    if not (
+        float(cfg.twilight_sun_alt_min_deg)
+        < sun_alt_end
+        < float(cfg.twilight_sun_alt_max_deg)
+    ):
+        return False, {"failure_reason": "visit_end_sun_altitude_reject"}
+    if sun_sep_end < float(getattr(cfg, "min_sun_sep_deg", 90.0)):
+        return False, {"failure_reason": "visit_end_sun_separation_reject"}
+    sun_policy_end = (
+        allowed_filters_for_sun_alt(sun_alt_end, cfg)
+        if getattr(cfg, "sun_alt_policy", None)
+        else list(cfg.filters)
+    )
+    if any(filt not in sun_policy_end for filt in filters_used):
+        return False, {"failure_reason": "visit_end_sun_policy_reject"}
+
+    t["sun_alt_policy"] = float(sun_alt_end)
+    t["sun_sep"] = float(sun_sep_end)
+    t["sun_az_rel"] = float(sun_az_rel_end)
+    for filt in filters_used:
+        m5_end = _cached_m5_at_time(
+            target=t,
+            filt=filt,
+            cfg=cfg,
+            phot_cfg=phot_cfg,
+            sky_provider=sky_provider,
+            sky_cfg=sky_cfg,
+            mjd=float(end_mjd),
+            minutes=int(getattr(cfg, "primary_m5_minutes", 1) or 1),
+            site=site,
+        )
+        target_mag = target_mags.get(filt, target_mags.get("r", 21.5))
+        if (
+            m5_end is None
+            or not math.isfinite(float(m5_end))
+            or float(m5_end) < float(target_mag)
+        ):
+            return False, {"failure_reason": "visit_end_m5_reject"}
+    t["sun_alt_policy"] = float(sun_alt_now)
+    t["sun_sep"] = float(sun_sep_now)
+    t["sun_az_rel"] = float(sun_az_rel_now)
+    twilight_model_extrapolated = bool(
+        max(float(sun_alt_now), float(sun_alt_end))
+        > TWILIGHT_FIT_MAX_SUN_ALT_DEG
+    )
 
     order = order_in_window + 1
     sequence_row = {
@@ -873,11 +1145,27 @@ def _attempt_schedule_one(
         "sn_end_utc": sn_end_utc.isoformat(),
         "total_time_s": round(timing.get("total_s", 0.0), 2),
         "slew_s": round(timing.get("slew_s", 0.0), 2),
+        "telescope_slew_s": round(timing.get("telescope_slew_s", 0.0), 2),
+        "dome_slew_s": round(timing.get("dome_slew_s", 0.0), 2),
+        "dome_limited": bool(timing.get("dome_limited", False)),
+        "dome_azimuth_delta_deg": round(
+            timing.get("dome_azimuth_delta_deg", 0.0), 3
+        ),
+        "dome_elevation_delta_deg": round(
+            timing.get("dome_elevation_delta_deg", 0.0), 3
+        ),
         "readout_s": round(timing.get("readout_s", 0.0), 2),
         "filter_changes_s": round(timing.get("filter_changes_s", 0.0), 2),
         "cross_filter_change_s": round(timing.get("cross_filter_change_s", 0.0), 2),
         "guard_s": round(timing.get("guard_s", 0.0), 2),
         "elapsed_overhead_s": round(timing.get("elapsed_overhead_s", 0.0), 2),
+        "sun_alt_deg": round(float(sun_alt_now), 3),
+        "sun_sep_deg": round(float(sun_sep_now), 3),
+        "sun_az_rel_deg": round(float(sun_az_rel_now), 3),
+        "sun_alt_end_deg": round(float(sun_alt_end), 3),
+        "sun_sep_end_deg": round(float(sun_sep_end), 3),
+        "sun_az_rel_end_deg": round(float(sun_az_rel_end), 3),
+        "twilight_model_extrapolated": twilight_model_extrapolated,
     }
 
     pernight_rows: list[dict] = []
@@ -886,10 +1174,7 @@ def _attempt_schedule_one(
     air = 0.0
     # Altitude at the actual visit start time
     try:
-        sc_now = SkyCoord(float(t["RA_deg"]) * u.deg, float(t["Dec_deg"]) * u.deg, frame="icrs")
-        alt_now_deg = float(
-            sc_now.transform_to(AltAz(obstime=Time(sn_start_utc), location=site)).alt.deg
-        )
+        alt_now_deg = actual_alt_deg
     except Exception:
         alt_now_deg = float(t.get("max_alt_deg", np.nan))
     air = airmass_from_alt_deg(alt_now_deg)
@@ -898,14 +1183,63 @@ def _attempt_schedule_one(
     cfg.current_ra_deg = float(t["RA_deg"]) if pd.notna(t.get("RA_deg", None)) else None
     cfg.current_dec_deg = float(t["Dec_deg"]) if pd.notna(t.get("Dec_deg", None)) else None
     cfg.current_mjd = visit_mjd
+    exposure_mid_offsets = exposure_midpoint_offsets_s(filters_used, timing, cfg)
     for f in filters_used:
         exp_s = timing.get("exp_times", {}).get(f, cfg.exposure_by_filter.get(f, 0.0))
         flags = timing.get("flags_by_filter", {}).get(f, set())
-        mjd = visit_mjd
+        exposure_mid_utc = sn_start_utc + pd.to_timedelta(
+            exposure_mid_offsets.get(f, 0.5 * float(exp_s)),
+            unit="s",
+        )
+        mjd = float(Time(exposure_mid_utc).mjd)
+        try:
+            exposure_time = Time(float(mjd), format="mjd", scale="utc")
+            exposure_frame = AltAz(obstime=exposure_time, location=site)
+            alt_now_deg = float(sc_actual.transform_to(exposure_frame).alt.deg)
+            sun_alt_mid, sun_sep_mid, sun_az_rel_mid = sun_target_geometry(
+                sc_actual,
+                exposure_time,
+                site,
+            )
+        except Exception:
+            return False, {
+                "failure_reason": "exposure_mid_sun_geometry_unavailable"
+            }
+        if not (
+            float(cfg.twilight_sun_alt_min_deg)
+            < float(sun_alt_mid)
+            < float(cfg.twilight_sun_alt_max_deg)
+        ):
+            return False, {
+                "failure_reason": "exposure_mid_sun_altitude_reject"
+            }
+        if float(sun_sep_mid) < float(
+            getattr(cfg, "min_sun_sep_deg", 90.0)
+        ):
+            return False, {
+                "failure_reason": "exposure_mid_sun_separation_reject"
+            }
+        sun_policy_mid = (
+            allowed_filters_for_sun_alt(float(sun_alt_mid), cfg)
+            if getattr(cfg, "sun_alt_policy", None)
+            else list(cfg.filters)
+        )
+        if f not in sun_policy_mid:
+            return False, {"failure_reason": "exposure_mid_sun_policy_reject"}
+        air = airmass_from_alt_deg(alt_now_deg)
+        cfg.current_alt_deg = alt_now_deg
+        cfg.current_mjd = mjd
         if sky_provider:
             sky_mag = sky_provider.sky_mag(mjd, t["RA_deg"], t["Dec_deg"], f, air)
         else:
-            sky_mag = sky_mag_arcsec2(f, sky_cfg)
+            sky_mag = sky_mag_arcsec2(
+                f,
+                sky_cfg,
+                sun_alt_deg=sun_alt_mid,
+                airmass=air,
+                sun_sep_deg=sun_sep_mid,
+                sun_az_rel_deg=sun_az_rel_mid,
+            )
         eph = compute_epoch_photom(f, exp_s, alt_now_deg, sky_mag, phot_cfg)
         sky_mags.append(sky_mag)
         if writer_or_none:
@@ -947,12 +1281,23 @@ def _attempt_schedule_one(
             "Dec_deg": round(t["Dec_deg"], 6),
             "best_twilight_time_utc": best_start_utc.isoformat(),
             "visit_start_utc": start_utc.isoformat(),
+            "exposure_mid_utc": exposure_mid_utc.isoformat(),
             "sn_end_utc": end_utc.isoformat(),
             "filter": f,
             "t_exp_s": round(exp_s, 1),
             "airmass": round(air, 3),
             "alt_deg": round(alt_now_deg, 2),
             "sky_mag_arcsec2": round(sky_mag, 2),
+            "sun_alt_deg": round(float(sun_alt_now), 3),
+            "sun_sep_deg": round(float(sun_sep_now), 3),
+            "sun_az_rel_deg": round(float(sun_az_rel_now), 3),
+            "sun_alt_end_deg": round(float(sun_alt_end), 3),
+            "sun_sep_end_deg": round(float(sun_sep_end), 3),
+            "sun_az_rel_end_deg": round(float(sun_az_rel_end), 3),
+            "sun_alt_exposure_mid_deg": round(float(sun_alt_mid), 3),
+            "sun_sep_exposure_mid_deg": round(float(sun_sep_mid), 3),
+            "sun_az_rel_exposure_mid_deg": round(float(sun_az_rel_mid), 3),
+            "twilight_model_extrapolated": twilight_model_extrapolated,
             "moon_sep": round(float(t.get("moon_sep", np.nan)), 2),
             "ZPT": round(eph.ZPTAVG, 3),
             "ZPTERR": round(eph.ZPTERR, 3),
@@ -972,6 +1317,31 @@ def _attempt_schedule_one(
             "cadence_target_d": cad_tgt_eff,
             "cadence_gate_passed": bool(gate_passed),
             "slew_s": round(timing["slew_s"], 2) if f == filters_used[0] else 0.0,
+            "telescope_slew_s": (
+                round(timing.get("telescope_slew_s", 0.0), 2)
+                if f == filters_used[0]
+                else 0.0
+            ),
+            "dome_slew_s": (
+                round(timing.get("dome_slew_s", 0.0), 2)
+                if f == filters_used[0]
+                else 0.0
+            ),
+            "dome_limited": (
+                bool(timing.get("dome_limited", False))
+                if f == filters_used[0]
+                else False
+            ),
+            "dome_azimuth_delta_deg": (
+                round(timing.get("dome_azimuth_delta_deg", 0.0), 3)
+                if f == filters_used[0]
+                else 0.0
+            ),
+            "dome_elevation_delta_deg": (
+                round(timing.get("dome_elevation_delta_deg", 0.0), 3)
+                if f == filters_used[0]
+                else 0.0
+            ),
             "cross_filter_change_s": (
                 round(timing.get("cross_filter_change_s", 0.0), 2)
                 if f == filters_used[0]
@@ -1068,6 +1438,16 @@ def _build_window_summary_row(
     sun_alt_mid = _mid_sun_alt_of_window(win, site)
     policy_filters_mid_csv = ",".join(_policy_filters_mid(sun_alt_mid, cfg))
     alts = [r["alt_deg"] for r in pernight_rows_for_window]
+    sun_seps = []
+    for r in pernight_rows_for_window:
+        for key in ("sun_sep_deg", "sun_sep_end_deg"):
+            if pd.notna(r.get(key)):
+                sun_seps.append(float(r[key]))
+    sun_az_rels = [
+        float(r["sun_az_rel_deg"])
+        for r in pernight_rows_for_window
+        if pd.notna(r.get("sun_az_rel_deg"))
+    ]
     guard_s_total = float(sum(r.get("guard_s", 0.0) for r in pernight_rows_for_window))
     guard_count = int(
         sum(
@@ -1161,6 +1541,16 @@ def _build_window_summary_row(
         "window_duration_s": int(dur_s),
         "window_mid_utc": mid_utc,
         "sun_alt_mid_deg": round(sun_alt_mid, 2),
+        "sun_sep_policy_deg": float(getattr(cfg, "min_sun_sep_deg", 90.0)),
+        "min_sun_sep_deg_observed": (
+            float(np.min(sun_seps)) if sun_seps else np.nan
+        ),
+        "median_sun_sep_deg": (
+            float(np.median(sun_seps)) if sun_seps else np.nan
+        ),
+        "median_sun_az_rel_deg": (
+            float(np.median(sun_az_rels)) if sun_az_rels else np.nan
+        ),
         "policy_filters_mid_csv": policy_filters_mid_csv,
         "window_utilization": round(ws_summary["window_sum"] / max(1.0, dur_s), 4),
         "cap_utilization": round(ws_summary["window_sum"] / max(1.0, cap_s), 4),
@@ -1293,7 +1683,7 @@ def plan_twilight_range_with_caps(
         twilight_delta_mag=cfg.twilight_delta_mag,
     )
     try:
-        sky_provider = RubinSkyProvider(site=site)
+        sky_provider = RubinSkyProvider(site=site, fallback_cfg=sky_cfg)
     except Exception:
         sky_provider = SimpleSkyProvider(sky_cfg, site=site)
     cfg.sky_provider = sky_provider
@@ -1432,6 +1822,7 @@ def plan_twilight_range_with_caps(
                 vals = []
         # Coarse gate should be permissive; strict, per-filter checks happen later.
         req_sep = min(vals) if vals else 0.0
+        req_sun_sep = float(getattr(cfg, "min_sun_sep_deg", 90.0))
 
         current_filter_by_window: Dict[int, str | None] = {}
         swap_count_by_window: Dict[int, int] = {}
@@ -1513,6 +1904,7 @@ def plan_twilight_range_with_caps(
             continue
 
         best_alts, best_times, best_winidx = [], [], []
+        best_sun_alts, best_sun_seps, best_sun_az_rels = [], [], []
         # Precompute per-window ephemerides shared across all targets
         labeled = [
             (i, w)
@@ -1541,6 +1933,7 @@ def plan_twilight_range_with_caps(
                             cfg.twilight_step_min,
                             cfg.min_alt_deg,
                             req_sep,
+                            min_sun_sep_deg=req_sun_sep,
                             precomputed=precomp_by_idx.get(idx_w),
                         )
                     )
@@ -1561,6 +1954,18 @@ def plan_twilight_range_with_caps(
             best_alts.append(max_alt)
             best_times.append(max_time if max_time is not None else pd.NaT)
             best_winidx.append(max_idx if max_time is not None else -1)
+            if max_time is not None:
+                try:
+                    sun_alt_deg, sun_sep_deg, sun_az_rel_deg = sun_target_geometry(
+                        sc, Time(max_time), site
+                    )
+                except Exception:
+                    sun_alt_deg = sun_sep_deg = sun_az_rel_deg = float("nan")
+            else:
+                sun_alt_deg = sun_sep_deg = sun_az_rel_deg = float("nan")
+            best_sun_alts.append(sun_alt_deg)
+            best_sun_seps.append(sun_sep_deg)
+            best_sun_az_rels.append(sun_az_rel_deg)
             subset.loc[_, "_moon_alt"] = best_moon[0]
             subset.loc[_, "_moon_phase"] = best_moon[1]
             subset.loc[_, "_moon_sep"] = best_moon[2]
@@ -1568,6 +1973,9 @@ def plan_twilight_range_with_caps(
         subset["max_alt_deg"] = best_alts
         subset["best_time_utc"] = best_times
         subset["best_window_index"] = best_winidx
+        subset["_sun_alt"] = best_sun_alts
+        subset["_sun_sep"] = best_sun_seps
+        subset["_sun_az_rel"] = best_sun_az_rels
         _t.mark("best_time_scan_with_moon")
 
         visible = subset[
@@ -2106,7 +2514,10 @@ def plan_twilight_range_with_caps(
                         site,
                         minutes=int(getattr(cfg, "primary_m5_minutes", 1) or 1),
                     )
-                    for t in batch:
+                    route_motion_times = _route_motion_seconds_for_batch(
+                        prev, batch, current_time_utc, cfg, site
+                    )
+                    for t, slew_s in zip(batch, route_motion_times):
                         lowz_ia_t = False
                         try:
                             lowz_ia_t = _is_low_z_ia(
@@ -2172,23 +2583,6 @@ def plan_twilight_range_with_caps(
                             )
                         else:
                             first_tmp = None
-                        sep = (
-                            0.0
-                            if prev is None
-                            else great_circle_sep_deg(
-                                prev["RA_deg"],
-                                prev["Dec_deg"],
-                                t["RA_deg"],
-                                t["Dec_deg"],
-                            )
-                        )
-                        slew_s = slew_time_seconds(
-                            sep,
-                            small_deg=cfg.slew_small_deg,
-                            small_time=cfg.slew_small_time_s,
-                            rate_deg_per_s=cfg.slew_rate_deg_per_s,
-                            settle_s=cfg.slew_settle_s,
-                        )
                         if first_tmp is None:
                             cost = 1e9
                         else:
@@ -2426,7 +2820,10 @@ def plan_twilight_range_with_caps(
                             ),
                         )
                         costs: List[float] = []
-                        for t in batch:
+                        route_motion_times = _route_motion_seconds_for_batch(
+                            prev, batch, current_time_utc, cfg, site
+                        )
+                        for t, slew_s in zip(batch, route_motion_times):
                             lowz_ia_t = False
                             try:
                                 lowz_ia_t = _is_low_z_ia(
@@ -2488,23 +2885,6 @@ def plan_twilight_range_with_caps(
                                 )
                             else:
                                 first_tmp = None
-                            sep = (
-                                0.0
-                                if prev is None
-                                else great_circle_sep_deg(
-                                    prev["RA_deg"],
-                                    prev["Dec_deg"],
-                                    t["RA_deg"],
-                                    t["Dec_deg"],
-                                )
-                            )
-                            slew_s = slew_time_seconds(
-                                sep,
-                                small_deg=cfg.slew_small_deg,
-                                small_time=cfg.slew_small_time_s,
-                                rate_deg_per_s=cfg.slew_rate_deg_per_s,
-                                settle_s=cfg.slew_settle_s,
-                            )
                             if first_tmp is None:
                                 cost = 1e9
                             else:
@@ -2821,7 +3201,10 @@ def plan_twilight_range_with_caps(
                             k = max(1, min(len(batch), k_time))
                             amortized_penalty = cfg.filter_change_s / k
                             costs: List[float] = []
-                            for t in batch:
+                            route_motion_times = _route_motion_seconds_for_batch(
+                                prev, batch, current_time_utc, cfg, site
+                            )
+                            for t, slew_s in zip(batch, route_motion_times):
                                 allowed_for_cost = t.get("policy_allowed", t["allowed"]) or []
                                 now_mjd_for_cost = now_mjd_rep
                                 if now_mjd_for_cost is None:
@@ -2868,23 +3251,6 @@ def plan_twilight_range_with_caps(
                                     )
                                 else:
                                     first_tmp = None
-                                sep = (
-                                    0.0
-                                    if prev is None
-                                    else great_circle_sep_deg(
-                                        prev["RA_deg"],
-                                        prev["Dec_deg"],
-                                        t["RA_deg"],
-                                        t["Dec_deg"],
-                                    )
-                                )
-                                slew_s = slew_time_seconds(
-                                    sep,
-                                    small_deg=cfg.slew_small_deg,
-                                    small_time=cfg.slew_small_time_s,
-                                    rate_deg_per_s=cfg.slew_rate_deg_per_s,
-                                    settle_s=cfg.slew_settle_s,
-                                )
                                 if first_tmp is None:
                                     cost = 1e9
                                 else:
@@ -3010,8 +3376,12 @@ def plan_twilight_range_with_caps(
                             has_unseen = any(
                                 c["Name"] not in seen_ids for c in batch
                             )
+                            route_motion_times = _route_motion_seconds_for_batch(
+                                prev, batch, current_time_utc, cfg, site
+                            )
 
                             for idx_item, t in enumerate(batch):
+                                slew_s = route_motion_times[idx_item]
                                 now_mjd_cost = Time(current_time_utc).mjd
                                 # In relaxed mode, ignore cadence gating when
                                 # choosing the first filter for cost.
@@ -3047,23 +3417,6 @@ def plan_twilight_range_with_caps(
                                     )
                                 else:
                                     first_tmp = None
-                                sep = (
-                                    0.0
-                                    if prev is None
-                                    else great_circle_sep_deg(
-                                        prev["RA_deg"],
-                                        prev["Dec_deg"],
-                                        t["RA_deg"],
-                                        t["Dec_deg"],
-                                    )
-                                )
-                                slew_s = slew_time_seconds(
-                                    sep,
-                                    small_deg=cfg.slew_small_deg,
-                                    small_time=cfg.slew_small_time_s,
-                                    rate_deg_per_s=cfg.slew_rate_deg_per_s,
-                                    settle_s=cfg.slew_settle_s,
-                                )
                                 if first_tmp is None:
                                     cost = 1e9
                                 else:
