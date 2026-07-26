@@ -59,20 +59,24 @@ module documentation.
 
 ## Twilight Strategy Highlights
 
-The planner follows a Sun‑altitude policy inspired by twilight brightness.
-Redder filters cope better with bright twilight. The default mapping in
-`PlannerConfig.sun_alt_policy` is:
+The planner uses a hard Sun-altitude policy boundary and a separate,
+photometric twilight calculation. The default `PlannerConfig.sun_alt_policy`
+keeps all loaded Rubin bands eligible throughout the configured twilight
+range:
 
 | Sun altitude (deg) | Allowed filters |
 |--------------------|-----------------|
-| -18 to -15         | y, z, i         |
-| -15 to -12         | z, i, r         |
-| -12 to 0           | i, z, y         |
+| -18 to 0           | all loaded bands |
 
-This mapping is configurable, and feasibility is further pruned by the
-per‑band m₅/SNR gate (see below). There are no hard‑coded bans in the gating
-logic; the final set used in a window is the intersection of feasibility with
-the Sun‑alt policy.
+Sun handling is deliberately stricter than a filter preference. A target must
+remain at least `min_sun_sep_deg=90°` from the Sun in the shared topocentric
+frame, both at best-time selection and across the serialized visit endpoints.
+This is a conservative project policy, not a published Rubin hardware safety limit. The
+filter mapping is configurable, and the final set is the strict intersection
+of the Sun-altitude policy and the per-band m₅/SNR gate; an empty intersection
+rejects the visit. Bright-twilight ranking prefers redder filters, but a band
+is not physically rejected merely from Sun altitude: its target-specific sky
+brightness and m₅/SNR determine feasibility.
 
 ### Band‑diversity mode (per‑filter balance)
 
@@ -164,12 +168,17 @@ the overhead values above follow Rubin Observatory technical notes.
 - Read-noise correction `ΔC_m(τ)` is applied using the standard τ scaling so
   short (e.g. 5 s) visits lose depth appropriately.
 - Sky brightness: when `rubin_sim.skybrightness` is available the exact Rubin
-  model is used; otherwise a fallback combines a twilight term with a
-  Krisciunas & Schaefer (1991) moon-scatter model.
+  RA/Dec/MJD model is used. Otherwise the fallback includes Sun altitude,
+  target airmass, and Sun-relative azimuth, so a Sun-facing field is brighter
+  than an anti-Sun field at the same airmass, plus a Krisciunas & Schaefer
+  (1991) moon-scatter term.
 - Gate: a band is eligible when `m5 ≥ m_target` (SNR ≥ 5). The final decision
   is the intersection with `sun_alt_policy`. If no band passes the m5/SNR gate,
   an empty set is returned—there is no heuristic fallback. Per‑filter Moon
   separations are checked afterwards using `min_moon_sep_by_filter`.
+- Rubin's empirical twilight fit is extrapolated above Sun altitude −11°.
+  Scheduled rows in that regime are marked
+  `twilight_model_extrapolated=True`.
 
 ## Minimal example
 
@@ -198,13 +207,17 @@ priority strategy) and filenames like
 ## Outputs
 
 The per-SN planning CSV now includes an `sn_end_utc` column giving the
-end of each visit (start time plus total scheduled duration).
+end of each visit (start time plus total scheduled duration), plus Sun geometry
+at both visit endpoints (`sun_*_deg` and `sun_*_end_deg`). Per-filter sky,
+airmass, and SIMLIB photometry are evaluated at `exposure_mid_utc`, with the
+matching Sun geometry recorded in `sun_*_exposure_mid_deg`.
 
 The night/window summary CSV now includes the following columns capturing
 twilight timing and basic science metrics:
 
 - `window_start_utc`, `window_end_utc`, `window_duration_s`, `window_mid_utc`
-- `sun_alt_mid_deg`, `policy_filters_mid_csv`
+- `sun_alt_mid_deg`, `sun_sep_policy_deg`, `min_sun_sep_deg_observed`,
+  `median_sun_sep_deg`, `median_sun_az_rel_deg`, `policy_filters_mid_csv`
 - `window_utilization`, `cap_utilization`, `cap_source`
 - `median_sky_mag_arcsec2`, `median_alt_deg`
 - `cad_median_abs_err_by_filter_csv`, `cad_within_pct_by_filter_csv`

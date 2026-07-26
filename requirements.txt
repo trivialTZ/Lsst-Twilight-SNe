@@ -1,5 +1,7 @@
 numpy
 pandas
 astropy
+rubin-sim
+rubin-scheduler
 tqdm
 pytest
