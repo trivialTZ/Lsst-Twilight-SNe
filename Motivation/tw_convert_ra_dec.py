@@ -69,10 +69,20 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
                            require_all_mapped: bool = False,
                            redshift_col: str | None = None,
                            require_redshift_match: bool = False,
-                           redshift_atol: float = 5.1e-6) -> tuple[pd.DataFrame, dict]:
+                           redshift_atol: float = 5.1e-6,
+                           allow_unset_simlib_redshift: bool = False,
+                           simlib_redshift_set_threshold: float = 1.0e-5,
+) -> tuple[pd.DataFrame, dict]:
     """
     Replace RA/DEC in `df` using RA/DEC from SIMLIB matched by `id_col`.
     overwrite: 'all' or 'nan_only'
+
+    SNANA applies a per-LIBID ``REDSHIFT`` only when it is greater than
+    1e-5.  With ``allow_unset_simlib_redshift=True``, finite SIMLIB values
+    at or below that threshold are therefore treated as an explicit
+    "generate from the input redshift distribution" sentinel and exempted
+    from the equality check. Missing/non-numeric SIMLIB redshifts still fail
+    when ``require_redshift_match`` is enabled.
     """
     if id_col not in df.columns:
         raise KeyError(f"`{id_col}` not found in DataFrame.")
@@ -108,10 +118,22 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
 
     n_redshift_compared = 0
     n_redshift_mismatch = 0
+    n_redshift_unset_exempt = 0
     if redshift_col is not None:
         fitres_redshift = pd.to_numeric(merged[redshift_col], errors="coerce")
         simlib_redshift = pd.to_numeric(merged["REDSHIFT_simlib"], errors="coerce")
-        comparable = mapped_rows & fitres_redshift.notna() & simlib_redshift.notna()
+        simlib_redshift_unset = (
+            mapped_rows
+            & simlib_redshift.notna()
+            & (simlib_redshift <= float(simlib_redshift_set_threshold))
+            & bool(allow_unset_simlib_redshift)
+        )
+        redshift_required = mapped_rows & ~simlib_redshift_unset
+        comparable = (
+            redshift_required
+            & fitres_redshift.notna()
+            & simlib_redshift.notna()
+        )
         redshift_match = np.isclose(
             fitres_redshift.to_numpy(float),
             simlib_redshift.to_numpy(float),
@@ -121,8 +143,9 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
         )
         n_redshift_compared = int(comparable.sum())
         n_redshift_mismatch = int((comparable & ~redshift_match).sum())
+        n_redshift_unset_exempt = int(simlib_redshift_unset.sum())
         if require_redshift_match:
-            missing_redshift = mapped_rows & ~comparable
+            missing_redshift = redshift_required & ~comparable
             if bool(missing_redshift.any()) or n_redshift_mismatch:
                 bad = merged.loc[missing_redshift | (comparable & ~redshift_match), id_col]
                 bad_ids = bad.dropna().astype(str).drop_duplicates().head(10).tolist()
@@ -163,6 +186,7 @@ def fix_ra_dec_from_simlib(df: pd.DataFrame,
         n_rows_unmapped=n_rows_unmapped,
         n_redshift_compared=n_redshift_compared,
         n_redshift_mismatch=n_redshift_mismatch,
+        n_redshift_unset_exempt=n_redshift_unset_exempt,
         ra_nan_before=before_ra_nan, ra_nan_after=after_ra_nan,
         dec_nan_before=before_dec_nan, dec_nan_after=after_dec_nan,
         n_ra_changed=n_ra_changed, n_dec_changed=n_dec_changed

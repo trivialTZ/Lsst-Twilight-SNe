@@ -17,6 +17,7 @@ from Motivation.tw_binning import (
     sigma_mu_per_sn,
     write_binned_catalogs_v2,
 )
+from Motivation.data.figure5_like import _raw_mu_sigma
 from Motivation.tw_io import salt_covariance_mB_x1_c
 
 
@@ -165,6 +166,35 @@ def test_missing_covariance_fails_instead_of_silently_assuming_zero() -> None:
 
     with pytest.raises(ValueError, match="COV_mB_x1"):
         salt_covariance_mB_x1_c(df)
+
+
+def test_raw_mu_sigma_uses_x0_basis_cross_covariances() -> None:
+    """The SNR diagnostic must use the same full covariance as binning."""
+
+    df = pd.DataFrame(
+        {
+            "x0": [2.5e-4],
+            "x0ERR": [1.5e-6],
+            "mBERR": [0.0066],
+            "x1ERR": [0.4],
+            "cERR": [0.02],
+            "COV_x1_x0": [1.0e-7],
+            "COV_c_x0": [-2.0e-9],
+            "COV_x1_c": [5.0e-4],
+            "SIM_alpha": [1.5],
+            "SIM_beta": [8.0],
+        }
+    )
+    covariance = salt_covariance_mB_x1_c(df)
+    expected2 = (
+        covariance["VAR_mB"]
+        + 0.14**2 * covariance["VAR_x1"]
+        + 3.1**2 * covariance["VAR_c"]
+        + 2.0 * 0.14 * covariance["COV_mB_x1"]
+        - 2.0 * 3.1 * covariance["COV_mB_c"]
+        - 2.0 * 0.14 * 3.1 * covariance["COV_x1_c"]
+    ).iloc[0]
+    assert _raw_mu_sigma(df)[0] == pytest.approx(np.sqrt(expected2))
 
 
 def test_unbinned_exports_record_fixed_coefficients_and_recompute_sigma(

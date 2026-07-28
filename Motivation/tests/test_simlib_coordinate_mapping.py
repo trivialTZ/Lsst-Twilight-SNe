@@ -63,3 +63,28 @@ def test_require_redshift_match_rejects_reassigned_libid(tmp_path: Path) -> None
             redshift_col="z",
             require_redshift_match=True,
         )
+
+
+def test_unset_simlib_redshift_can_be_exempted_explicitly(tmp_path: Path) -> None:
+    simlib = _write_simlib(tmp_path / "zero-redshift.SIMLIB")
+    simlib.write_text(
+        simlib.read_text().replace("REDSHIFT: 0.03000", "REDSHIFT: 0.00000")
+    )
+    frame = pd.DataFrame(
+        {"SIM_LIBID": [7], "RA": [9.0], "DEC": [-9.0], "z": [0.08]}
+    )
+
+    fixed, stats = fix_ra_dec_from_simlib(
+        frame,
+        simlib,
+        require_all_mapped=True,
+        redshift_col="z",
+        require_redshift_match=True,
+        allow_unset_simlib_redshift=True,
+    )
+
+    assert fixed.loc[0, "RA"] == 123.4
+    assert fixed.loc[0, "DEC"] == -45.6
+    assert stats["n_redshift_compared"] == 0
+    assert stats["n_redshift_mismatch"] == 0
+    assert stats["n_redshift_unset_exempt"] == 1

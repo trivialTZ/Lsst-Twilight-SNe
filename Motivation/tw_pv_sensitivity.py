@@ -1306,6 +1306,7 @@ def load_v7_pv_samples(
     wfd_twboost_fitres_path: str | Path | None = None,
     twilight_fitres_path: str | Path | None = None,
     wfd_simlib_path: str | Path | None = None,
+    wfd_twboost_simlib_path: str | Path | None = None,
     twilight_simlib_path: str | Path | None = None,
 ) -> dict[str, FlowInput]:
     """Rebuild the PV samples used in the v7 fsigma8 forecast notebook.
@@ -1368,6 +1369,10 @@ def load_v7_pv_samples(
         )
     else:
         wfd_simlib_path = Path(wfd_simlib_path)
+    if wfd_twboost_simlib_path is None:
+        wfd_twboost_simlib_path = wfd_simlib_path
+    else:
+        wfd_twboost_simlib_path = Path(wfd_twboost_simlib_path)
     if twilight_simlib_path is None:
         twilight_simlib_path = first_existing_path(
             root
@@ -1440,7 +1445,7 @@ def load_v7_pv_samples(
     )
     fit_qc_wfd_twboost_fixed, _ = fix_ra_dec_from_simlib(
         fit_qc_wfd_twboost,
-        wfd_simlib_path,
+        wfd_twboost_simlib_path,
         id_col="SIM_LIBID",
         ra_col="RA",
         dec_col="DEC",
@@ -1498,6 +1503,7 @@ def load_v7_pv_samples(
         require_all_mapped=True,
         redshift_col="z",
         require_redshift_match=True,
+        allow_unset_simlib_redshift=True,
     )
 
     z_split = 0.1
@@ -1801,14 +1807,27 @@ def plot_fs8_overview(
     from matplotlib.lines import Line2D
     import matplotlib.patches as mpatches
 
-    handles = [
-        mpatches.Patch(facecolor="lightgray", edgecolor="lightgray"),
-        Line2D([0], [0], color="k", linestyle="--", lw=1.8),
-        plt.scatter([], [], s=_size_for_label("WFD Y1"), c="white", edgecolors="k"),
-        plt.scatter([], [], s=_size_for_label("WFD Y3"), c="white", edgecolors="k"),
-        plt.scatter([], [], s=_size_for_label("WFD Y5"), c="white", edgecolors="k"),
-    ]
-    labels = ["Redshift range", "Cosmic variance", "WFD 1 yr", "WFD 3 yr", "WFD 5 yr"]
+    handles = [mpatches.Patch(facecolor="lightgray", edgecolor="lightgray")]
+    labels = ["Redshift range"]
+    if callable(cosmic_variance_fn):
+        handles.append(Line2D([0], [0], color="k", linestyle="--", lw=1.8))
+        labels.append("Illustrative cosmic variance")
+    for scenario, legend_label in (
+        ("WFD Y1", "WFD 1 yr"),
+        ("WFD Y3", "WFD 3 yr"),
+        ("WFD Y5", "WFD 5 yr"),
+    ):
+        if scenario in results_by_label:
+            handles.append(
+                plt.scatter(
+                    [],
+                    [],
+                    s=_size_for_label(scenario),
+                    c="white",
+                    edgecolors="k",
+                )
+            )
+            labels.append(legend_label)
     for label in results_by_label:
         if "+" in label:
             handles.append(
